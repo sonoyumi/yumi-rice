@@ -1,0 +1,6 @@
+{
+    "workbench.startupEditor": "none",
+    "python.analysis.typeCheckingMode": "basic",
+    "workbench.colorTheme": "GitHub Dark Dimmed",
+    "python.analysis.languageServerMode": "light"
+}

@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+# rice — синхронизация конфигов между системой и этим репозиторием
+set -uo pipefail
+repo="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+man_home="$repo/manifest.txt"
+man_sys="$repo/system-manifest.txt"
+
+list() { grep -vE '^[[:space:]]*(#|$)' "$1"; }
+
+# Личный слой вне репозитория (не публикуется): ~/.config/rice-local
+#   home/<путь>      — личная версия файла из ~, используется вместо публичной из home/
+#   manifest.txt     — личные файлы, которых нет в публичном manifest.txt
+#   hyde-patches.sh  — личная версия правок HyDE
+# RICE_LOCAL=off ./rice push — поставить чистую публичную версию (сам слой не меняется).
+local_dir="${XDG_CONFIG_HOME:-$HOME/.config}/rice-local"
+[ "${RICE_LOCAL:-on}" = "off" ] && local_dir=""
+home_list() { list "$man_home"; if [ -n "$local_dir" ] && [ -f "$local_dir/manifest.txt" ]; then list "$local_dir/manifest.txt"; fi; }
+# Откуда брать файл: «фильтр путь». Личная версия хранится как в системе, без меток.
+source_of() {
+    if [ -n "$local_dir" ] && [ -e "$local_dir/home/$1" ]; then echo "cat $local_dir/home/$1"
+    else echo "to_sys $repo/home/$1"; fi
+}
+
+# В репозитории личный путь и логин заменены метками: @HOME@ и @USER@ (строка User= автовхода).
+# pull ставит метки, push/diff подставляют значения текущего пользователя.
+to_repo() { sed -e "s|$HOME|@HOME@|g" -e "s|^User=$USER\$|User=@USER@|"; }
+to_sys()  { sed -e "s|@HOME@|$HOME|g" -e "s|^User=@USER@\$|User=$USER|"; }
+# Скопировать через фильтр, сохранив права: put фильтр откуда куда
+put() { cp -p "$2" "$3" && "$1" < "$2" > "$3"; }
+
+usage() {
+    cat << 'EOF'
+./rice pull           система → репозиторий
+./rice diff [путь]    чем система отличается от репозитория
+./rice push           репозиторий → система (файлы в ~)
+./rice push-system    репозиторий → /etc (с diff и подтверждением)
+./rice reload         перечитать Hyprland, Waybar, swaync, systemd --user
+./rice add <путь>...  начать отслеживать файл(ы)
+./rice hyde-patches   применить наши правки к файлам HyDE заново
+./rice doctor         быстрая проверка системы
+EOF
+}
+
+case "${1:-help}" in
+pull)
+    while read -r p; do
+        src="$HOME/$p"
+        [ -e "$src" ] || { echo "нет в системе: ~/$p"; continue; }
+        read -r f from < <(source_of "$p")
+        if [ "$f" = cat ]; then cp -p "$src" "$from"          # личная версия обновляется в слое
+        else dst="$repo/home/$p"; mkdir -p "$(dirname "$dst")"; put to_repo "$src" "$dst"; fi
+    done < <(home_list)
+    while read -r p; do
+        dst="$repo/system$p"
+        if [ -r "$p" ]; then mkdir -p "$(dirname "$dst")"; put to_repo "$p" "$dst"
+        elif [ -e "$p" ]; then mkdir -p "$(dirname "$dst")"; sudo cat "$p" | to_repo > "$dst"
+        else echo "нет в системе: $p"; fi
+    done < <(list "$man_sys")
+    git -C "$repo" status --short 2>/dev/null || true
+    ;;
+diff)
+    filter="${2:-}"
+    while read -r p; do
+        [ -n "$filter" ] && [[ "$p" != *"$filter"* ]] && continue
+        read -r f from < <(source_of "$p")
+        [ -e "$from" ] || continue
+        diff -u --label "repo: $p" --label "система: ~/$p" <("$f" < "$from") "$HOME/$p" 2>/dev/null
+    done < <(home_list)
+    while read -r p; do
+        [ -n "$filter" ] && [[ "$p" != *"$filter"* ]] && continue
+        [ -e "$repo/system$p" ] && [ -r "$p" ] || continue
+        diff -u --label "repo: $p" --label "система: $p" <(to_sys < "$repo/system$p") "$p" 2>/dev/null
+    done < <(list "$man_sys")
+    true
+    ;;
+push)
+    while read -r p; do
+        read -r f src < <(source_of "$p"); dst="$HOME/$p"
+        [ -e "$src" ] || continue
+        if ! cmp -s <("$f" < "$src") "$dst"; then
+            mkdir -p "$(dirname "$dst")"
+            # Бэкап вне ~/.config: конфиги с source = dir/* (hypridle) подхватили бы его
+            bak="${XDG_STATE_HOME:-$HOME/.local/state}/rice-bak/$p"
+            if [ -e "$dst" ]; then mkdir -p "$(dirname "$bak")"; cp -p "$dst" "$bak"; fi
+            put "$f" "$src" "$dst"
+            echo "→ ~/$p   (старая версия: ${bak/#$HOME/\~})$([ "$f" = cat ] && echo '   [личная версия]')"
+        fi
+    done < <(home_list)
+    ;;
+push-system)
+    while read -r p; do
+        src="$repo/system$p"
+        [ -e "$src" ] || continue
+        tmp="$(mktemp)"; to_sys < "$src" > "$tmp"
+        if ! sudo cmp -s "$tmp" "$p"; then
+            echo "=================== $p"
+            sudo diff -u --label "сейчас" --label "из репозитория" "$p" "$tmp"
+            read -rp "Применить $p? [y/N] " a < /dev/tty
+            if [ "$a" = "y" ]; then
+                sudo cp -p "$p" "$p.rice-bak" 2>/dev/null
+                sudo install -D -m 644 "$tmp" "$p" && echo "применено (старая версия: $p.rice-bak)"
+            fi
+        fi
+        rm -f "$tmp"
+    done < <(list "$man_sys")
+    cat << 'EOF'
+
+После изменений:
+  grub     → sudo grub-mkconfig -o /boot/grub/grub.cfg && sudo sed -i '/echo.*Loading/d' /boot/grub/grub.cfg
+  sysctl   → sudo sysctl --system
+  zram     → перезагрузка
+  earlyoom → sudo systemctl restart earlyoom
+  bluetooth→ sudo systemctl restart bluetooth
+EOF
+    ;;
+reload)
+    systemctl --user daemon-reload
+    hyprctl reload >/dev/null && echo "Hyprland: ok"
+    hyprctl configerrors
+    hyde-shell waybar --set yumi >/dev/null 2>&1 && echo "Waybar: ok"
+    "$HOME/.local/bin/cc-build" compact 2>/dev/null
+    swaync-client -R >/dev/null 2>&1; swaync-client -rs >/dev/null 2>&1 && echo "swaync: ok"
+    ;;
+add)
+    shift
+    for f in "$@"; do
+        a="$(readlink -f "$f")" || { echo "нет файла: $f"; continue; }
+        case "$a" in
+            "$HOME"/*)
+                rel="${a#"$HOME"/}"
+                grep -qxF "$rel" "$man_home" || echo "$rel" >> "$man_home"
+                mkdir -p "$repo/home/$(dirname "$rel")"; put to_repo "$a" "$repo/home/$rel"
+                echo "отслеживается: ~/$rel" ;;
+            /etc/*)
+                grep -qxF "$a" "$man_sys" || echo "$a" >> "$man_sys"
+                mkdir -p "$repo/system$(dirname "$a")"; sudo cat "$a" | to_repo > "$repo/system$a"
+                echo "отслеживается: $a" ;;
+            *) echo "поддерживаются только файлы в ~ и /etc: $a" ;;
+        esac
+    done
+    ;;
+hyde-patches)
+    if [ -n "$local_dir" ] && [ -x "$local_dir/hyde-patches.sh" ]; then "$local_dir/hyde-patches.sh"; else "$repo/hyde-patches.sh"; fi
+    ;;
+doctor)
+    echo "--- ошибки конфига Hyprland:"; hyprctl configerrors
+    echo "--- режим HyDE:"; grep -oP 'HYPR_WORKFLOW="\K[^"]*' "$HOME/.local/state/hyde/staterc"
+    echo "--- процессы:"
+    for x in waybar swaync hypridle awww-daemon; do
+        pgrep -x "$x" >/dev/null && echo "  ✓ $x" || echo "  ✗ $x НЕ запущен"
+    done
+    echo "--- служба обоев для блокировки:"; systemctl --user is-active hyprlock-bg.service
+    echo "--- память:"; free -h | sed -n '1,3p'; zramctl --noheadings 2>/dev/null
+    echo "--- расхождения с репозиторием:"; "$0" diff | grep -c '^@@' | sed 's/^/  изменённых блоков: /'
+    ;;
+*)
+    usage
+    ;;
+esac

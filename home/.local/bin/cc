@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+# Центр управления:
+#   cc <wifi|bt|vpn|saver|mic> <toggle|state>   — кнопки (wifi/bt/mic: двойной клик открывает меню)
+#   cc <vol|micvol> <get|ЧИСЛО>                 — ползунки громкости и микрофона
+#   cc view <compact|notifs>                    — вид центра
+#   cc menu <sound>                             — закрыть центр и открыть наше меню
+what="$1"; act="$2"
+bin="$HOME/.local/bin"
+
+open_menu() { swaync-client -cp -sw >/dev/null 2>&1; setsid -f "$bin/$1" >/dev/null 2>&1; }
+
+case "$what" in
+    vol|micvol)
+        [ "$what" = "vol" ] && target="@DEFAULT_AUDIO_SINK@" || target="@DEFAULT_AUDIO_SOURCE@"
+        if [ "$act" = "get" ]; then
+            wpctl get-volume "$target" | awk '{printf "%d", $2*100}'
+        else
+            wpctl set-volume "$target" "${act%.*}%"
+        fi
+        exit 0 ;;
+    view)
+        echo switching > /tmp/cc-watch.pid
+        "$bin/cc-build" "$act"
+        swaync-client -op -sw
+        "$bin/cc-open" --watch
+        exit 0 ;;
+    menu)
+        case "$act" in sound) open_menu menu-sound ;; esac
+        exit 0 ;;
+esac
+
+state() {
+    case "$what" in
+        wifi)  [ "$(nmcli radio wifi)" = "enabled" ] ;;
+        bt)    busctl get-property org.bluez /org/bluez/hci0 org.bluez.Adapter1 Powered 2>/dev/null | grep -q true ;;
+        vpn)   [ "$(timeout 0.5 expressvpnctl -t 1 get connectionstate 2>/dev/null)" = "Connected" ] ;;
+        saver) busctl get-property org.freedesktop.UPower.PowerProfiles /org/freedesktop/UPower/PowerProfiles \
+                   org.freedesktop.UPower.PowerProfiles ActiveProfile 2>/dev/null | grep -q '"power-saver"' ;;
+        mic)   ! wpctl get-volume @DEFAULT_AUDIO_SOURCE@ | grep -q MUTED ;;
+    esac
+}
+
+if [ "$act" = "state" ]; then
+    if state; then echo true; else echo false; fi
+    exit 0
+fi
+
+do_toggle() {
+    case "$what" in
+        wifi)  if state; then nmcli radio wifi off; else nmcli radio wifi on; fi ;;
+        bt)    if state; then bluetoothctl power off; else bluetoothctl power on; fi ;;
+        vpn)   if state; then expressvpnctl disconnect; else expressvpnctl connect; fi; pkill -RTMIN+10 waybar ;;
+        saver) if state; then powerprofilesctl set balanced; else powerprofilesctl set power-saver; fi; pkill -RTMIN+8 waybar ;;
+        mic)   wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle ;;
+    esac
+} >/dev/null 2>&1
+
+# Двойной клик (в пределах 0.4 с) для wifi/bt/mic — открыть меню вместо переключения
+case "$what" in
+    wifi) menu="menu-network" ;;
+    bt)   menu="menu-bluetooth" ;;
+    mic)  menu="menu-mic" ;;
+    *)    do_toggle; exit 0 ;;
+esac
+
+f="/tmp/cc-click-$what"
+now=$(date +%s%3N)
+if [ -f "$f" ] && (( now - $(cat "$f") < 400 )); then
+    rm -f "$f"
+    open_menu "$menu"
+    exit 0
+fi
+echo "$now" > "$f"
+(
+    sleep 0.4
+    if [ -f "$f" ] && [ "$(cat "$f")" = "$now" ]; then rm -f "$f"; do_toggle; fi
+) >/dev/null 2>&1 &
+disown

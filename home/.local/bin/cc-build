@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Собрать config.json центра из cc-<вид>.json со значком громкости под текущее устройство вывода
+view="${1:-compact}"
+dir="$HOME/.config/swaync"
+icon="󰕾"
+case "$(pactl get-default-sink 2>/dev/null)" in bluez*) icon="󱡏" ;; esac
+jq --arg i "$icon" 'if .["widget-config"]["slider#vol"] then .["widget-config"]["slider#vol"].label = $i else . end' \
+   "$dir/cc-$view.json" > /tmp/cc-build.json
+if ! cmp -s /tmp/cc-build.json "$dir/config.json"; then
+    cp /tmp/cc-build.json "$dir/config.json"
+    swaync-client -R >/dev/null 2>&1
+fi

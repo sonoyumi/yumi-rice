@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Откат: вернуть название окна в центр и часы на прежнее место
+set -euo pipefail
+B="$HOME/.local/share/waybar-center-backup"
+[ -f "$B/created_at" ] || { echo "Бэкап не найден: $B"; exit 1; }
+cp -a "$B/config.jsonc"   "$HOME/.config/waybar/config.jsonc"
+cp -a "$B/yumi.jsonc"     "$HOME/.config/waybar/layouts/yumi.jsonc"
+cp -a "$B/user-style.css" "$HOME/.config/waybar/user-style.css"
+pkill -SIGUSR2 -x waybar || true
+echo "Готово: панель как на $(cat "$B/created_at")."

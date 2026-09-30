@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Полный откат виджета процессов: вернуть конфиги Waybar из бэкапа, удалить скрипты
+set -euo pipefail
+B="$HOME/.local/share/top-procs-backup"
+[ -f "$B/created_at" ] || { echo "Бэкап не найден: $B"; exit 1; }
+cp -a "$B/config.jsonc"   "$HOME/.config/waybar/config.jsonc"
+cp -a "$B/yumi.jsonc"     "$HOME/.config/waybar/layouts/yumi.jsonc"
+cp -a "$B/user-style.css" "$HOME/.config/waybar/user-style.css"
+rm -f "$HOME/.local/bin/waybar-top" "$HOME/.local/bin/menu-top" /tmp/waybar-top-cpu.json
+pkill -SIGUSR2 -x waybar || true
+echo "Готово: виджет процессов удалён, конфиги от $(cat "$B/created_at")."

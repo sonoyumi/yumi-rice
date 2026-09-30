@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+w="$(grep -oP 'HYPR_WORKFLOW="\K[^"]*' "$HOME/.local/state/hyde/staterc" 2>/dev/null)"
+case "$w" in
+    editing)    i="󰏫"; t="Editing" ;;
+    gaming)     i="󰊗"; t="Gaming" ;;
+    powersaver) i="󰌪"; t="Powersaver" ;;
+    snappy)     i="󱐋"; t="Snappy" ;;
+    *)          i="󰍹"; t="Main" ;;
+esac
+printf '{"text":"%s %s","tooltip":"Режим HyDE: %s","class":"%s"}\n' "$i" "$t" "$t" "${t,,}"

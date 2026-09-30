@@ -1,0 +1,3 @@
+#!/bin/sh
+# Запуск Firefox внутри firefox.slice (лимиты памяти — в ~/.config/systemd/user/firefox.slice)
+exec systemd-run --user --scope --slice=firefox.slice --collect --quiet -- /usr/lib/firefox/firefox "$@"

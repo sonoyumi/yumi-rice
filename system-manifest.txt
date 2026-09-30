@@ -1,0 +1,12 @@
+# Системные файлы (абсолютные пути). Применяются только через ./rice push-system (с подтверждением).
+
+/etc/default/grub
+/etc/sddm.conf.d/zz-autologin.conf
+/etc/systemd/zram-generator.conf
+/etc/sysctl.d/99-vm-zram-parameters.conf
+/etc/sysctl.d/99-quiet-printk.conf
+/etc/tmpfiles.d/mglru.conf
+/etc/default/earlyoom
+/etc/systemd/user.conf.d/10-timeout.conf
+/etc/bluetooth/main.conf
+/etc/security/faillock.conf

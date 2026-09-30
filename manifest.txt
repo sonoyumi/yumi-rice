@@ -1,0 +1,76 @@
+# Файлы из ~ (пути относительно $HOME), которые хранятся в репозитории.
+# Добавлять: ./rice add <путь>
+
+# --- Скрипты: меню и движок ---
+.local/bin/rofi-panel
+.local/bin/powermenu
+.local/bin/menu-network
+.local/bin/menu-bluetooth
+.local/bin/menu-sound
+.local/bin/menu-mic
+.local/bin/menu-power-profile
+.local/bin/menu-clipboard
+.local/bin/menu-workspaces
+.local/bin/menu-workflows
+.local/bin/menu-player
+.local/bin/player-cover
+.local/share/nm-rofi/rofi
+
+# --- Скрипты: центр управления ---
+.local/bin/cc
+.local/bin/cc-open
+.local/bin/cc-build
+.local/bin/cc-bar
+
+# --- Скрипты: Waybar ---
+.local/bin/waybar-lang
+.local/bin/waybar-ppd
+.local/bin/waybar-workflow
+.local/bin/waybar-vpn
+.local/bin/waybar-player
+
+# --- Скрипты: синхронизация с обоями и темой ---
+.local/bin/hyprlock-bg-sync
+.local/bin/hyprlock-bg-watch
+.local/bin/swaync-kitty-sync
+
+# --- Hyprland ---
+.config/hypr/hyprland.lua
+.config/hypr/monitors.lua
+.config/hypr/monitors.conf
+.config/hypr/hyprlock.conf
+.config/hypr/hyprlock/layout20.conf
+.config/hypr/hypridle.conf
+.config/hypr/hypridle/yumi.conf
+
+# --- Waybar ---
+.config/waybar/layouts/yumi.jsonc
+.config/waybar/styles/yumi.css
+.config/waybar/user-style.css
+
+# --- swaync ---
+.config/swaync/cc-compact.json
+.config/swaync/cc-notifs.json
+.config/swaync/user-style.css
+
+# --- rofi, сеть, терминал ---
+.config/rofi/config.rasi
+.config/networkmanager-dmenu/config.ini
+.config/kitty/kitty.conf
+
+# --- systemd (пользователь) ---
+.config/systemd/user/hyprlock-bg.service
+.config/systemd/user/wireplumber.service.d/timeout.conf
+.config/systemd/user/firefox.slice
+.local/bin/firefox
+.local/share/applications/firefox.desktop
+.config/mozilla/firefox/7szxn5z0.default-release/user.js
+.config/Code/User/settings.json
+.config/systemd/user/dev.slice
+.local/bin/lim
+.config/systemd/user/swaync.service.d/10-cairo.conf
+.local/bin/menu-top
+.local/bin/waybar-top
+.local/bin/top-procs-uninstall
+.local/bin/setup-snapshots
+.local/bin/waybar-center-uninstall

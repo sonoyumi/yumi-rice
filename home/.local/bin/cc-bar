@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Значок уведомлений для Waybar: 󰂚 есть уведомления (+число), 󰂜 нет, 󰂛 «Не беспокоить»
+swaync-client -swb | jq -c --unbuffered '
+  .alt as $a | (.text // "") as $t |
+  (if ($a | test("dnd")) then "󰂛"
+   elif ($a | test("notification")) then "󰂚"
+   else "󰂜" end) as $i |
+  .text = (if $t == "" or $t == "0" or $t == " " then $i else "\($i) \($t)" end)'

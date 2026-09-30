@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Индикатор раскладки для Waybar (замена hyprland/language для Lua-версии Hyprland)
+show() {
+    km="$(hyprctl devices -j | jq -r '.keyboards[] | select(.main) | .active_keymap' | head -1)"
+    case "$km" in
+        *Russian*)   s="RU" ;;
+        *Ukrain*)    s="UA" ;;
+        *English*)   s="EN" ;;
+        *)           s="${km:0:2}" ;;
+    esac
+    printf '{"text":"󰌌 %s","tooltip":"%s"}\n' "$s" "$km"
+}
+
+show
+sock="$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket2.sock"
+if command -v socat >/dev/null && [ -S "$sock" ]; then
+    # Мгновенно: слушаем события Hyprland о смене раскладки
+    socat -U - "UNIX-CONNECT:$sock" | while read -r line; do
+        case "$line" in activelayout*) show ;; esac
+    done
+else
+    # Запасной вариант: проверка 2–3 раза в секунду
+    last=""
+    while sleep 0.4; do
+        cur="$(show)"; [ "$cur" != "$last" ] && echo "$cur"; last="$cur"
+    done
+fi

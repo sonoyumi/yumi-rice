@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Индикатор ExpressVPN для Waybar (скрыт, когда VPN выключен)
+state="$(timeout 2 expressvpnctl -t 1 get connectionstate 2>/dev/null)"
+case "$state" in
+    Connected)
+        region="$(timeout 2 expressvpnctl -t 1 get region 2>/dev/null)"
+        [ "$region" = "smart" ] && region="$(timeout 2 expressvpnctl -t 1 get smart 2>/dev/null)"
+        printf '{"text":"󰖂 VPN","tooltip":"VPN: %s","class":"connected"}\n' "${region:-on}" ;;
+    Connecting*|Reconnecting*)
+        printf '{"text":"󰖂 VPN","tooltip":"VPN: подключение…","class":"connecting"}\n' ;;
+    *)  printf '{"text":"","class":"off"}\n' ;;
+esac

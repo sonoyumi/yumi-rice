@@ -1,0 +1,10 @@
+# Язык проекта на GitHub: скрипты без расширения определяются по shebang (bash / python3)
+home/** linguist-vendored=false linguist-detectable=true
+rice linguist-language=Shell
+hyde-patches.sh linguist-language=Shell
+# Системные конфиги из /etc — не код
+system/** linguist-detectable=false
+
+# Скриншоты
+*.png binary
+*.jpg binary

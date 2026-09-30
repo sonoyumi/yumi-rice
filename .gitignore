@@ -1,0 +1,13 @@
+# Резервные копии
+*.bak
+*.rice-bak
+
+# Секреты и личное — никогда не коммитить
+**/current.env
+**/avatar.*
+
+# Генерируются скриптами — хранить не нужно
+home/.config/swaync/config.json
+home/.config/swaync/kitty-colors.css
+home/.config/rofi/themes/
+home/.config/waybar/config.jsonc

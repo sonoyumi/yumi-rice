@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Обзор рабочих столов (без плагина): список столов и приложений на них
+panel="$HOME/.local/bin/rofi-panel"
+export PANEL_HALF=260
+
+active="$(hyprctl activeworkspace -j | jq '.id')"
+ids="$(hyprctl workspaces -j | jq -r '[.[] | select(.id > 0) | .id] | sort | .[]')"
+
+# Приложения на каждом столе: короткие имена (org.telegram.desktop → telegram)
+declare -A apps
+while IFS=$'\t' read -r id list; do
+    apps[$id]="$list"
+done < <(hyprctl clients -j | jq -r '
+    map(select(.workspace.id > 0))
+    | group_by(.workspace.id)
+    | map("\(.[0].workspace.id)\t" + ([.[].class
+        | split(".") | (if (.[-1] == "desktop" and length > 1) then .[-2] else .[-1] end)
+        | ascii_downcase] | unique | join(" · ")))
+    | .[]')
+
+rows=(); sel=0; i=0
+for id in $ids; do
+    list="${apps[$id]:-empty}"
+    mark=""; if [ "$id" = "$active" ]; then mark="   ✓"; sel=$i; fi
+    rows+=("󰍹   ${id}   ${list}${mark}")
+    i=$((i + 1))
+done
+
+# Первый свободный номер для нового стола
+free=1; while grep -qx "$free" <<<"$ids"; do free=$((free + 1)); done
+rows+=("󰐕   New workspace (${free})")
+
+n=${#rows[@]}; (( n > 10 )) && n=10
+choice="$(printf '%s\n' "${rows[@]}" | "$panel" "Workspaces" "$n" --center -no-custom \
+    -selected-row "$sel" -theme-str 'window {width: 26em;}')"
+[ -z "$choice" ] && exit 0
+
+if [[ "$choice" == *"New workspace"* ]]; then
+    target="$free"
+else
+    target="$(awk '{print $2}' <<<"$choice")"
+fi
+hyprctl dispatch "hl.dsp.focus({ workspace = ${target} })" >/dev/null

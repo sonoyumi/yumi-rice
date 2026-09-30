@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Открыть/закрыть центр управления (swaync).
+#   cc-open          — из Waybar: закрывается, если увести мышь
+#   cc-open --bind   — по бинду: мышь игнорируется
+# Всегда: закрывается при новом окне; при закрытии возвращается компактный вид.
+far=160
+dir="$HOME/.config/swaync"
+cfg="$dir/config.json"
+compact="$dir/cc-compact.json"
+pidf="/tmp/cc-watch.pid"
+modef="/tmp/cc-mode"
+
+visible() { timeout 0.2 swaync-client -s 2>/dev/null | head -n1 | jq -r '.visible' 2>/dev/null; }
+restore_compact() {
+    "$HOME/.local/bin/cc-build" compact
+}
+close_cc() { swaync-client -cp -sw; restore_compact; }
+
+watch() {
+    (
+        me=$BASHPID; echo "$me" > "$pidf"
+        mode="$(cat "$modef" 2>/dev/null)"
+        read -r cw ch mt mr < <(jq -r '"\(.["control-center-width"]) \(.["control-center-height"]) \(.["control-center-margin-top"]) \(.["control-center-margin-right"])"' "$cfg")
+        read -r mx my mw ms < <(hyprctl -j monitors | jq -r '.[] | select(.focused) | "\(.x) \(.y) \(.width) \(.scale)"')
+        lw=$(awk -v w="$mw" -v s="$ms" 'BEGIN{printf "%d", w/s}')
+        x2=$((mx + lw - mr)); x1=$((x2 - cw))
+        y1=$my; y2=$((my + 50 + mt + ch))
+
+        sleep 0.4
+        base=$(hyprctl clients -j | jq 'length')
+        miss=0
+        while [ "$(cat "$pidf" 2>/dev/null)" = "$me" ]; do
+            if [ "$(visible)" != "true" ]; then
+                miss=$((miss + 1))
+                if (( miss >= 2 )); then restore_compact; exit 0; fi   # закрыли вручную
+                sleep 0.2; continue
+            fi
+            miss=0
+            n=$(hyprctl clients -j | jq 'length')
+            if (( n > base )); then close_cc; exit 0; fi               # новое окно (скриншот и т.п.)
+            if [ "$mode" != "bind" ]; then                             # уход мыши — только из Waybar
+                read -r px py < <(hyprctl cursorpos | awk -F', *' '{printf "%d %d\n", $1, $2}')
+                if (( px < x1 - far || px > x2 + far || py < y1 - far || py > y2 + far )); then
+                    close_cc; exit 0
+                fi
+            fi
+            sleep 0.2
+        done
+    ) >/dev/null 2>&1 &
+    disown
+}
+
+if [ "$1" = "--watch" ]; then watch; exit 0; fi
+
+# Уже открыт — закрыть
+if [ "$(visible)" = "true" ]; then echo closing > "$pidf"; close_cc; exit 0; fi
+
+# Запомнить, как открыли (для переключения видов внутри центра)
+if [ "$1" = "--bind" ]; then echo bind > "$modef"; else echo mouse > "$modef"; fi
+
+restore_compact
+swaync-client -op -sw
+watch

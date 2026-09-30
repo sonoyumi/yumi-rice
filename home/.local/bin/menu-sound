@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Панель звука: громкость, выкл. звука/микрофона, выбор выхода и входа
+panel="$HOME/.local/bin/rofi-panel"
+
+vol_raw="$(wpctl get-volume @DEFAULT_AUDIO_SINK@)"
+vol=$(awk '{printf "%d", $2*100}' <<<"$vol_raw")
+muted=0;     [[ "$vol_raw" == *MUTED* ]] && muted=1
+mic_raw="$(wpctl get-volume @DEFAULT_AUDIO_SOURCE@)"
+mic_muted=0; [[ "$mic_raw" == *MUTED* ]] && mic_muted=1
+def_sink="$(pactl get-default-sink)"
+def_src="$(pactl get-default-source)"
+
+declare -A map
+rows=()
+if ((muted)); then rows+=("󰖁   Volume: ${vol}% (muted)"); else rows+=("󰕾   Volume: ${vol}%"); fi
+rows+=("󰝝   Volume +10%" "󰝞   Volume -10%")
+if ((muted)); then rows+=("󰕾   Unmute"); else rows+=("󰖁   Mute"); fi
+if ((mic_muted)); then rows+=("󰍬   Unmute microphone"); else rows+=("󰍭   Mute microphone"); fi
+
+# Устройства вывода
+while IFS=$'\t' read -r name desc; do
+    mark=""; [ "$name" = "$def_sink" ] && mark="   ✓"
+    line="󰓃   Out: ${desc}${mark}"; rows+=("$line"); map["$line"]="sink:$name"
+done < <(pactl -f json list sinks | jq -r '.[] | "\(.name)\t\(.description)"')
+
+# Устройства ввода (без служебных .monitor)
+while IFS=$'\t' read -r name desc; do
+    mark=""; [ "$name" = "$def_src" ] && mark="   ✓"
+    line="󰍬   In: ${desc}${mark}"; rows+=("$line"); map["$line"]="source:$name"
+done < <(pactl -f json list sources | jq -r '.[] | select(.name | endswith(".monitor") | not) | "\(.name)\t\(.description)"')
+
+rows+=("󰒓   Sound settings")
+n=${#rows[@]}; (( n > 10 )) && n=10
+
+choice="$(printf '%s\n' "${rows[@]}" | "$panel" "Sound" "$n" -no-custom)"
+[ -z "$choice" ] && exit 0
+
+case "$choice" in
+    *"Volume +10%")          wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 10%+; exec "$0" ;;
+    *"Volume -10%")          wpctl set-volume @DEFAULT_AUDIO_SINK@ 10%-;        exec "$0" ;;
+    *"   Mute"|*"   Unmute") wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle;         exec "$0" ;;
+    *"microphone")           wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle;       exec "$0" ;;
+    *"Volume:"*|*"Sound settings") pavucontrol & ;;
+    *)
+        target="${map[$choice]}"
+        case "$target" in
+            sink:*)   pactl set-default-sink "${target#sink:}" ;;
+            source:*) pactl set-default-source "${target#source:}" ;;
+        esac
+        exec "$0" ;;
+esac

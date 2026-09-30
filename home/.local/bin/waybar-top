@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+# Самые тяжёлые приложения для Waybar и menu-top.
+#   waybar-top            JSON для Waybar: самое тяжёлое приложение по памяти
+#   waybar-top --list     строки для меню: 8 приложений, память и CPU
+#   waybar-top --kill ROW закрыть приложение из строки меню (SIGTERM всем его процессам)
+# Скрыть приложение из пилюли и меню — вписать его имя в ~/.config/waybar/top-hide.
+# Процессы группируются по приложению (все процессы Firefox — один «firefox»);
+# память — PSS, чтобы общие библиотеки не считались по нескольку раз.
+import json
+import os
+import re
+import signal
+import sys
+import time
+
+UID = os.getuid()
+TICK = os.sysconf("SC_CLK_TCK")
+# Системное и сама оболочка: закрыть из меню нельзя
+PROTECTED = re.compile(
+    r"^(Hyprland|Xwayland|waybar|swaync|hypridle|hyprlock|hyprpaper|swww.*|pipewire.*|wireplumber|"
+    r"kitty|systemd.*|dbus.*|sddm.*|polkit.*|xdg-.*|rofi|earlyoom|NetworkManager|bluetoothd|upowerd)$"
+)
+# Приложения, которые не показывать в пилюле и меню: по одному имени на строку, # — комментарий
+HIDE_FILE = os.path.expanduser("~/.config/waybar/top-hide")
+
+
+def hidden():
+    try:
+        with open(HIDE_FILE) as f:
+            return {s.strip() for s in f if s.strip() and not s.lstrip().startswith("#")}
+    except OSError:
+        return set()
+
+
+def app_name(pid, comm):
+    """Name of the application a process belongs to."""
+    try:
+        exe = os.readlink(f"/proc/{pid}/exe").removesuffix(" (deleted)")
+    except OSError:
+        return comm
+    base = os.path.basename(exe)
+    if re.fullmatch(r"[\d.]+", base):  # ~/.local/share/<app>/versions/2.1.284
+        return os.path.basename(os.path.dirname(os.path.dirname(exe)))
+    if base.startswith(("python", "node", "bash", "zsh", "sh")):
+        return comm
+    return base
+
+
+def memory_kb(pid):
+    try:
+        with open(f"/proc/{pid}/smaps_rollup") as f:
+            for line in f:
+                if line.startswith("Pss:"):
+                    return int(line.split()[1])
+    except OSError:
+        pass
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1])
+    except OSError:
+        pass
+    return 0
+
+
+def snapshot():
+    """{app: {"mem": kB, "cpu": ticks, "pids": [...], "own": bool}}"""
+    apps = {}
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        try:
+            with open(f"/proc/{pid}/stat") as f:
+                stat = f.read()
+            owner = os.stat(f"/proc/{pid}").st_uid
+        except OSError:
+            continue
+        comm = stat[stat.index("(") + 1 : stat.rindex(")")]
+        fields = stat[stat.rindex(")") + 2 :].split()
+        if fields[0] == "Z":
+            continue
+        mem = memory_kb(pid)
+        if not mem:  # kernel threads
+            continue
+        name = app_name(pid, comm)
+        a = apps.setdefault(name, {"mem": 0, "cpu": 0, "pids": [], "own": True})
+        a["mem"] += mem
+        a["cpu"] += int(fields[11]) + int(fields[12])  # utime + stime
+        a["pids"].append(pid)
+        a["own"] = a["own"] and owner == UID
+    for name in hidden():
+        apps.pop(name, None)
+    return apps
+
+
+def cpu_percent(apps, before, elapsed):
+    ncpu = os.cpu_count() or 1
+    for name, a in apps.items():
+        delta = max(a["cpu"] - before.get(name, a["cpu"]), 0)
+        a["pct"] = delta / TICK / elapsed * 100 / ncpu if elapsed > 0 else 0.0
+
+
+def gib(kb):
+    return f"{kb / 1048576:.1f}G" if kb >= 1048576 else f"{kb / 1024:.0f}M"
+
+
+def waybar():
+    apps = snapshot()
+    name, top = max(apps.items(), key=lambda kv: kv[1]["mem"])
+    lines = [f"{n:<16} {gib(a['mem']):>6}" for n, a in sorted(apps.items(), key=lambda kv: -kv[1]["mem"])[:5]]
+    print(json.dumps({
+        "text": f"󰓅 {name[:10]} {gib(top['mem'])}",
+        "tooltip": "Больше всего памяти:\n" + "\n".join(lines),
+        "class": "heavy" if top["mem"] > 2 * 1048576 else "normal",
+    }, ensure_ascii=False))
+
+
+def listing():
+    before = {n: a["cpu"] for n, a in snapshot().items()}
+    t0 = time.monotonic()
+    time.sleep(0.5)
+    apps = snapshot()
+    cpu_percent(apps, before, time.monotonic() - t0)
+    for name, a in sorted(apps.items(), key=lambda kv: -kv[1]["mem"])[:8]:
+        lock = "" if a["own"] and not PROTECTED.match(name) else "  󰌾"
+        n = len(a["pids"])
+        print(f"󰓅   {name[:14]:<14} {gib(a['mem']):>6} · {a['pct']:>3.0f}% CPU · {n} проц.{lock}")
+
+
+def kill(row):
+    """row — строка из --list: имя приложения занимает 14 символов после значка."""
+    label = row.split("   ", 1)[-1][:14].strip()
+    apps = snapshot()
+    name = next((n for n in apps if n[:14].strip() == label), label)
+    a = apps.get(name)
+    if not a or not a["own"] or PROTECTED.match(name):
+        print(f"{name}: закрыть нельзя")
+        return 1
+    me = {os.getpid(), os.getppid()}
+    for pid in a["pids"]:
+        if pid not in me:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+    print(f"{name}: отправлен сигнал закрытия ({len(a['pids'])} проц.)")
+    return 0
+
+
+if __name__ == "__main__":
+    if "--list" in sys.argv:
+        listing()
+    elif "--kill" in sys.argv:
+        sys.exit(kill(sys.argv[sys.argv.index("--kill") + 1]))
+    else:
+        waybar()

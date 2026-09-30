@@ -1,0 +1,5 @@
+/* Общие настройки rofi: одиночный клик мышью сразу выбирает пункт */
+configuration {
+    me-select-entry: "";
+    me-accept-entry: "MousePrimary";
+}

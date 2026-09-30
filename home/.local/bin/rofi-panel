@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# Общий стиль панелей: тема лаунчера HyDE, значки Nerd Font в тексте.
+# Использование: ... | rofi-panel "Заголовок" [макс_строк] [--center|--at-cursor|--top-right] [доп. аргументы rofi]
+# Без флага (клик в Waybar): под иконкой, закрывается, если увести мышь.
+# --center / --at-cursor (бинды): мышь игнорируется.
+# Всегда закрывается, если открылось новое окно (скриншот и т.п.).
+# PANEL_HALF=<px> — половина ширины окна, если меню шире обычного.
+
+# Повторный вызов: если меню уже открыто — закрыть его и выйти
+if pgrep -x rofi >/dev/null; then pkill -x rofi; exit 1; fi
+
+prompt="${1:-Menu}"
+lines="${2:-6}"
+shift 2 2>/dev/null || shift $#
+[[ "$1" =~ ^[0-9]+$ ]] && shift   # совместимость со старым аргументом высоты
+
+# rofi работает через XWayland, поэтому позицию считаем в физических пикселях
+bar=64                     # отступ от верха (под баром)
+margin=20                  # отступ от краёв экрана
+half="${PANEL_HALF:-190}"  # примерно половина ширины окна
+far=160                    # на сколько (логических px) можно отвести курсор (только для Waybar)
+mouse_close=1              # закрывать при уходе мыши (выключается для биндов)
+
+read -r cx cy < <(hyprctl cursorpos | awk -F', *' '{printf "%d %d\n", $1, $2}')
+[ -n "$PANEL_CURSOR" ] && read -r cx cy <<<"$PANEL_CURSOR"
+read -r mx my mw mh ms < <(hyprctl -j monitors | jq -r '.[] | select(.focused) | "\(.x) \(.y) \(.width) \(.height) \(.scale)"')
+rx=$(awk -v c="$cx" -v m="$mx" -v s="$ms" 'BEGIN{printf "%d", (c-m)*s}')
+ry=$(awk -v c="$cy" -v m="$my" -v s="$ms" 'BEGIN{printf "%d", (c-m)*s}')
+lw="$mw"; lh="$mh"
+
+case "$1" in
+    --center)
+        shift; mouse_close=0
+        pos='window {location: center; anchor: center; x-offset: 0px; y-offset: 0px;}' ;;
+    --top-right)
+        shift
+        pos="window {location: north east; anchor: north east; x-offset: -${margin}px; y-offset: ${bar}px;}" ;;
+    --at-cursor)
+        shift; mouse_close=0
+        if (( rx > lw / 2 )); then ah=east; else ah=west; fi
+        if (( ry > lh / 2 )); then av=south; else av=north; (( ry < bar )) && ry=$bar; fi   # не заходить на бар
+        pos="window {location: north west; anchor: ${av} ${ah}; x-offset: ${rx}px; y-offset: ${ry}px;}" ;;
+    *)
+        if (( rx + half > lw - margin )); then
+            pos="window {location: north east; anchor: north east; x-offset: -${margin}px; y-offset: ${bar}px;}"
+        elif (( rx - half < margin )); then
+            pos="window {location: north west; anchor: north west; x-offset: ${margin}px; y-offset: ${bar}px;}"
+        else
+            pos="window {location: north west; anchor: north; x-offset: ${rx}px; y-offset: ${bar}px;}"
+        fi ;;
+esac
+
+rofi -dmenu -i -p "$prompt" \
+    -theme style_10 \
+    -theme-str '* {font: "JetBrainsMono Nerd Font 12";}' \
+    -theme-str 'window {border: 2px; border-radius: 30px; width: 18em; height: 0;}' \
+    -theme-str 'element {children: [element-text]; border-radius: 20px; padding: 10px 16px; margin: 0;}' \
+    -theme-str 'element-text {expand: true; horizontal-align: 0; vertical-align: 0.5; margin: 0; padding: 0;}' \
+    -theme-str "listview {lines: ${lines}; fixed-height: false; scrollbar: false; spacing: 6px; padding: 10px 12px 12px 12px;}" \
+    -theme-str "$pos" \
+    "$@" <&0 &
+rpid=$!
+
+# Наблюдатель: новое окно → закрыть всегда; уход мыши → закрыть только для Waybar
+(
+    sleep 0.4
+    base=$(hyprctl clients -j | jq 'length')
+    while kill -0 "$rpid" 2>/dev/null; do
+        read -r n x y w h < <(hyprctl clients -j | jq -r '(length|tostring) + " " + (([.[] | select(.class=="Rofi")][0]) as $r | if $r then "\($r.at[0]) \($r.at[1]) \($r.size[0]) \($r.size[1])" else "" end)')
+        (( n > base )) && { kill "$rpid" 2>/dev/null; break; }
+        if (( mouse_close )) && [ -n "$h" ]; then
+            read -r px py < <(hyprctl cursorpos | awk -F', *' '{printf "%d %d\n", $1, $2}')
+            if (( px < x - far || px > x + w + far || py < y - far || py > y + h + far )); then
+                kill "$rpid" 2>/dev/null; break
+            fi
+        fi
+        sleep 0.15
+    done
+) &
+wpid=$!
+
+wait "$rpid"; code=$?
+kill "$wpid" 2>/dev/null
+exit "$code"

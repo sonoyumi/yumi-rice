@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# lim [ЛИМИТ] команда… — запустить программу с лимитом памяти внутри dev.slice.
+#   lim python -m http.server 8000      # лимит по умолчанию: 1G
+#   lim 512M uvicorn app:app --reload
+#   lim status                          # что сейчас запущено и сколько занимает
+# ЛИМИТ — в формате systemd: 256M, 1G, 1.5G. Своп (zram) — до половины лимита.
+set -euo pipefail
+
+if [ "${1:-}" = "status" ]; then
+    systemctl --user status dev.slice --no-pager | sed -n '1,/CGroup/p'
+    systemd-cgls --user-unit dev.slice --no-pager 2>/dev/null | tail -n +2
+    exit 0
+fi
+if [ $# -eq 0 ] || [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+    sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//'; exit 0
+fi
+
+limit=1G
+if [[ "$1" =~ ^[0-9]+(\.[0-9]+)?[KMG]$ ]]; then limit="$1"; shift; fi
+[ $# -gt 0 ] || { echo "lim: не указана команда" >&2; exit 2; }
+
+# половина лимита — на своп, в тех же единицах
+num="${limit%[KMG]}"; unit="${limit: -1}"
+[ "$unit" = "M" ] && swap="$(awk -v n="$num" 'BEGIN{printf "%d", n*1024/2}')K"
+[ "$unit" = "G" ] && swap="$(awk -v n="$num" 'BEGIN{printf "%d", n*1024*1024/2}')K"
+[ "$unit" = "K" ] && swap="$(awk -v n="$num" 'BEGIN{printf "%d", n/2}')K"
+
+exec systemd-run --user --scope --slice=dev.slice --collect --quiet \
+    -p MemoryMax="$limit" -p MemorySwapMax="$swap" -- "$@"

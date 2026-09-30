@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# История буфера обмена. Без флага — под иконкой Waybar; с --at-cursor — у курсора.
+# Enter — скопировать · Ctrl+Delete — удалить запись · Ctrl+Shift+Delete — очистить всё
+panel="$HOME/.local/bin/rofi-panel"
+export PANEL_HALF=290
+mode="$1"
+
+sel="$(cliphist list | "$panel" "Clipboard" 8 $mode -no-custom -display-columns 2 \
+    -theme-str 'window {width: 28em;}' \
+    -kb-custom-1 "Control+Delete" -kb-custom-2 "Control+Shift+Delete")"
+code=$?
+
+case $code in
+    0)  [ -n "$sel" ] && printf '%s' "$sel" | cliphist decode | wl-copy ;;
+    10) printf '%s' "$sel" | cliphist delete ;;
+    11) confirm="$(printf 'Yes, clear history\nCancel\n' | "$panel" "Clear all?" 2 $mode -no-custom)"
+        [ "$confirm" = "Yes, clear history" ] && cliphist wipe && notify-send "Clipboard" "History cleared" ;;
+esac

@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Следит за сменой обоев HyDE и обновляет фон экрана блокировки
+cache="$HOME/.cache/hyde"
+"$HOME/.local/bin/hyprlock-bg-sync"
+inotifywait -m -q -e create,moved_to,attrib,close_write --format '%f' "$cache" |
+while read -r f; do
+    [ "$f" = "wall.set" ] && "$HOME/.local/bin/hyprlock-bg-sync"
+done

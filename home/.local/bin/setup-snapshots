@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Снимки btrfs: snapper + snap-pac.
+#   setup-snapshots              установить и настроить
+#   setup-snapshots --uninstall  удалить снимки, конфиги и пакеты (полный откат)
+#
+# /     — снимок до и после каждого pacman/yay (snap-pac), хранятся 10 последних
+# /home — снимок каждый час: 5 почасовых + 7 ежедневных (защита проектов от удаления)
+set -euo pipefail
+[ "$EUID" -eq 0 ] || exec sudo "$0" "$@"
+USER_NAME="${SUDO_USER:?запустите от своего пользователя: setup-snapshots}"
+
+if [ "${1:-}" = "--uninstall" ]; then
+    systemctl disable --now snapper-timeline.timer snapper-cleanup.timer 2>/dev/null || true
+    for cfg in home root; do
+        [ -f "/etc/snapper/configs/$cfg" ] || continue
+        nums="$(snapper -c "$cfg" --csvout list --columns number | tail -n +2 | grep -vx 0 || true)"
+        [ -n "$nums" ] && snapper -c "$cfg" delete $nums
+        snapper -c "$cfg" delete-config
+    done
+    pacman -Rns --noconfirm snap-pac snapper
+    echo "Готово: снимки, конфиги и пакеты snapper удалены."
+    exit 0
+fi
+
+pacman -S --needed --noconfirm snapper snap-pac
+
+[ -f /etc/snapper/configs/root ] || snapper -c root create-config /
+[ -f /etc/snapper/configs/home ] || snapper -c home create-config /home
+
+# Корень: только снимки до/после обновлений, без почасовых
+snapper -c root set-config \
+    TIMELINE_CREATE=no NUMBER_CLEANUP=yes NUMBER_LIMIT=10 NUMBER_LIMIT_IMPORTANT=5 \
+    ALLOW_USERS="$USER_NAME" SYNC_ACL=yes
+
+# Домашняя папка: почасовые снимки с короткой историей
+snapper -c home set-config \
+    TIMELINE_CREATE=yes TIMELINE_CLEANUP=yes \
+    TIMELINE_LIMIT_HOURLY=5 TIMELINE_LIMIT_DAILY=7 TIMELINE_LIMIT_WEEKLY=0 \
+    TIMELINE_LIMIT_MONTHLY=0 TIMELINE_LIMIT_QUARTERLY=0 TIMELINE_LIMIT_YEARLY=0 \
+    NUMBER_CLEANUP=yes NUMBER_LIMIT=5 ALLOW_USERS="$USER_NAME" SYNC_ACL=yes
+
+systemctl enable --now snapper-timeline.timer snapper-cleanup.timer
+
+snapper -c root create --cleanup-algorithm number --description "Первый снимок после настройки"
+snapper -c home create --cleanup-algorithm number --description "Первый снимок после настройки"
+
+echo
+snapper list-configs
+echo
+echo "Готово. Снимки корня:  snapper -c root list"
+echo "        Снимки /home:  snapper -c home list"
+echo "Откатить обновление:   sudo snapper -c root undochange ДО..ПОСЛЕ   (номера из списка)"
+echo "Вернуть файл из /home: sudo snapper -c home undochange N..0 /home/$USER_NAME/путь/к/файлу"

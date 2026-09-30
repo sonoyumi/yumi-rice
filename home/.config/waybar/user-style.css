@@ -1,0 +1,74 @@
+/* === Бар yumi: прозрачный фон, пилюли на лёгком стекле (цвета из темы) === */
+
+window#waybar {
+  background: transparent;
+}
+
+/* Пилюли: полупрозрачный фон, за ним размытие от Hyprland */
+#pill {
+  background: alpha(@main-bg, 0.45);
+}
+
+/* Активный рабочий стол слегка выделен */
+#workspaces button.active {
+  background: alpha(@wb-act-bg, 0.35);
+  color: @wb-act-fg;
+  border-radius: 10px;
+}
+#workspaces button:hover {
+  background: alpha(@wb-hvr-bg, 0.25);
+  border-radius: 10px;
+}
+
+/* Значок Arch */
+#custom-archlogo {
+  font-size: 15px;
+  padding: 0 10px;
+}
+
+/* Батарея: оранжевая при 30%, красная при 15% (если не заряжается) */
+#battery.warning:not(.charging) {
+  color: #f5a97f;
+}
+#battery.critical:not(.charging) {
+  color: #ed8796;
+}
+#battery.charging {
+  color: #a6da95;
+}
+
+/* Значок режима питания */
+#custom-powerprofile {
+  padding: 0 8px 0 2px;
+}
+#custom-powerprofile.power-saver {
+  color: #a6da95;
+}
+#custom-powerprofile.performance {
+  color: #f5a97f;
+}
+
+#custom-workflow { padding: 0 10px 0 4px; }
+
+/* Часы — слева в пилюле с батареей */
+#clock { padding: 0 8px 0 14px; }
+
+#custom-vpn.connected  { color: #a6da95; }
+#custom-vpn.connecting { color: #f5a97f; }
+#custom-player         { padding: 0 8px; }
+#custom-player.paused  { opacity: 0.6; }
+
+/* Плеер — отдельная пилюля ровно по центру бара */
+#custom-player {
+  background: alpha(@main-bg, 0.45);
+  border-radius: 14px;
+  padding: 0 14px;
+  margin: 4px 0;
+}
+
+/* Самое тяжёлое приложение: оранжевое, если занимает больше 2 ГБ */
+#custom-top       { padding: 0 12px 0 4px; }
+#custom-top.heavy { color: #f5a97f; }
+
+/* Шрифт бара не зависит от темы */
+* { font-family: "JetBrainsMono Nerd Font"; }

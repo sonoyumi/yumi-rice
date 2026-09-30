@@ -1,0 +1,96 @@
+{
+  "$schema": "/etc/xdg/swaync/configSchema.json",
+  "positionX": "right",
+  "positionY": "bottom",
+  "layer": "overlay",
+  "control-center-layer": "top",
+  "layer-shell": true,
+  "cssPriority": "user",
+  "control-center-margin-top": 10,
+  "control-center-margin-bottom": 10,
+  "control-center-margin-right": 10,
+  "control-center-margin-left": 0,
+  "control-center-width": 360,
+  "control-center-height": 640,
+  "fit-to-screen": false,
+  "notification-window-width": 360,
+  "notification-icon-size": 40,
+  "notification-body-image-height": 100,
+  "notification-body-image-width": 200,
+  "timeout": 6,
+  "timeout-low": 4,
+  "timeout-critical": 0,
+  "relative-timestamps": true,
+  "keyboard-shortcuts": true,
+  "image-visibility": "when-available",
+  "transition-time": 150,
+  "hide-on-clear": false,
+  "hide-on-action": true,
+  "script-fail-notify": true,
+  "notification-visibility": {
+    "system-noise": {
+      "state": "transient",
+      "app-name": "^(?i)(?!.*(firefox|librewolf|zen|chromium|chrome|brave|vivaldi|telegram|discord|vesktop|whatsapp|signal|slack|element|thunderbird|spotify|steam|obsidian)).*$"
+    }
+  },
+  "widgets": [
+    "buttons-grid",
+    "title",
+    "notifications"
+  ],
+  "widget-config": {
+    "label": {
+      "text": ".",
+      "max-lines": 1
+    },
+    "title": {
+      "text": "Notifications",
+      "clear-all-button": true,
+      "button-text": "󰎟  Clear"
+    },
+    "buttons-grid": {
+      "buttons-per-row": 4,
+      "actions": [
+        {
+          "label": "󰁍",
+          "command": "@HOME@/.local/bin/cc view compact"
+        },
+        {
+          "label": "󰂛",
+          "type": "toggle",
+          "command": "swaync-client -d -sw",
+          "update-command": "swaync-client -D -sw"
+        }
+      ]
+    },
+    "slider#vol": {
+      "label": "󰕾",
+      "min": 0,
+      "max": 100,
+      "cmd_setter": "@HOME@/.local/bin/cc vol $value",
+      "cmd_getter": "@HOME@/.local/bin/cc vol get"
+    },
+    "slider#mic": {
+      "label": "󰍬",
+      "min": 0,
+      "max": 100,
+      "cmd_setter": "@HOME@/.local/bin/cc micvol $value",
+      "cmd_getter": "@HOME@/.local/bin/cc micvol get"
+    },
+    "backlight": {
+      "label": "󰃟",
+      "device": "apple-panel-bl"
+    },
+    "backlight#KB": {
+      "label": "󰌌",
+      "device": "kbd_backlight",
+      "subsystem": "leds"
+    },
+    "mpris": {
+      "image-size": 56,
+      "image-radius": 14
+    }
+  },
+  "control-center-positionX": "right",
+  "control-center-positionY": "top"
+}

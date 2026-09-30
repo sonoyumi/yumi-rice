@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Значок текущего режима питания для Waybar: 󰌪 эконом, 󰗑 баланс, 󰓅 производительность
+p="$(busctl get-property org.freedesktop.UPower.PowerProfiles /org/freedesktop/UPower/PowerProfiles \
+     org.freedesktop.UPower.PowerProfiles ActiveProfile 2>/dev/null | awk -F'"' '{print $2}')"
+[ -z "$p" ] && p="$(powerprofilesctl get 2>/dev/null)"
+case "$p" in
+    power-saver) i="󰌪"; t="Power saver" ;;
+    performance) i="󰓅"; t="Performance" ;;
+    *)           i="󰗑"; t="Balanced"; p="balanced" ;;
+esac
+printf '{"text":"%s","tooltip":"%s","class":"%s"}\n' "$i" "$t" "$p"

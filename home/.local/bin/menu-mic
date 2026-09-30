@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Панель микрофона: громкость, выкл., выбор устройства ввода
+panel="$HOME/.local/bin/rofi-panel"
+
+raw="$(wpctl get-volume @DEFAULT_AUDIO_SOURCE@)"
+vol=$(awk '{printf "%d", $2*100}' <<<"$raw")
+muted=0; [[ "$raw" == *MUTED* ]] && muted=1
+def_src="$(pactl get-default-source)"
+
+declare -A map
+rows=()
+if ((muted)); then rows+=("󰍭   Mic: ${vol}% (muted)"); else rows+=("󰍬   Mic: ${vol}%"); fi
+rows+=("󰝝   Mic +10%" "󰝞   Mic -10%")
+if ((muted)); then rows+=("󰍬   Unmute microphone"); else rows+=("󰍭   Mute microphone"); fi
+
+while IFS=$'\t' read -r name desc; do
+    mark=""; [ "$name" = "$def_src" ] && mark="   ✓"
+    line="󰍬   In: ${desc}${mark}"; rows+=("$line"); map["$line"]="$name"
+done < <(pactl -f json list sources | jq -r '.[] | select(.name | endswith(".monitor") | not) | "\(.name)\t\(.description)"')
+
+rows+=("󰒓   Sound settings")
+n=${#rows[@]}; (( n > 10 )) && n=10
+
+choice="$(printf '%s\n' "${rows[@]}" | "$panel" "Microphone" "$n" -no-custom)"
+[ -z "$choice" ] && exit 0
+
+case "$choice" in
+    *"Mic +10%")    wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SOURCE@ 10%+; exec "$0" ;;
+    *"Mic -10%")    wpctl set-volume @DEFAULT_AUDIO_SOURCE@ 10%-;        exec "$0" ;;
+    *"microphone")  wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle;         exec "$0" ;;
+    *"Mic:"*|*"Sound settings") pavucontrol -t 4 & ;;
+    *)
+        src="${map[$choice]}"
+        [ -n "$src" ] && pactl set-default-source "$src"
+        exec "$0" ;;
+esac

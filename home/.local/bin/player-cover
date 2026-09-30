@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Обложка трека: MPRIS artUrl → миниатюра через yt-dlp → картинка из обоев
+pl="$1"; cache="/tmp/menu-player"; mkdir -p "$cache"
+p=(playerctl); [ -n "$pl" ] && p=(playerctl -p "$pl")
+art="$("${p[@]}" metadata mpris:artUrl 2>/dev/null)"
+url="$("${p[@]}" metadata xesam:url 2>/dev/null)"
+title="$("${p[@]}" metadata title 2>/dev/null)"
+key="$art|$url|$title"
+[ "$key" = "$(cat "$cache/key" 2>/dev/null)" ] && [ -f "$cache/bg.png" ] && exit 0
+exec 9>"$cache/lock"; flock 9
+[ "$key" = "$(cat "$cache/key" 2>/dev/null)" ] && [ -f "$cache/bg.png" ] && exit 0
+
+raw="$cache/raw.$$"; rm -f "$raw"
+case "$art" in
+    file://*) f="${art#file://}"; f="$(printf '%b' "${f//%/\\x}")"; cp "$f" "$raw" 2>/dev/null ;;
+    http*)    curl -fsSL --max-time 8 "$art" -o "$raw" 2>/dev/null ;;
+esac
+if [ ! -s "$raw" ] && [[ "$url" == http* ]] && command -v yt-dlp >/dev/null; then
+    thumb="$(timeout 15 yt-dlp --no-warnings --skip-download --playlist-items 1 --print thumbnail "$url" 2>/dev/null | head -1)"
+    [ -n "$thumb" ] && curl -fsSL --max-time 8 "$thumb" -o "$raw" 2>/dev/null
+fi
+[ -s "$raw" ] || cp "$HOME/.cache/hyde/cc-header.png" "$raw"
+
+magick "$raw[0]" -resize 400x400^ -gravity center -extent 400x400 "$cache/cover.tmp.png" &&
+magick "$raw[0]" -resize 260x80^ -gravity center -extent 260x80 -blur 0x6 \
+    -resize 1300x400! -modulate 45,120 "$cache/bg.tmp.png" &&
+{ mv "$cache/cover.tmp.png" "$cache/cover.png"; mv "$cache/bg.tmp.png" "$cache/bg.png"; echo "$key" > "$cache/key"; }
+rm -f "$raw"

@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# При смене обоев HyDE: фон для hyprlock + шапка для центра управления (swaync)
+set -euo pipefail
+cache="$HOME/.cache/hyde"
+src="$(readlink -f "$cache/wall.set")"
+dst="$cache/hyprlock-bg.png"
+head="$cache/cc-header.png"
+stamp="$cache/hyprlock-bg.src"
+
+[ -f "$src" ] || exit 0
+if [ ! -f "$dst" ] || [ ! -f "$head" ] || [ "$(cat "$stamp" 2>/dev/null)" != "$src" ]; then
+    # Экран блокировки: под размер экрана, размыто и затемнено
+    magick "${src}[0]" \
+        -resize 2560x1600^ -gravity center -extent 2560x1600 \
+        -blur 0x14 -modulate 82,115 \
+        "$cache/hyprlock-bg.tmp.png"
+    mv "$cache/hyprlock-bg.tmp.png" "$dst"
+    # Шапка центра управления: широкая полоса из середины обоев
+    magick "${src}[0]" -resize 1200x -gravity center -crop 1200x420+0+0 +repage \
+        "$cache/cc-header.tmp.png"
+    mv "$cache/cc-header.tmp.png" "$head"
+    echo "$src" > "$stamp"
+    # Перечитать стиль swaync, когда wallbash допишет новые цвета
+    ( sleep 4; "$HOME/.local/bin/swaync-kitty-sync" ) &
+fi

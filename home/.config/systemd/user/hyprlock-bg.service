@@ -1,0 +1,9 @@
+[Unit]
+Description=Sync HyDE wallpaper to hyprlock background
+
+[Service]
+ExecStart=%h/.local/bin/hyprlock-bg-watch
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

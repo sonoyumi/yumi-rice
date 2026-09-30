@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Рабочие режимы HyDE
+#   menu-workflows               — меню под иконкой Waybar
+#   menu-workflows --center      — меню по центру (бинд)
+#   menu-workflows --next|--prev — следующий/предыдущий режим с уведомлением
+panel="$HOME/.local/bin/rofi-panel"
+export PANEL_HALF=260
+mapfile -t names < <(ls "$HOME"/.local/share/hypr/lua/workflows/*.lua | xargs -n1 basename -s .lua | sort)
+current="$(grep -oP 'HYPR_WORKFLOW="\K[^"]*' "$HOME/.local/state/hyde/staterc" 2>/dev/null)"
+[ -z "$current" ] && current="${names[0]}"
+
+label() {
+    case "$1" in
+        *default)   echo "󰍹   Main — прозрачность, анимации" ;;
+        editing)    echo "󰏫   Editing — без прозрачности, для текста" ;;
+        gaming)     echo "󰊗   Gaming — максимум производительности" ;;
+        powersaver) echo "󰌪   Powersaver — экономия батареи" ;;
+        snappy)     echo "󱐋   Snappy — без анимаций и эффектов" ;;
+        *)          echo "$1" ;;
+    esac
+}
+apply() {
+    hyde-shell workflows --set "$1" >/dev/null 2>&1
+    pkill -RTMIN+9 waybar
+    notify-send -t 1500 -h string:x-canonical-private-synchronous:workflow "Режим" "$(label "$1")"
+}
+
+if [ "$1" = "--next" ] || [ "$1" = "--prev" ]; then
+    n=${#names[@]}; idx=0
+    for i in "${!names[@]}"; do [ "${names[$i]}" = "$current" ] && idx=$i; done
+    if [ "$1" = "--next" ]; then idx=$(( (idx + 1) % n )); else idx=$(( (idx - 1 + n) % n )); fi
+    apply "${names[$idx]}"; exit 0
+fi
+
+rows=(); sel=0
+for i in "${!names[@]}"; do
+    mark=""; [ "${names[$i]}" = "$current" ] && { mark="   ✓"; sel=$i; }
+    rows+=("$(label "${names[$i]}")${mark}")
+done
+choice="$(printf '%s\n' "${rows[@]}" | "$panel" "Workflow" "${#rows[@]}" $1 -no-custom \
+    -selected-row "$sel" -theme-str 'window {width: 26em;}')"
+[ -z "$choice" ] && exit 0
+for n in "${names[@]}"; do
+    case "$choice" in "$(label "$n")"*) [ "$n" != "$current" ] && apply "$n" ;; esac
+done

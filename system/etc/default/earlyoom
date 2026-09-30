@@ -1,0 +1,5 @@
+# earlyoom: когда свободной памяти < 5% (~375 МБ), закрыть самый тяжёлый процесс, пока система не зависла.
+# -s 100 — не ждать, пока заполнится своп: на диске лежит ещё 8 ГБ, и до них система успеет «залипнуть».
+# Первыми закрываются вкладки Firefox; рабочий стол, звук и терминал не трогаются.
+# Пробелы в именах процессов записаны точкой: systemd делит строку по пробелам.
+EARLYOOM_ARGS="-m 5 -s 100 -r 3600 -n --prefer ^(Isolated.Web.Co|Web.Content|WebExtensions)$ --avoid ^(Hyprland|Xwayland|waybar|swaync|hyprlock|hypridle|kitty|sddm|systemd|systemd-.*|pipewire|pipewire-pulse|wireplumber|dbus-broker|dbus-broker-lau)$"
