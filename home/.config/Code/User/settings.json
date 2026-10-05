@@ -1,6 +1,15 @@
 {
     "workbench.startupEditor": "none",
     "python.analysis.typeCheckingMode": "basic",
-    "workbench.colorTheme": "GitHub Dark Dimmed",
-    "python.analysis.languageServerMode": "light"
+    "workbench.colorTheme": "Wallbash",
+    "python.analysis.languageServerMode": "light",
+    "wallBash.autoUpdate": false,
+    "editor.fontSize": 12,
+    "github.copilot.enable": {
+        "*": false,
+        "plaintext": false,
+        "markdown": false,
+        "scminput": false,
+        "python": false
+    }
 }

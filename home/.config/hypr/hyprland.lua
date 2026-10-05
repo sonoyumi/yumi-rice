@@ -112,8 +112,25 @@ for _, kb in ipairs({ "logitech-pro-gaming-keyboard", "logitech-pro-gaming-keybo
 	})
 end
 
--- При входе в систему: цвет подсветки по текущей теме и Solaar для мыши
+-- Музыка и громкость с внешней клавиатуры: её Fn не доходит до системы (с Fn и без шлёт одно и то же),
+-- поэтому медиа — на ALT + те же клавиши. SUPER+F10..F12 заняты скриншотами HyDE
+local media = {
+	{ "F9",          "playerctl play-pause",                   "play / pause" },
+	{ "F10",         "playerctl stop",                         "stop" },
+	{ "F11",         "playerctl previous",                     "previous track" },
+	{ "F12",         "playerctl next",                         "next track" },
+	{ "Print",       hyde.sh.volumecontrol("-o", "m"),         "mute" },
+	{ "Scroll_Lock", hyde.sh.volumecontrol("-o", "d"),         "volume down" },
+	{ "Pause",       hyde.sh.volumecontrol("-o", "i"),         "volume up" },
+}
+for _, m in ipairs(media) do
+	hl.bind("ALT + " .. m[1], hl.dsp.exec_cmd(m[2]), { description = "[Media] " .. m[3], repeating = (m[1] == "Scroll_Lock" or m[1] == "Pause") })
+end
+
+-- При входе в систему: сервер OpenRGB, цвет подсветки по обоям и Solaar для мыши
 hl.on("hyprland.start", function()
+	-- Сервер OpenRGB: устройства опрашиваются один раз, дальше цвет меняется мгновенно (--client)
+	hl.exec_cmd("openrgb --server --server-port 6742")
 	hl.exec_cmd(os.getenv("HOME") .. "/.config/hyde/wallbash/scripts/keyboard.sh")
 	-- Solaar в фоне: держит DPI и частоту мыши (встроенный профиль выключен)
 	hl.exec_cmd("solaar --window=hide")
@@ -232,3 +249,9 @@ hl.on("hyprland.start", function()
 	hl.exec_cmd([[sh -c 'for i in $(seq 40); do awww query >/dev/null 2>&1 && break; sleep 0.5; done; sleep 2; awww img --transition-type none "$(readlink -f "$HOME/.cache/hyde/wall.set")"']])
 end)
 
+
+-- === Цвета только из обоев ===
+-- Wallbash в режиме «всегда тёмный» (enableWallDcol=2), темы HyDE убраны в ~/.local/share/hyde-themes-off.
+-- Выбор темы и режима wallbash не нужен — остаются только обои (SUPER+SHIFT+W, SUPER+ALT+←/→)
+hl.unbind("SUPER + SHIFT + T")
+hl.unbind("SUPER + SHIFT + R")

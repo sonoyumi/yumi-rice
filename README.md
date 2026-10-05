@@ -53,12 +53,14 @@ repository and the system in step, with a backup of every file it touches.
   0 MB of video memory instead of 38.
 - **Everything matches the wallpaper:** change the wallpaper in HyDE and the `hyprlock-bg-watch` service rebuilds
   the blurred lock-screen background, the control-center header, the swaync colors and the rofi theme within a second.
-  Generated files are not stored in the repository — only the scripts that make them.
+  Generated files are not stored in the repository — only the scripts that make them. Colors come only from the
+  wallpaper: wallbash is locked to dark mode, the HyDE themes are switched off and their shortcuts (`SUPER+SHIFT+T/R`)
+  unbound.
 - **Lock screen:** based on [Hyprlock-Dots #20](https://github.com/mahaveergurjar/Hyprlock-Dots) — login card,
   avatar, date, a mini player with working buttons, clock, uptime and keyboard layout. SDDM autologin → Hyprland →
   hyprlock at once; the desktop is drawn *under* the lock (`session_lock_xray`), so there is no grey frame or lag after unlocking.
 - **Hyprland:** the window look (borders, gaps, rounding, blur, opacity) is pinned in `my_look()` and reapplied on
-  every reload, so HyDE themes change only colors. All my settings live in one `hyprland.lua`; the few HyDE files that
+  every reload, so a new wallpaper changes only colors. All my settings live in one `hyprland.lua`; the few HyDE files that
   must be patched are handled by the idempotent `hyde-patches.sh`.
 - **Living on 8 GB:** zram the size of RAM + an 8 GB swap file; earlyoom closes browser tabs first and never the
   desktop; Firefox runs in its own cgroup (`firefox.slice`, 4 GB) so an overflow kills one tab, not the session;
@@ -73,8 +75,11 @@ repository and the system in step, with a backup of every file it touches.
 - **Menus sized per monitor:** rofi runs through XWayland and ignores the monitor scale, so a small `rofi` wrapper lowers
   the DPI on the 1080p screen. The monitor is picked by the cursor, because a click on Waybar does not move focus.
 - **Logitech without G HUB:** a mouse pill with battery, DPI and polling rate (Solaar) and a menu to change them. The
-  keyboard backlight follows the HyDE theme through a wallbash template and OpenRGB. Win and Alt are swapped only on the
-  external keyboard, so Super sits next to the space bar like Cmd on the MacBook.
+  keyboard backlight follows the wallpaper through a wallbash template and an OpenRGB server started at login: the color
+  changes instantly and no USB rescan gets in Solaar's way (if Solaar is busy anyway, the mouse pill retries and shows
+  the last reading). Win and Alt are swapped only on the external keyboard, so Super sits next to the space bar like Cmd
+  on the MacBook. Its Fn key never reaches the system, so media keys live on Alt: `ALT+F9–F12` play/pause, stop,
+  previous, next; `ALT+Print / Scroll Lock / Pause` mute, volume down, volume up.
 - **Every change can be undone:** `./rice push` keeps the previous version of each file in `~/.local/state/rice-bak/`,
   system files are applied one by one after showing the diff, and every add-on has its own full uninstall script.
 
@@ -204,6 +209,8 @@ yumi-rice/
 - Solaar reapplies its saved LED zones on start and can switch the keyboard backlight off: mark `led_control` and
   `led_zone_*` as `ignore` in its config.
 - OpenRGB `Direct` mode on the PRO keyboard drops keys and its LED order does not match the layout: `Static` is reliable.
+- Plain `openrgb` rescans every USB device for a few seconds on each call, and Solaar fails to read the mouse
+  meanwhile: start `openrgb --server` once at login and send colors with `--client`.
 - A monitor connected after login gets a black background: redraw the wallpaper on `monitor.added`.
 - dp-altmode: after unplugging the monitor and suspending, the next connect can fail until a reboot (a known open bug).
   Kernel updates need the patch rebuilt.
@@ -274,13 +281,14 @@ repository e sistema, con un backup di ogni file che tocca.
   cairo: 0 MB di memoria video invece di 38.
 - **Tutto in tinta con lo sfondo:** cambi lo sfondo in HyDE e il servizio `hyprlock-bg-watch` ricrea in un secondo lo sfondo
   sfocato della schermata di blocco, l'intestazione del centro di controllo, i colori di swaync e il tema di rofi.
-  I file generati non sono nel repository — solo gli script che li creano.
+  I file generati non sono nel repository — solo gli script che li creano. I colori vengono solo dallo sfondo: wallbash
+  è bloccato in modalità scura, i temi HyDE sono disattivati e le loro scorciatoie (`SUPER+SHIFT+T/R`) rimosse.
 - **Schermata di blocco:** basata su [Hyprlock-Dots n. 20](https://github.com/mahaveergurjar/Hyprlock-Dots) — scheda di
   accesso, avatar, data, mini lettore con pulsanti funzionanti, orologio, uptime e layout della tastiera. Accesso automatico
   SDDM → Hyprland → subito hyprlock; il desktop viene disegnato *sotto* il blocco (`session_lock_xray`), quindi niente
   fotogramma grigio né ritardi dopo lo sblocco.
 - **Hyprland:** l'aspetto delle finestre (bordi, spazi, arrotondamento, sfocatura, trasparenza) è fissato in `my_look()` e
-  riapplicato a ogni ricaricamento, così i temi HyDE cambiano solo i colori. Tutte le mie impostazioni stanno in un solo
+  riapplicato a ogni ricaricamento, così un nuovo sfondo cambia solo i colori. Tutte le mie impostazioni stanno in un solo
   `hyprland.lua`; i pochi file di HyDE da modificare passano per lo script idempotente `hyde-patches.sh`.
 - **Vivere con 8 GB:** zram grande quanto la RAM + file di swap da 8 GB; earlyoom chiude prima le schede del browser e mai il
   desktop; Firefox gira nel proprio cgroup (`firefox.slice`, 4 GB), quindi un eccesso chiude una scheda, non la sessione;
@@ -296,8 +304,11 @@ repository e sistema, con un backup di ogni file che tocca.
 - **Menu in scala per monitor:** rofi gira tramite XWayland e ignora la scala del monitor, quindi un piccolo wrapper `rofi`
   abbassa i DPI sullo schermo 1080p. Il monitor si sceglie dal cursore, perché un clic su Waybar non sposta il focus.
 - **Logitech senza G HUB:** una pillola del mouse con batteria, DPI e frequenza di polling (Solaar) e un menu per
-  cambiarli. La retroilluminazione della tastiera segue il tema HyDE tramite un template wallbash e OpenRGB. Win e Alt sono
-  scambiati solo sulla tastiera esterna, così Super sta accanto alla barra spaziatrice come Cmd sul MacBook.
+  cambiarli. La retroilluminazione della tastiera segue lo sfondo tramite un template wallbash e un server OpenRGB avviato
+  all'accesso: il colore cambia subito e nessuna nuova scansione USB disturba Solaar (se Solaar è comunque occupato, la
+  pillola del mouse riprova e mostra l'ultima lettura). Win e Alt sono scambiati solo sulla tastiera esterna, così Super
+  sta accanto alla barra spaziatrice come Cmd sul MacBook. Il suo tasto Fn non arriva al sistema, quindi i tasti multimediali
+  sono su Alt: `ALT+F9–F12` play/pausa, stop, precedente, successivo; `ALT+Print / Scroll Lock / Pause` muto, volume giù, volume su.
 - **Ogni modifica si può annullare:** `./rice push` conserva la versione precedente di ogni file in `~/.local/state/rice-bak/`,
   i file di sistema si applicano uno alla volta dopo aver mostrato il diff, e ogni aggiunta ha il proprio script di rimozione completa.
 
@@ -414,6 +425,8 @@ yumi-rice/
   e `led_zone_*` come `ignore` nella sua configurazione.
 - La modalità `Direct` di OpenRGB sulla tastiera PRO salta dei tasti e l'ordine dei LED non corrisponde al layout:
   `Static` è affidabile.
+- Ogni chiamata a `openrgb` riscansiona tutti i dispositivi USB per qualche secondo e intanto Solaar non riesce a
+  leggere il mouse: avviare `openrgb --server` una volta all'accesso e inviare i colori con `--client`.
 - Un monitor collegato dopo il login ha lo sfondo nero: ridisegna lo sfondo su `monitor.added`.
 - dp-altmode: dopo aver scollegato il monitor e sospeso il portatile, il collegamento successivo può fallire fino al
   riavvio (bug noto e aperto). Dopo un aggiornamento del kernel la patch va ricompilata.
@@ -482,12 +495,13 @@ MIT, vedi [LICENSE](LICENSE).
   Системні сповіщення тимчасові — залишаються лише повідомлення від людей. Малюється через cairo: 0 МБ відеопам'яті замість 38.
 - **Усе в колір шпалер:** змінили шпалери в HyDE — служба `hyprlock-bg-watch` за секунду перезбирає розмите тло екрана
   блокування, шапку центру керування, кольори swaync і тему rofi. Згенеровані файли в репозиторії не зберігаються — лише
-  скрипти, які їх створюють.
+  скрипти, які їх створюють. Кольори беруться лише зі шпалер: wallbash закріплено в темному режимі, теми HyDE вимкнено,
+  а їхні скорочення (`SUPER+SHIFT+T/R`) прибрано.
 - **Екран блокування:** на основі [Hyprlock-Dots №20](https://github.com/mahaveergurjar/Hyprlock-Dots) — картка входу,
   аватар, дата, міні-плеєр із робочими кнопками, годинник, uptime і розкладка. Автовхід SDDM → Hyprland → одразу hyprlock;
   робочий стіл малюється *під* блокуванням (`session_lock_xray`), тож після розблокування немає сірого кадру й затримок.
 - **Hyprland:** вигляд вікон (рамки, відступи, заокруглення, розмиття, прозорість) закріплено в `my_look()` і
-  застосовується після кожного перезавантаження, тож теми HyDE змінюють лише кольори. Усі мої налаштування — в одному
+  застосовується після кожного перезавантаження, тож нові шпалери змінюють лише кольори. Усі мої налаштування — в одному
   `hyprland.lua`; ті кілька файлів HyDE, які доводиться правити, обробляє ідемпотентний `hyde-patches.sh`.
 - **Життя на 8 ГБ:** zram розміром з RAM + swap-файл 8 ГБ; earlyoom першими закриває вкладки браузера й ніколи — робочий
   стіл; Firefox працює у власній cgroup (`firefox.slice`, 4 ГБ), тож переповнення закриває одну вкладку, а не сесію;
@@ -503,8 +517,11 @@ MIT, vedi [LICENSE](LICENSE).
 - **Меню за розміром монітора:** rofi працює через XWayland і не враховує масштаб монітора, тому невелика обгортка `rofi`
   знижує DPI на екрані 1080p. Монітор визначається за курсором, бо клік у Waybar не переносить фокус.
 - **Logitech без G HUB:** пігулка миші із зарядом, DPI і частотою опитування (Solaar) та меню, щоб їх змінювати.
-  Підсвітка клавіатури змінюється разом із темою HyDE через шаблон wallbash і OpenRGB. Win і Alt поміняні місцями лише на
-  зовнішній клавіатурі: Super біля пробілу, як Cmd на MacBook.
+  Підсвітка клавіатури змінюється разом зі шпалерами через шаблон wallbash і сервер OpenRGB, що стартує під час входу:
+  колір змінюється миттєво, і повторне сканування USB не заважає Solaar (а якщо Solaar усе ж зайнятий, пігулка миші
+  повторює запит і показує останні дані). Win і Alt поміняні місцями лише на зовнішній клавіатурі: Super біля пробілу,
+  як Cmd на MacBook. Її Fn не доходить до системи, тому медіаклавіші на Alt: `ALT+F9–F12` — пуск/пауза, стоп, попередній,
+  наступний трек; `ALT+Print / Scroll Lock / Pause` — вимкнути звук, тихіше, гучніше.
 - **Будь-яку зміну можна відкотити:** `./rice push` зберігає попередню версію кожного файлу в `~/.local/state/rice-bak/`,
   системні файли застосовуються по одному з показом diff, а кожне доповнення має власний скрипт повного видалення.
 
@@ -621,6 +638,8 @@ yumi-rice/
   і `led_zone_*` як `ignore` у його конфігурації.
 - Режим `Direct` в OpenRGB на клавіатурі PRO пропускає клавіші, а порядок світлодіодів не збігається з розкладкою:
   надійний `Static`.
+- Звичайний `openrgb` за кожного виклику кілька секунд заново опитує всі USB-пристрої, і Solaar тим часом не може
+  прочитати мишу: запускати `openrgb --server` один раз під час входу, а колір надсилати через `--client`.
 - Монітор, під'єднаний після входу, отримує чорне тло: перемальовуйте шпалери за подією `monitor.added`.
 - dp-altmode: якщо від'єднати монітор і приспати ноутбук, наступне під'єднання може не спрацювати до перезавантаження
   (відомий відкритий баг). Після оновлення ядра патч треба перезібрати.
@@ -689,12 +708,13 @@ MIT — див. [LICENSE](LICENSE).
   Системные уведомления временные — остаются только сообщения от людей. Рисуется через cairo: 0 МБ видеопамяти вместо 38.
 - **Всё в цвет обоев:** сменили обои в HyDE — служба `hyprlock-bg-watch` за секунду пересобирает размытый фон экрана
   блокировки, шапку центра управления, цвета swaync и тему rofi. Сгенерированные файлы в репозитории не хранятся — только
-  скрипты, которые их делают.
+  скрипты, которые их делают. Цвета берутся только из обоев: wallbash закреплён в тёмном режиме, темы HyDE отключены,
+  а их сочетания клавиш (`SUPER+SHIFT+T/R`) убраны.
 - **Экран блокировки:** на основе [Hyprlock-Dots №20](https://github.com/mahaveergurjar/Hyprlock-Dots) — карточка входа,
   аватар, дата, мини-плеер с рабочими кнопками, часы, uptime и раскладка. Автовход SDDM → Hyprland → сразу hyprlock;
   рабочий стол рисуется *под* блокировкой (`session_lock_xray`), поэтому после разблокировки нет серого кадра и задержек.
 - **Hyprland:** вид окон (рамки, отступы, скругление, размытие, прозрачность) закреплён в `my_look()` и применяется после
-  каждой перезагрузки, так что темы HyDE меняют только цвета. Все мои настройки — в одном `hyprland.lua`; те немногие файлы
+  каждой перезагрузки, так что новые обои меняют только цвета. Все мои настройки — в одном `hyprland.lua`; те немногие файлы
   HyDE, которые приходится править, обрабатывает идемпотентный `hyde-patches.sh`.
 - **Жизнь на 8 ГБ:** zram размером с RAM + swap-файл 8 ГБ; earlyoom первыми закрывает вкладки браузера и никогда — рабочий
   стол; Firefox работает в своей cgroup (`firefox.slice`, 4 ГБ), поэтому переполнение закрывает одну вкладку, а не сессию;
@@ -710,8 +730,11 @@ MIT — див. [LICENSE](LICENSE).
 - **Меню по размеру монитора:** rofi работает через XWayland и не учитывает масштаб монитора, поэтому небольшая обёртка
   `rofi` снижает DPI на экране 1080p. Монитор определяется по курсору, потому что клик по Waybar не переносит фокус.
 - **Logitech без G HUB:** пилюля мыши с зарядом, DPI и частотой опроса (Solaar) и меню, чтобы их менять. Подсветка
-  клавиатуры меняется вместе с темой HyDE через шаблон wallbash и OpenRGB. Win и Alt поменяны местами только на внешней
-  клавиатуре: Super у пробела, как Cmd на MacBook.
+  клавиатуры меняется вместе с обоями через шаблон wallbash и сервер OpenRGB, который запускается при входе: цвет
+  меняется мгновенно, и повторный опрос USB не мешает Solaar (а если Solaar всё же занят, пилюля мыши повторяет запрос
+  и показывает последние данные). Win и Alt поменяны местами только на внешней клавиатуре: Super у пробела, как Cmd на
+  MacBook. Её Fn не доходит до системы, поэтому медиаклавиши на Alt: `ALT+F9–F12` — пуск/пауза, стоп, предыдущий,
+  следующий трек; `ALT+Print / Scroll Lock / Pause` — выключить звук, тише, громче.
 - **Любую правку можно откатить:** `./rice push` сохраняет прежнюю версию каждого файла в `~/.local/state/rice-bak/`,
   системные файлы применяются по одному с показом diff, а у каждой доработки свой скрипт полного удаления.
 
@@ -828,6 +851,8 @@ yumi-rice/
   `led_zone_*` как `ignore` в его конфиге.
 - Режим `Direct` в OpenRGB на клавиатуре PRO пропускает клавиши, а порядок светодиодов не совпадает с раскладкой:
   надёжен `Static`.
+- Обычный `openrgb` при каждом вызове несколько секунд заново опрашивает все USB-устройства, и Solaar в это время не
+  может прочитать мышь: запускать `openrgb --server` один раз при входе, а цвет отправлять через `--client`.
 - Монитор, подключённый после входа, получает чёрный фон: перерисовывайте обои по событию `monitor.added`.
 - dp-altmode: если отключить монитор и усыпить ноутбук, следующее подключение может не сработать до перезагрузки
   (известный открытый баг). После обновления ядра патч нужно пересобрать.

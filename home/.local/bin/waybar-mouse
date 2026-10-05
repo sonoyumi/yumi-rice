@@ -2,14 +2,18 @@
 # Мышь Logitech для Waybar: заряд на панели, DPI и частота в подсказке.
 # Данные из `solaar show` (~2,5 с на вызов), копия в кеше для menu-mouse.
 # Если мышь выключена или приёмника нет — пустой текст, Waybar скрывает модуль.
+# Solaar иногда не отвечает (например, пока OpenRGB опрашивает USB при смене обоев):
+# тогда ещё две попытки через 3 с, а если и они не удались — последние данные из кеша.
 import json
 import os
 import re
 import subprocess
+import time
 
 DEVICE = "PRO X 2"
 CACHE = os.path.expanduser("~/.cache/waybar-mouse.json")
 CHARGING = {"RECHARGING", "SLOW_RECHARGE", "ALMOST_FULL", "FULL"}
+CACHE_MAX_AGE = 15 * 60  # кеш старше 15 минут не показываем
 
 
 def hz(rate):
@@ -39,13 +43,32 @@ def read():
     }
 
 
+def cached():
+    try:
+        if time.time() - os.path.getmtime(CACHE) > CACHE_MAX_AGE:
+            return None
+        with open(CACHE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
 def main():
-    d = read()
+    d = None
+    for attempt in range(3):
+        d = read()
+        if d is not None:
+            break
+        if attempt < 2:
+            time.sleep(3)
+    if d is not None:
+        with open(CACHE, "w") as f:
+            json.dump(d, f)
+    else:
+        d = cached()
     if d is None:
         print(json.dumps({"text": "", "class": "offline"}))
         return
-    with open(CACHE, "w") as f:
-        json.dump(d, f)
     pct = d["battery"]
     cls = "charging" if d["charging"] else "critical" if pct <= 15 else "warning" if pct <= 30 else "normal"
     tip = [f"{DEVICE}: {pct}%" + (" · заряжается" if d["charging"] else "")]
