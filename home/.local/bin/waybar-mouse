@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+# Мышь Logitech для Waybar: заряд на панели, DPI и частота в подсказке.
+# Данные из `solaar show` (~2,5 с на вызов), копия в кеше для menu-mouse.
+# Если мышь выключена или приёмника нет — пустой текст, Waybar скрывает модуль.
+import json
+import os
+import re
+import subprocess
+
+DEVICE = "PRO X 2"
+CACHE = os.path.expanduser("~/.cache/waybar-mouse.json")
+CHARGING = {"RECHARGING", "SLOW_RECHARGE", "ALMOST_FULL", "FULL"}
+
+
+def hz(rate):
+    """'1ms' → 1000, '125us' → 8000."""
+    m = re.match(r"(\d+)(ms|us)", rate or "")
+    if not m:
+        return None
+    n, unit = int(m[1]), m[2]
+    return round(1000 / n) if unit == "ms" else round(1_000_000 / n)
+
+
+def read():
+    try:
+        out = subprocess.run(["solaar", "show", DEVICE], capture_output=True, text=True, timeout=20).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    bat = re.search(r"Battery: (\d+)%, BatteryStatus\.(\w+)", out)
+    if not bat:
+        return None
+    dpi = re.search(r"Sensitivity \(DPI\)\s*: \{X:(\d+)", out)
+    rate = re.search(r"Report Rate\s*: (\S+)", out)
+    return {
+        "battery": int(bat[1]),
+        "charging": bat[2] in CHARGING,
+        "dpi": int(dpi[1]) if dpi else None,
+        "rate": rate[1] if rate else None,
+    }
+
+
+def main():
+    d = read()
+    if d is None:
+        print(json.dumps({"text": "", "class": "offline"}))
+        return
+    with open(CACHE, "w") as f:
+        json.dump(d, f)
+    pct = d["battery"]
+    cls = "charging" if d["charging"] else "critical" if pct <= 15 else "warning" if pct <= 30 else "normal"
+    tip = [f"{DEVICE}: {pct}%" + (" · заряжается" if d["charging"] else "")]
+    if d["dpi"]:
+        tip.append(f"DPI: {d['dpi']}")
+    if hz(d["rate"]):
+        tip.append(f"Частота: {hz(d['rate'])} Гц")
+    print(json.dumps({
+        "text": f"󰍽 {pct}%" + (" 󱐋" if d["charging"] else ""),
+        "tooltip": "\n".join(tip),
+        "class": cls,
+        "percentage": pct,
+    }, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()

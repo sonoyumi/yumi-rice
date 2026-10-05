@@ -26,7 +26,7 @@ repository and the system in step, with a backup of every file it touches.
 
 | | |
 |---|---|
-| Hardware | MacBook Pro 13" M1 (2020), 8 GB RAM, 2560×1600 display, scale 1.666667 |
+| Hardware | MacBook Pro 13" M1 (2020), 8 GB RAM, 2560×1600 display, scale 1.666667 · second monitor MSI G27C3F 1920×1080 @ 180 Hz over USB-C · Logitech PRO keyboard and PRO X 2 mouse |
 | OS | Arch Linux ARM ([Asahi](https://asahilinux.org/)), `linux-asahi` kernel, 16K memory pages, btrfs |
 | Desktop | [HyDE](https://github.com/HyDE-Project/HyDE) + Hyprland 0.56 with the Lua config, started via uwsm |
 | Bar / notifications / menus | Waybar · swaync · rofi |
@@ -65,6 +65,16 @@ repository and the system in step, with a backup of every file it touches.
   `lim 1G <command>` runs test servers in `dev.slice` with a personal memory cap; Pylance in light mode (~210 MB instead of ~700).
 - **System:** silent boot (hidden GRUB menu, `quiet loglevel=3`), btrfs snapshots with snapper (`/` before and after
   every pacman run, `/home` every hour), fast shutdown, faillock, BlueZ Experimental for headphone battery.
+- **Two monitors on an M1 MacBook:** the external display runs over USB-C DisplayPort alt mode, made possible by
+  [haripako/dp-altmode](https://github.com/haripako/dp-altmode) — thanks to its author. Workspaces 1–5 live on the MacBook, 6–10 on the external monitor, all ten
+  stay visible in Waybar. Unplug the monitor and its workspaces move to the laptop; plug it back in and they return, with
+  the wallpaper redrawn. The monitor block in `hyprland.lua` is commented out: it is an example for my setup, every
+  machine needs its own outputs, modes and positions.
+- **Menus sized per monitor:** rofi runs through XWayland and ignores the monitor scale, so a small `rofi` wrapper lowers
+  the DPI on the 1080p screen. The monitor is picked by the cursor, because a click on Waybar does not move focus.
+- **Logitech without G HUB:** a mouse pill with battery, DPI and polling rate (Solaar) and a menu to change them. The
+  keyboard backlight follows the HyDE theme through a wallbash template and OpenRGB. Win and Alt are swapped only on the
+  external keyboard, so Super sits next to the space bar like Cmd on the MacBook.
 - **Every change can be undone:** `./rice push` keeps the previous version of each file in `~/.local/state/rice-bak/`,
   system files are applied one by one after showing the diff, and every add-on has its own full uninstall script.
 
@@ -80,6 +90,9 @@ repository and the system in step, with a backup of every file it touches.
 | Player card | Network and VPN |
 | ![Sound](assets/screenshots/menu-sound.png) | ![Power](assets/screenshots/menu-power.png) |
 | Sound | Power menu |
+
+![Two monitors](assets/screenshots/two-monitors.jpg)
+<p align="center">MacBook (2560×1600) and MSI (1920×1080 @ 180 Hz) side by side · cava on the external monitor</p>
 
 ![Waybar](assets/screenshots/bar.png)
 
@@ -111,7 +124,8 @@ You need [HyDE](https://github.com/HyDE-Project/HyDE) with Hyprland ≥ 0.56 (Lu
 ```bash
 sudo pacman -S --needed waybar swaync rofi jq cliphist wl-clipboard playerctl imagemagick \
     inotify-tools networkmanager-dmenu bluez-utils power-profiles-daemon libnotify \
-    brightnessctl btop kitty ttf-jetbrains-mono-nerd yt-dlp earlyoom zram-generator
+    brightnessctl btop kitty ttf-jetbrains-mono-nerd yt-dlp earlyoom zram-generator \
+    solaar openrgb
 ```
 
 ```bash
@@ -186,6 +200,13 @@ yumi-rice/
 - 16K pages: images with jemalloc built for 4K crash — `muvm` helps.
 - `MemoryHigh` without free swap freezes a process instead of killing it — use `MemoryMax`.
 - AirPods with macOS dual boot: `br-connection-key-missing` → remove and pair again.
+- rofi under XWayland with `force_zero_scaling` draws in physical pixels on every monitor: pass `-dpi` per monitor.
+- Solaar reapplies its saved LED zones on start and can switch the keyboard backlight off: mark `led_control` and
+  `led_zone_*` as `ignore` in its config.
+- OpenRGB `Direct` mode on the PRO keyboard drops keys and its LED order does not match the layout: `Static` is reliable.
+- A monitor connected after login gets a black background: redraw the wallpaper on `monitor.added`.
+- dp-altmode: after unplugging the monitor and suspending, the next connect can fail until a reboot (a known open bug).
+  Kernel updates need the patch rebuilt.
 
 ### Credits
 
@@ -193,7 +214,8 @@ yumi-rice/
 [Hyprland](https://hyprland.org/) · [Asahi Linux](https://asahilinux.org/) ·
 [Hyprlock-Dots](https://github.com/mahaveergurjar/Hyprlock-Dots) (lock screen layout) ·
 [swaync](https://github.com/ErikReider/SwayNotificationCenter) · [Waybar](https://github.com/Alexays/Waybar) ·
-[rofi](https://github.com/davatorium/rofi)
+[rofi](https://github.com/davatorium/rofi) ·
+[dp-altmode](https://github.com/haripako/dp-altmode) by haripako (USB-C DisplayPort on M1) · [Solaar](https://github.com/pwr-Solaar/Solaar) · [OpenRGB](https://openrgb.org/)
 
 ### Author
 
@@ -224,7 +246,7 @@ repository e sistema, con un backup di ogni file che tocca.
 
 | | |
 |---|---|
-| Hardware | MacBook Pro 13" M1 (2020), 8 GB di RAM, schermo 2560×1600, scala 1.666667 |
+| Hardware | MacBook Pro 13" M1 (2020), 8 GB di RAM, schermo 2560×1600, scala 1.666667 · secondo monitor MSI G27C3F 1920×1080 @ 180 Hz via USB-C · tastiera Logitech PRO e mouse PRO X 2 |
 | Sistema | Arch Linux ARM ([Asahi](https://asahilinux.org/)), kernel `linux-asahi`, pagine di memoria da 16K, btrfs |
 | Desktop | [HyDE](https://github.com/HyDE-Project/HyDE) + Hyprland 0.56 con configurazione Lua, avviato tramite uwsm |
 | Barra / notifiche / menu | Waybar · swaync · rofi |
@@ -266,6 +288,16 @@ repository e sistema, con un backup di ogni file che tocca.
   (~210 MB invece di ~700).
 - **Sistema:** avvio silenzioso (menu GRUB nascosto, `quiet loglevel=3`), snapshot btrfs con snapper (`/` prima e dopo
   ogni pacman, `/home` ogni ora), spegnimento rapido, faillock, BlueZ Experimental per la batteria delle cuffie.
+- **Due monitor su un MacBook M1:** lo schermo esterno funziona tramite DisplayPort alt mode su USB-C, grazie a
+  [haripako/dp-altmode](https://github.com/haripako/dp-altmode) — un ringraziamento al suo autore. Le scrivanie 1–5 stanno sul MacBook, 6–10 sul monitor esterno,
+  tutte e dieci restano visibili in Waybar. Scolleghi il monitor e le sue scrivanie passano al portatile; lo ricolleghi e
+  tornano, con lo sfondo ridisegnato. Il blocco dei monitor in `hyprland.lua` è commentato: è un esempio della mia
+  configurazione, ogni macchina ha le sue uscite, modalità e posizioni.
+- **Menu in scala per monitor:** rofi gira tramite XWayland e ignora la scala del monitor, quindi un piccolo wrapper `rofi`
+  abbassa i DPI sullo schermo 1080p. Il monitor si sceglie dal cursore, perché un clic su Waybar non sposta il focus.
+- **Logitech senza G HUB:** una pillola del mouse con batteria, DPI e frequenza di polling (Solaar) e un menu per
+  cambiarli. La retroilluminazione della tastiera segue il tema HyDE tramite un template wallbash e OpenRGB. Win e Alt sono
+  scambiati solo sulla tastiera esterna, così Super sta accanto alla barra spaziatrice come Cmd sul MacBook.
 - **Ogni modifica si può annullare:** `./rice push` conserva la versione precedente di ogni file in `~/.local/state/rice-bak/`,
   i file di sistema si applicano uno alla volta dopo aver mostrato il diff, e ogni aggiunta ha il proprio script di rimozione completa.
 
@@ -301,7 +333,8 @@ Servono [HyDE](https://github.com/HyDE-Project/HyDE) con Hyprland ≥ 0.56 (conf
 ```bash
 sudo pacman -S --needed waybar swaync rofi jq cliphist wl-clipboard playerctl imagemagick \
     inotify-tools networkmanager-dmenu bluez-utils power-profiles-daemon libnotify \
-    brightnessctl btop kitty ttf-jetbrains-mono-nerd yt-dlp earlyoom zram-generator
+    brightnessctl btop kitty ttf-jetbrains-mono-nerd yt-dlp earlyoom zram-generator \
+    solaar openrgb
 ```
 
 ```bash
@@ -376,6 +409,14 @@ yumi-rice/
 - Pagine da 16K: le immagini con jemalloc compilato per 4K si bloccano — aiuta `muvm`.
 - `MemoryHigh` senza swap libero congela il processo invece di chiuderlo — usa `MemoryMax`.
 - AirPods con dual boot macOS: `br-connection-key-missing` → rimuovi e abbina di nuovo.
+- rofi sotto XWayland con `force_zero_scaling` disegna in pixel fisici su ogni monitor: serve `-dpi` per monitor.
+- Solaar all'avvio riapplica le zone LED salvate e può spegnere la retroilluminazione della tastiera: segna `led_control`
+  e `led_zone_*` come `ignore` nella sua configurazione.
+- La modalità `Direct` di OpenRGB sulla tastiera PRO salta dei tasti e l'ordine dei LED non corrisponde al layout:
+  `Static` è affidabile.
+- Un monitor collegato dopo il login ha lo sfondo nero: ridisegna lo sfondo su `monitor.added`.
+- dp-altmode: dopo aver scollegato il monitor e sospeso il portatile, il collegamento successivo può fallire fino al
+  riavvio (bug noto e aperto). Dopo un aggiornamento del kernel la patch va ricompilata.
 
 ### Ringraziamenti
 
@@ -383,7 +424,8 @@ yumi-rice/
 [Hyprland](https://hyprland.org/) · [Asahi Linux](https://asahilinux.org/) ·
 [Hyprlock-Dots](https://github.com/mahaveergurjar/Hyprlock-Dots) (layout della schermata di blocco) ·
 [swaync](https://github.com/ErikReider/SwayNotificationCenter) · [Waybar](https://github.com/Alexays/Waybar) ·
-[rofi](https://github.com/davatorium/rofi)
+[rofi](https://github.com/davatorium/rofi) ·
+[dp-altmode](https://github.com/haripako/dp-altmode) di haripako (DisplayPort via USB-C su M1) · [Solaar](https://github.com/pwr-Solaar/Solaar) · [OpenRGB](https://openrgb.org/)
 
 ### Autore
 
@@ -414,7 +456,7 @@ MIT, vedi [LICENSE](LICENSE).
 
 | | |
 |---|---|
-| Залізо | MacBook Pro 13" M1 (2020), 8 ГБ RAM, екран 2560×1600, масштаб 1.666667 |
+| Залізо | MacBook Pro 13" M1 (2020), 8 ГБ RAM, екран 2560×1600, масштаб 1.666667 · другий монітор MSI G27C3F 1920×1080 @ 180 Гц через USB-C · клавіатура Logitech PRO і миша PRO X 2 |
 | ОС | Arch Linux ARM ([Asahi](https://asahilinux.org/)), ядро `linux-asahi`, сторінки пам'яті 16K, btrfs |
 | Робочий стіл | [HyDE](https://github.com/HyDE-Project/HyDE) + Hyprland 0.56 з Lua-конфігом, запуск через uwsm |
 | Панель / сповіщення / меню | Waybar · swaync · rofi |
@@ -453,6 +495,16 @@ MIT, vedi [LICENSE](LICENSE).
   (~210 МБ замість ~700).
 - **Система:** тихе завантаження (приховане меню GRUB, `quiet loglevel=3`), знімки btrfs через snapper (`/` до й після
   кожного pacman, `/home` щогодини), швидке вимкнення, faillock, BlueZ Experimental для заряду навушників.
+- **Два монітори на MacBook M1:** зовнішній екран працює через DisplayPort по USB-C завдяки
+  [haripako/dp-altmode](https://github.com/haripako/dp-altmode) — дякую автору. Робочі столи 1–5 на MacBook, 6–10 на зовнішньому моніторі, усі десять видно у
+  Waybar. Від'єднали монітор — його столи переїжджають на ноутбук; під'єднали — повертаються, шпалери перемальовуються.
+  Блок моніторів у `hyprland.lua` закоментований: це приклад моєї конфігурації, для кожної машини свої виходи, режими й
+  позиції.
+- **Меню за розміром монітора:** rofi працює через XWayland і не враховує масштаб монітора, тому невелика обгортка `rofi`
+  знижує DPI на екрані 1080p. Монітор визначається за курсором, бо клік у Waybar не переносить фокус.
+- **Logitech без G HUB:** пігулка миші із зарядом, DPI і частотою опитування (Solaar) та меню, щоб їх змінювати.
+  Підсвітка клавіатури змінюється разом із темою HyDE через шаблон wallbash і OpenRGB. Win і Alt поміняні місцями лише на
+  зовнішній клавіатурі: Super біля пробілу, як Cmd на MacBook.
 - **Будь-яку зміну можна відкотити:** `./rice push` зберігає попередню версію кожного файлу в `~/.local/state/rice-bak/`,
   системні файли застосовуються по одному з показом diff, а кожне доповнення має власний скрипт повного видалення.
 
@@ -488,7 +540,8 @@ MIT, vedi [LICENSE](LICENSE).
 ```bash
 sudo pacman -S --needed waybar swaync rofi jq cliphist wl-clipboard playerctl imagemagick \
     inotify-tools networkmanager-dmenu bluez-utils power-profiles-daemon libnotify \
-    brightnessctl btop kitty ttf-jetbrains-mono-nerd yt-dlp earlyoom zram-generator
+    brightnessctl btop kitty ttf-jetbrains-mono-nerd yt-dlp earlyoom zram-generator \
+    solaar openrgb
 ```
 
 ```bash
@@ -563,6 +616,14 @@ yumi-rice/
 - Сторінки 16K: образи з jemalloc, зібраним під 4K, падають — рятує `muvm`.
 - `MemoryHigh` без вільного свопу заморожує процес замість того, щоб закрити його, — використовуйте `MemoryMax`.
 - AirPods при подвійному завантаженні з macOS: `br-connection-key-missing` → видалити й спарити знову.
+- rofi під XWayland з `force_zero_scaling` малює у фізичних пікселях на будь-якому моніторі: потрібен свій `-dpi` для кожного.
+- Solaar під час запуску застосовує збережені зони підсвітки і може вимкнути підсвітку клавіатури: позначте `led_control`
+  і `led_zone_*` як `ignore` у його конфігурації.
+- Режим `Direct` в OpenRGB на клавіатурі PRO пропускає клавіші, а порядок світлодіодів не збігається з розкладкою:
+  надійний `Static`.
+- Монітор, під'єднаний після входу, отримує чорне тло: перемальовуйте шпалери за подією `monitor.added`.
+- dp-altmode: якщо від'єднати монітор і приспати ноутбук, наступне під'єднання може не спрацювати до перезавантаження
+  (відомий відкритий баг). Після оновлення ядра патч треба перезібрати.
 
 ### Подяки
 
@@ -570,7 +631,8 @@ yumi-rice/
 [Hyprland](https://hyprland.org/) · [Asahi Linux](https://asahilinux.org/) ·
 [Hyprlock-Dots](https://github.com/mahaveergurjar/Hyprlock-Dots) (розкладка екрана блокування) ·
 [swaync](https://github.com/ErikReider/SwayNotificationCenter) · [Waybar](https://github.com/Alexays/Waybar) ·
-[rofi](https://github.com/davatorium/rofi)
+[rofi](https://github.com/davatorium/rofi) ·
+[dp-altmode](https://github.com/haripako/dp-altmode) від haripako (DisplayPort по USB-C на M1) · [Solaar](https://github.com/pwr-Solaar/Solaar) · [OpenRGB](https://openrgb.org/)
 
 ### Автор
 
@@ -601,7 +663,7 @@ MIT — див. [LICENSE](LICENSE).
 
 | | |
 |---|---|
-| Железо | MacBook Pro 13" M1 (2020), 8 ГБ RAM, экран 2560×1600, масштаб 1.666667 |
+| Железо | MacBook Pro 13" M1 (2020), 8 ГБ RAM, экран 2560×1600, масштаб 1.666667 · второй монитор MSI G27C3F 1920×1080 @ 180 Гц через USB-C · клавиатура Logitech PRO и мышь PRO X 2 |
 | ОС | Arch Linux ARM ([Asahi](https://asahilinux.org/)), ядро `linux-asahi`, страницы памяти 16K, btrfs |
 | Рабочий стол | [HyDE](https://github.com/HyDE-Project/HyDE) + Hyprland 0.56 с Lua-конфигом, запуск через uwsm |
 | Бар / уведомления / меню | Waybar · swaync · rofi |
@@ -640,6 +702,16 @@ MIT — див. [LICENSE](LICENSE).
   (~210 МБ вместо ~700).
 - **Система:** тихая загрузка (скрытое меню GRUB, `quiet loglevel=3`), снимки btrfs через snapper (`/` до и после каждого
   pacman, `/home` каждый час), быстрое выключение, faillock, BlueZ Experimental для заряда наушников.
+- **Два монитора на MacBook M1:** внешний экран работает через DisplayPort по USB-C благодаря
+  [haripako/dp-altmode](https://github.com/haripako/dp-altmode) — спасибо автору. Рабочие столы 1–5 на MacBook, 6–10 на внешнем мониторе, все десять видны в
+  Waybar. Отключили монитор — его столы переезжают на ноутбук; подключили — возвращаются, обои перерисовываются.
+  Блок мониторов в `hyprland.lua` закомментирован: это пример моей конфигурации, у каждой машины свои выходы, режимы и
+  позиции.
+- **Меню по размеру монитора:** rofi работает через XWayland и не учитывает масштаб монитора, поэтому небольшая обёртка
+  `rofi` снижает DPI на экране 1080p. Монитор определяется по курсору, потому что клик по Waybar не переносит фокус.
+- **Logitech без G HUB:** пилюля мыши с зарядом, DPI и частотой опроса (Solaar) и меню, чтобы их менять. Подсветка
+  клавиатуры меняется вместе с темой HyDE через шаблон wallbash и OpenRGB. Win и Alt поменяны местами только на внешней
+  клавиатуре: Super у пробела, как Cmd на MacBook.
 - **Любую правку можно откатить:** `./rice push` сохраняет прежнюю версию каждого файла в `~/.local/state/rice-bak/`,
   системные файлы применяются по одному с показом diff, а у каждой доработки свой скрипт полного удаления.
 
@@ -675,7 +747,8 @@ MIT — див. [LICENSE](LICENSE).
 ```bash
 sudo pacman -S --needed waybar swaync rofi jq cliphist wl-clipboard playerctl imagemagick \
     inotify-tools networkmanager-dmenu bluez-utils power-profiles-daemon libnotify \
-    brightnessctl btop kitty ttf-jetbrains-mono-nerd yt-dlp earlyoom zram-generator
+    brightnessctl btop kitty ttf-jetbrains-mono-nerd yt-dlp earlyoom zram-generator \
+    solaar openrgb
 ```
 
 ```bash
@@ -750,6 +823,14 @@ yumi-rice/
 - Страницы 16K: образы с jemalloc, собранным под 4K, падают — выручает `muvm`.
 - `MemoryHigh` без свободного свопа замораживает процесс вместо того, чтобы закрыть, — используйте `MemoryMax`.
 - AirPods при двойной загрузке с macOS: `br-connection-key-missing` → удалить и сопрячь заново.
+- rofi под XWayland с `force_zero_scaling` рисует в физических пикселях на любом мониторе: нужен свой `-dpi` для каждого.
+- Solaar при запуске применяет сохранённые зоны подсветки и может погасить клавиатуру: пометьте `led_control` и
+  `led_zone_*` как `ignore` в его конфиге.
+- Режим `Direct` в OpenRGB на клавиатуре PRO пропускает клавиши, а порядок светодиодов не совпадает с раскладкой:
+  надёжен `Static`.
+- Монитор, подключённый после входа, получает чёрный фон: перерисовывайте обои по событию `monitor.added`.
+- dp-altmode: если отключить монитор и усыпить ноутбук, следующее подключение может не сработать до перезагрузки
+  (известный открытый баг). После обновления ядра патч нужно пересобрать.
 
 ### Благодарности
 
@@ -757,7 +838,8 @@ yumi-rice/
 [Hyprland](https://hyprland.org/) · [Asahi Linux](https://asahilinux.org/) ·
 [Hyprlock-Dots](https://github.com/mahaveergurjar/Hyprlock-Dots) (раскладка экрана блокировки) ·
 [swaync](https://github.com/ErikReider/SwayNotificationCenter) · [Waybar](https://github.com/Alexays/Waybar) ·
-[rofi](https://github.com/davatorium/rofi)
+[rofi](https://github.com/davatorium/rofi) ·
+[dp-altmode](https://github.com/haripako/dp-altmode) от haripako (DisplayPort по USB-C на M1) · [Solaar](https://github.com/pwr-Solaar/Solaar) · [OpenRGB](https://openrgb.org/)
 
 ### Автор
 

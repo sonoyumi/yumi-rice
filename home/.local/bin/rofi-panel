@@ -14,16 +14,21 @@ lines="${2:-6}"
 shift 2 2>/dev/null || shift $#
 [[ "$1" =~ ^[0-9]+$ ]] && shift   # совместимость со старым аргументом высоты
 
-# rofi работает через XWayland, поэтому позицию считаем в физических пикселях
-bar=64                     # отступ от верха (под баром)
-margin=20                  # отступ от краёв экрана
-half="${PANEL_HALF:-190}"  # примерно половина ширины окна
+# rofi работает через XWayland, поэтому позицию считаем в физических пикселях.
+# Отступы заданы в пикселях MacBook (масштаб 1.666667) и пересчитываются под монитор в фокусе.
 far=160                    # на сколько (логических px) можно отвести курсор (только для Waybar)
 mouse_close=1              # закрывать при уходе мыши (выключается для биндов)
 
 read -r cx cy < <(hyprctl cursorpos | awk -F', *' '{printf "%d %d\n", $1, $2}')
 [ -n "$PANEL_CURSOR" ] && read -r cx cy <<<"$PANEL_CURSOR"
-read -r mx my mw mh ms < <(hyprctl -j monitors | jq -r '.[] | select(.focused) | "\(.x) \(.y) \(.width) \(.height) \(.scale)"')
+# Монитор — тот, где курсор (при клике в Waybar фокус может остаться на другом экране)
+read -r mx my mw mh ms mon < <(hyprctl -j monitors | jq -r --argjson x "$cx" --argjson y "$cy" \
+    '[.[] | select($x >= .x and $x < .x + .width / .scale and $y >= .y and $y < .y + .height / .scale)] + [.[] | select(.focused)] | .[0] | "\(.x) \(.y) \(.width) \(.height) \(.scale) \(.name)"')
+# DPI rofi на этом мониторе (см. ~/.local/bin/rofi): окно меню уже во столько же раз
+case "$mon" in DP-1) dpi=64 ;; *) dpi=96 ;; esac
+bar=$(awk -v s="$ms" 'BEGIN{printf "%d", 64 * s / 1.666667}')                        # отступ от верха (под баром)
+margin=$(awk -v s="$ms" 'BEGIN{printf "%d", 20 * s / 1.666667}')                     # отступ от краёв экрана
+half=$(awk -v h="${PANEL_HALF:-190}" -v d="$dpi" 'BEGIN{printf "%d", h * d / 96}')   # примерно половина ширины окна
 rx=$(awk -v c="$cx" -v m="$mx" -v s="$ms" 'BEGIN{printf "%d", (c-m)*s}')
 ry=$(awk -v c="$cy" -v m="$my" -v s="$ms" 'BEGIN{printf "%d", (c-m)*s}')
 lw="$mw"; lh="$mh"

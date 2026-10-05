@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Обёртка rofi: масштаб меню по монитору под курсором.
+# rofi 1.7 работает через XWayland с force_zero_scaling и рисует в физических пикселях,
+# поэтому на MSI (1080p, масштаб 1) меню выходят вдвое крупнее, чем на MacBook.
+# Размеры подобраны на MacBook (DPI 96), на остальных мониторах DPI меньше.
+# Монитор — тот, где курсор: при клике в Waybar фокус может остаться на другом экране.
+# Имена и DPI ниже — пример для моего MSI; свои выходы: `hyprctl monitors all`.
+# Откат: удалить этот файл.
+declare -A DPI=(
+    [DP-1]=64   # MSI G27C3F: ×0.67
+)
+
+read -r cx cy < <(hyprctl cursorpos 2>/dev/null | awk -F', *' '{printf "%d %d\n", $1, $2}')
+mon=$(hyprctl -j monitors 2>/dev/null | jq -r --argjson x "${cx:-0}" --argjson y "${cy:-0}" \
+    '.[] | select($x >= .x and $x < .x + .width / .scale and $y >= .y and $y < .y + .height / .scale) | .name' 2>/dev/null)
+if [[ -n "$mon" && -n "${DPI[$mon]}" ]]; then
+    exec /usr/bin/rofi -dpi "${DPI[$mon]}" "$@"
+fi
+exec /usr/bin/rofi "$@"

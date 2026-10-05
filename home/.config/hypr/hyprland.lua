@@ -101,6 +101,54 @@ hl.on("hyprland.start", function()
 	-- плагины подключаются через hl.plugin.load (ниже)
 end)
 
+-- === Внешняя клавиатура Logitech PRO ===
+-- Win и Alt поменяны местами только на ней: Super у пробела, как Cmd на MacBook.
+-- В системе она видна двумя устройствами, поэтому правило на оба имени
+for _, kb in ipairs({ "logitech-pro-gaming-keyboard", "logitech-pro-gaming-keyboard-1" }) do
+	hl.device({
+		name = kb,
+		kb_layout = "us,ru,ua",
+		kb_options = "altwin:swap_alt_win",
+	})
+end
+
+-- При входе в систему: цвет подсветки по текущей теме и Solaar для мыши
+hl.on("hyprland.start", function()
+	hl.exec_cmd(os.getenv("HOME") .. "/.config/hyde/wallbash/scripts/keyboard.sh")
+	-- Solaar в фоне: держит DPI и частоту мыши (встроенный профиль выключен)
+	hl.exec_cmd("solaar --window=hide")
+end)
+
+-- === Два монитора (пример) ===
+-- Это МОЯ конфигурация: MacBook Pro M1 + MSI G27C3F справа. Всё индивидуально —
+-- имена выходов, режимы, позиции и масштаб подберите под своё железо
+-- (`hyprctl monitors all`) и только потом раскомментируйте.
+-- Внешний монитор по USB-C на MacBook M1 под Asahi работает благодаря проекту
+-- dp-altmode от haripako: https://github.com/haripako/dp-altmode — спасибо автору!
+--
+-- -- MacBook: родное разрешение, масштаб 1.666667
+-- hl.monitor({ output = "eDP-1", mode = "2560x1600@60", position = "0x0", scale = 1.666667 })
+-- -- MSI справа (1536 = 2560 / 1.666667): 180 Гц, без масштабирования
+-- hl.monitor({ output = "DP-1", mode = "1920x1080@180", position = "1536x0", scale = 1 })
+--
+-- -- Рабочие столы: 1–5 на MacBook, 6–10 на внешнем (по 5 на каждом, всегда видны в Waybar).
+-- -- default: при подключении внешнего монитора открывается 6, а не первый свободный номер
+-- for i = 1, 10 do
+-- 	hl.workspace_rule({
+-- 		workspace = tostring(i),
+-- 		monitor = (i <= 5) and "eDP-1" or "DP-1",
+-- 		default = (i == 1 or i == 6),
+-- 		persistent = true,
+-- 	})
+-- end
+--
+-- -- Обои на мониторе, подключённом после старта (иначе там чёрный фон)
+-- hl.on("monitor.added", function()
+-- 	hl.exec_cmd([[sh -c 'sleep 2; awww img --transition-type none "$(readlink -f "$HOME/.cache/hyde/wall.set")"']])
+-- end)
+--
+-- Меню rofi на внешнем мониторе уменьшает обёртка ~/.local/bin/rofi (DPI по имени монитора).
+
 -- === Жесты 3 пальцами вверх/вниз (свои для каждого лейаута) ===
 local function overview()
 	hl.exec_cmd("@HOME@/.local/bin/menu-workspaces")

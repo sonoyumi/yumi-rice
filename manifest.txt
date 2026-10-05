@@ -74,3 +74,8 @@
 .local/bin/top-procs-uninstall
 .local/bin/setup-snapshots
 .local/bin/waybar-center-uninstall
+.local/bin/rofi
+.local/bin/waybar-mouse
+.local/bin/menu-mouse
+.config/hyde/wallbash/always/keyboard.dcol
+.config/hyde/wallbash/scripts/keyboard.sh

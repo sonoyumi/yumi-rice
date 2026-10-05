@@ -30,7 +30,11 @@
     "modules-center": ["custom/player"],
 
     // ===== Справа =====
-    "modules-right": ["group/pill#right1", "group/pill#right2", "group/pill#right3", "group/pill#right4"],
+    "modules-right": ["group/pill#mouse", "group/pill#right1", "group/pill#right2", "group/pill#right3", "group/pill#right4"],
+    "group/pill#mouse": {
+        "orientation": "inherit",
+        "modules": ["custom/mouse"]
+    },
     "group/pill#right1": {
         "orientation": "inherit",
         "modules": ["custom/swaync", "custom/updates", "custom/clip"]
@@ -140,6 +144,14 @@
         "format": "{}",
         "on-click": "@HOME@/.local/bin/menu-player",
         "on-click-middle": "playerctl play-pause"
+    },
+    "custom/mouse": {
+        "exec": "@HOME@/.local/bin/waybar-mouse",
+        "return-type": "json",
+        "interval": 60,
+        "signal": 13,
+        "format": "{}",
+        "on-click": "@HOME@/.local/bin/menu-mouse"
     },
     "custom/power": {
         "on-click": "@HOME@/.local/bin/powermenu"

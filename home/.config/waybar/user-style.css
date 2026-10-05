@@ -70,5 +70,11 @@ window#waybar {
 #custom-top       { padding: 0 12px 0 4px; }
 #custom-top.heavy { color: #f5a97f; }
 
+/* Мышь Logitech: оранжевая при 30%, красная при 15%, зелёная при зарядке */
+#custom-mouse          { padding: 0 12px; }
+#custom-mouse.warning  { color: #f5a97f; }
+#custom-mouse.critical { color: #ed8796; }
+#custom-mouse.charging { color: #a6da95; }
+
 /* Шрифт бара не зависит от темы */
 * { font-family: "JetBrainsMono Nerd Font"; }
