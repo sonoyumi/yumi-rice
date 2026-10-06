@@ -57,7 +57,8 @@ FALLBACK_COLORS = """
 @define-color yp-on-acc  rgba(20,12,38,1);
 """
 
-MONITOR_SCALE = {"DP-1": 0.8}     # как у экрана блокировки, плеера и rofi
+import yumimon  # noqa: E402
+MONITOR_SCALE = yumimon.ui_scale()   # ~/.config/yumi/monitors.conf — общий для меню, плеера, rofi, экрана блокировки
 WIDTH = 380                         # ширина меню на встроенном экране, логические px
 HEADER_H = 118                      # высота шапки из обоев
 BAR_GAP = 8                         # отступ под баром

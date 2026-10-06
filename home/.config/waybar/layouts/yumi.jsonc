@@ -12,7 +12,8 @@
     ],
 
     // ===== Слева =====
-    "modules-left": ["group/pill#arch", "group/pill#left1", "group/pill#left2"],
+    "modules-left": ["group/pill#arch", "group/pill#left1", "group/pill#left2"
+    ],
     "group/pill#arch": {
         "orientation": "inherit",
         "modules": ["custom/archlogo"]
@@ -90,7 +91,7 @@
     "custom/top": {
         "exec": "@HOME@/.local/bin/waybar-iconwrap @HOME@/.local/bin/waybar-pillfmt mem",
         "return-type": "json",
-        "interval": 10,
+        "interval": 20,
         "signal": 12,
         "format": "{}",
         "on-click": "@HOME@/.local/bin/yumi-menu-top"
@@ -127,21 +128,21 @@
     "custom/caffeine": {
         "exec": "@HOME@/.local/bin/waybar-iconwrap @HOME@/.local/bin/waybar-caffeine",
         "return-type": "json",
-        "interval": 30,
+        "interval": 120,
         "signal": 15,
         "on-click": "@HOME@/.local/bin/cc caffeine toggle"
     },
     "custom/wifi": {
         "exec": "@HOME@/.local/bin/waybar-iconwrap @HOME@/.local/bin/waybar-wifi",
         "return-type": "json",
-        "interval": 5,
+        "interval": 60,
         "signal": 16,
         "on-click": "@HOME@/.local/bin/yumi-menu-wifi"
     },
     "custom/bt": {
         "exec": "@HOME@/.local/bin/waybar-iconwrap @HOME@/.local/bin/waybar-bt",
         "return-type": "json",
-        "interval": 5,
+        "interval": 60,
         "signal": 17,
         "on-click": "@HOME@/.local/bin/yumi-menu-bluetooth"
     },
@@ -173,7 +174,7 @@
     "custom/powerprofile": {
         "exec": "@HOME@/.local/bin/waybar-iconwrap @HOME@/.local/bin/waybar-ppd",
         "return-type": "json",
-        "interval": 2,
+        "interval": 120,
         "signal": 8,
         "format": "{}",
         "on-click": "@HOME@/.local/bin/yumi-menu-power"
@@ -181,7 +182,7 @@
     "custom/workflow": {
         "exec": "@HOME@/.local/bin/waybar-iconwrap @HOME@/.local/bin/waybar-workflow",
         "return-type": "json",
-        "interval": 5,
+        "interval": 120,
         "signal": 9,
         "format": "{}",
         "on-click": "@HOME@/.local/bin/yumi-menu-power"
@@ -189,7 +190,7 @@
     "custom/vpn": {
         "exec": "@HOME@/.local/bin/waybar-iconwrap @HOME@/.local/bin/waybar-vpn",
         "return-type": "json",
-        "interval": 5,
+        "interval": 60,
         "signal": 10,
         "format": "{}",
         "on-click": "@HOME@/.local/bin/yumi-menu-vpn"
@@ -202,7 +203,7 @@
     "image#player-cover": {
         "exec": "@HOME@/.local/bin/waybar-player-cover",
         "signal": 14,
-        "interval": 5,
+        "interval": 30,
         "size": 22,
         "tooltip": false,
         "on-click": "@HOME@/.local/bin/yumi-player toggle --bar",

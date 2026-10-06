@@ -306,6 +306,10 @@ class Mouse:
                 if not ok:
                     break
             if ok:
+                try:
+                    os.remove(CACHE)                         # DPI/частота изменились — пилюля перечитает их у Solaar
+                except OSError:
+                    pass
                 yp.do("pkill", "-RTMIN+13", "-x", "waybar")    # пилюля перечитает мышь
             GLib.idle_add(done, ok, msg)
 

@@ -11,14 +11,14 @@
 # для «выбора лаунчера»). Заголовок, подпись, подсказка поиска и сетка (эмодзи, глифы) —
 # по скрипту, который открыл меню. Размер шрифта — как у GTK-меню на этом мониторе.
 # Отключить тему (оставить только DPI): ROFI_YUMI=0. Откат всего: rofi-yumi-uninstall.
-declare -A DPI=(
-    [DP-1]=64   # MSI G27C3F: ×0.67
-)
-# Во сколько физических пикселей GTK-меню рисует 1 px (yumi-panel: на DP-1 всё ×0.8);
-# для остальных мониторов — их масштаб.
-declare -A UI=(
-    [DP-1]=0.8
-)
+# DPI и коэффициент — из ~/.config/yumi/monitors.conf (столбцы dpi_rofi и интерфейс)
+declare -A DPI=() UI=()
+while read -r _m _ui _dpi _; do
+    [[ -z $_m || $_m == \#* ]] && continue
+    [[ $_dpi != 96 ]] && DPI[$_m]=$_dpi
+    [[ $_ui != 1.0 && $_ui != 1 ]] && UI[$_m]=$_ui
+done < <(sed 's/#.*//' "$HOME/.config/yumi/monitors.conf" 2>/dev/null)
+# UI — во сколько раз GTK-меню yumi-panel уменьшает всё на мониторе; для остальных мониторов — их масштаб.
 
 read -r cx cy < <(hyprctl cursorpos 2>/dev/null | awk -F', *' '{printf "%d %d\n", $1, $2}')
 read -r mon scale < <(hyprctl -j monitors 2>/dev/null | jq -r --argjson x "${cx:-0}" --argjson y "${cy:-0}" \

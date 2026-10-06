@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 # Мышь Logitech для Waybar: заряд на панели, DPI и частота в подсказке.
-# Данные из `solaar show` (~2,5 с на вызов), копия в кеше для menu-mouse.
+# Заряд и зарядка — из ядра (/sys/class/power_supply/hidpp_battery_*): мгновенно, без Solaar.
+# DPI и частота меняются редко — берутся из кеша ~/.cache/waybar-mouse.json; `solaar show` (~2 с)
+# вызывается, только если кеша нет или он старше 30 минут (меню мыши удаляет кеш после изменения).
 # Если мышь выключена или приёмника нет — пустой текст, Waybar скрывает модуль.
-# Solaar иногда не отвечает (например, пока OpenRGB опрашивает USB при смене обоев):
-# тогда ещё две попытки через 3 с, а если и они не удались — последние данные из кеша.
 import json
 import os
 import re
 import subprocess
 import time
+from pathlib import Path
 
 DEVICE = "PRO X 2"
 CACHE = os.path.expanduser("~/.cache/waybar-mouse.json")
 CHARGING = {"RECHARGING", "SLOW_RECHARGE", "ALMOST_FULL", "FULL"}
-CACHE_MAX_AGE = 15 * 60  # кеш старше 15 минут не показываем
+CACHE_FRESH = 30 * 60   # DPI/частоту перечитывать у Solaar не чаще, чем раз в 30 минут
+CACHE_MAX_AGE = 6 * 3600
 
 
 def hz(rate):
@@ -27,7 +29,33 @@ def hz(rate):
     return round(1000 / n) if unit == "ms" else round(1_000_000 / n)
 
 
-def read():
+def kernel_battery():
+    """(процент, заряжается) из драйвера hid-logitech-hidpp или None, если мыши нет."""
+    for p in Path("/sys/class/power_supply").glob("hidpp_battery_*"):
+        try:
+            if (p / "model_name").read_text().strip() != DEVICE:
+                continue
+            pct = int((p / "capacity").read_text())
+            status = (p / "status").read_text().strip()
+            return pct, status in ("Charging", "Full")
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def config_dpi():
+    """У PRO X 2 «расширенный» DPI: `solaar show` его не печатает, но Solaar хранит его в конфиге
+    (dpi_extended: {0: X, 1: Y, …})."""
+    try:
+        text = Path("~/.config/solaar/config.yaml").expanduser().read_text()
+    except OSError:
+        return None
+    block = text.split(f"_NAME: {DEVICE}", 1)[-1]
+    m = re.search(r"dpi_extended:\s*\{0:\s*(\d+)", block)
+    return int(m[1]) if m else None
+
+
+def solaar():
     try:
         out = subprocess.run(["solaar", "show", DEVICE], capture_output=True, text=True, timeout=20).stdout
     except (OSError, subprocess.TimeoutExpired):
@@ -40,14 +68,14 @@ def read():
     return {
         "battery": int(bat[1]),
         "charging": bat[2] in CHARGING,
-        "dpi": int(dpi[1]) if dpi else None,
+        "dpi": int(dpi[1]) if dpi else config_dpi(),
         "rate": rate[1] if rate else None,
     }
 
 
-def cached():
+def cached(max_age):
     try:
-        if time.time() - os.path.getmtime(CACHE) > CACHE_MAX_AGE:
+        if time.time() - os.path.getmtime(CACHE) > max_age:
             return None
         with open(CACHE) as f:
             return json.load(f)
@@ -56,27 +84,27 @@ def cached():
 
 
 def main():
-    d = None
-    for attempt in range(3):
-        d = read()
+    kb = kernel_battery()
+    d = cached(CACHE_FRESH)
+    if d is None:                       # нет свежего кеша — один раз спросить Solaar
+        d = solaar()
         if d is not None:
-            break
-        if attempt < 2:
-            time.sleep(3)
-    if d is not None:
-        with open(CACHE, "w") as f:
-            json.dump(d, f)
-    else:
-        d = cached()
-    if d is None:
+            with open(CACHE, "w") as f:
+                json.dump(d, f)
+        else:
+            d = cached(CACHE_MAX_AGE)
+    if kb is None and d is None:
         print(json.dumps({"text": "", "class": "offline"}))
         return
+    d = dict(d or {"dpi": None, "rate": None})
+    if kb is not None:
+        d["battery"], d["charging"] = kb
     pct = d["battery"]
     cls = "charging" if d["charging"] else "critical" if pct <= 15 else "warning" if pct <= 30 else "normal"
     tip = [f"{DEVICE}: {pct}%" + (" · заряжается" if d["charging"] else "")]
-    if d["dpi"]:
+    if d.get("dpi"):
         tip.append(f"DPI: {d['dpi']}")
-    if hz(d["rate"]):
+    if hz(d.get("rate")):
         tip.append(f"Частота: {hz(d['rate'])} Гц")
     print(json.dumps({
         "text": f"󰍽 {pct}%" + (" 󱐋" if d["charging"] else ""),

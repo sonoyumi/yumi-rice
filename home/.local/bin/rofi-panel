@@ -26,7 +26,7 @@ read -r cx cy < <(hyprctl cursorpos | awk -F', *' '{printf "%d %d\n", $1, $2}')
 read -r mx my mw mh ms mon < <(hyprctl -j monitors | jq -r --argjson x "$cx" --argjson y "$cy" \
     '[.[] | select($x >= .x and $x < .x + .width / .scale and $y >= .y and $y < .y + .height / .scale)] + [.[] | select(.focused)] | .[0] | "\(.x) \(.y) \(.width) \(.height) \(.scale) \(.name)"')
 # DPI rofi на этом мониторе (см. ~/.local/bin/rofi): окно меню уже во столько же раз
-case "$mon" in DP-1) dpi=64 ;; *) dpi=96 ;; esac
+dpi=$(awk -v m="$mon" '$1 == m {print $3; f=1} END {if (!f) print 96}' <(sed 's/#.*//' "$HOME/.config/yumi/monitors.conf" 2>/dev/null))   # ~/.config/yumi/monitors.conf
 bar=$(awk -v s="$ms" 'BEGIN{printf "%d", 64 * s / 1.666667}')                        # отступ от верха (под баром)
 margin=$(awk -v s="$ms" 'BEGIN{printf "%d", 20 * s / 1.666667}')                     # отступ от краёв экрана
 half=$(awk -v h="${PANEL_HALF:-190}" -v d="$dpi" 'BEGIN{printf "%d", h * d / 96}')   # примерно половина ширины окна

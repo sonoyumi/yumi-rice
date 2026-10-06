@@ -42,8 +42,8 @@ repository and the system in step, with a backup of every file it touches.
 > **Built and tested only on my own machine:** MacBook Pro M1 (2560×1600, scale 1.666667) + MSI G27C3F
 > (1920×1080 @ 180 Hz, scale 1). Version 2.0 contains a lot of fine-tuning for exactly these two monitors and their
 > scales — menu and rofi sizes, lock-screen fonts per monitor, panel heights. I don't know how the build behaves on
-> another configuration: treat it as an example and adjust it to your hardware. Monitor names and scales are written
-> directly in `hyprlock-google-build`, `rofi`, `rofi-panel`, `yumipanel.py`, `yumi-player`, `yumi-menu-wallpaper`, `yumi-menu-workspaces`, `yumi-panel/style.css`, `waybar/user-style.css` and the lock-screen template.
+> another configuration: treat it as an example and adjust it to your hardware. Since 2.1 monitor names, interface
+> scale and rofi DPI live in one file, `~/.config/yumi/monitors.conf` (a monitor that is not listed gets 1.0); only `yumi-panel/style.css`, `waybar/user-style.css` and the lock-screen template still have per-monitor values.
 > Version 1.0 (rofi menus, HyDE themes) is still available: [`v1.0`](https://github.com/sonoyumi/yumi-rice/releases/tag/v1.0).
 >
 > **Coming next:** I will keep checking performance and functionality and fix things where needed. In the next few days I'll add lock-screen screenshots and two more things that are already done but not published yet.
@@ -51,7 +51,7 @@ repository and the system in step, with a backup of every file it touches.
 - **GTK4 menus instead of rofi in the bar (`yumi-panel`):** one framework (`~/.local/lib/yumi-panel`) — a layer-shell
   window with blur, wallpaper colors, keyboard navigation. Menus: Wi-Fi, Bluetooth, sound, VPN (ExpressVPN / Tailscale),
   power and HyDE modes, session, system (updates, btrfs snapshots, resources), processes, mouse (DPI, polling rate),
-  calendar with reminders, clipboard, wallpaper picker, workspaces, tray. The old rofi menus stay in the repository.
+  calendar with reminders, clipboard, wallpaper picker, workspaces, tray. The old rofi menus were removed in 2.1 (they are in [`v1.0`](https://github.com/sonoyumi/yumi-rice/releases/tag/v1.0)).
 - **Accent from the wallpaper (`yumi-accent`):** one accent color is taken from the wallpaper and passed through hooks
   to Waybar, swaync, rofi, kitty, GTK/Qt, window borders, VS Code and Telegram.
 - **New lock screen "Yumi Google":** `hyprlock-google-build` builds it from a template for each monitor — clock,
@@ -61,6 +61,10 @@ repository and the system in step, with a backup of every file it touches.
 - **Also:** calendar reminders (systemd timer), a tray without duplicate applets, a Telegram theme in wallpaper colors,
   hiding unneeded app launchers (`yumi-app-hide`), `SUPER+K` switches the layout on all keyboards at once, and the lock
   screen always opens with the English layout. Every add-on has its own `*-uninstall` script.
+- **2.1 — lighter:** Waybar pills update on system events (`yumi-bar-events`: NetworkManager, BlueZ, power profiles)
+  instead of polling every 2–5 s (~100 script runs a minute → ~12); the mouse battery comes from the kernel (40 ms instead
+  of ~1.7 s through Solaar); `nm-applet` and the blueman tray icon are off; private parts of the configs are marked
+  `yumi:private` and the public copy is built automatically on `./rice pull`.
 
 ### Features
 
@@ -222,6 +226,8 @@ The repository is the source of truth; `rice` syncs it with the system.
 | `./rice add <path>` | Start tracking a file |
 | `./rice hyde-patches` | Reapply the patches to HyDE files after a HyDE update |
 | `./rice doctor` | Quick check: config errors, processes, memory, drift |
+| `./rice check` | Repository check before a commit: syntax, private data, secrets (`--install-hook` runs it on every commit) |
+| `./rice gc [--apply]` | Clean-up: `__pycache__`, old `rice-bak` archives (without `--apply` it only shows) |
 
 Personal tweaks live outside the repository in `~/.config/rice-local/` (same layout as `home/`, plus its own
 `manifest.txt`): `./rice` installs them instead of the public files, so private changes never reach GitHub.
@@ -326,8 +332,8 @@ repository e sistema, con un backup di ogni file che tocca.
 > **Costruita e provata solo sulla mia macchina:** MacBook Pro M1 (2560×1600, scala 1.666667) + MSI G27C3F
 > (1920×1080 @ 180 Hz, scala 1). La versione 2.0 contiene molte regolazioni fatte proprio per questi due monitor e le
 > loro scale — dimensioni dei menu e di rofi, font della schermata di blocco per ogni monitor, altezze dei pannelli.
-> Non so come si comporti su un'altra configurazione: usala come esempio e adattala al tuo hardware. Nomi e scale dei
-> monitor sono scritti direttamente in `hyprlock-google-build`, `rofi`, `rofi-panel`, `yumipanel.py`, `yumi-player`, `yumi-menu-wallpaper`, `yumi-menu-workspaces`, `yumi-panel/style.css`, `waybar/user-style.css` e nel template della schermata di blocco.
+> Non so come si comporti su un'altra configurazione: usala come esempio e adattala al tuo hardware. Dalla 2.1 nomi dei
+> monitor, scala dell'interfaccia e DPI di rofi stanno in un solo file, `~/.config/yumi/monitors.conf` (un monitor non elencato usa 1.0); valori per monitor restano solo in `yumi-panel/style.css`, `waybar/user-style.css` e nel template della schermata di blocco.
 > La versione 1.0 (menu rofi, temi HyDE) resta disponibile: [`v1.0`](https://github.com/sonoyumi/yumi-rice/releases/tag/v1.0).
 >
 > **Prossimamente:** continuerò a verificare ottimizzazione e funzionalità e, se serve, farò correzioni. Nei prossimi giorni aggiungerò gli screenshot della schermata di blocco e altre due cose già pronte ma non ancora pubblicate.
@@ -336,7 +342,7 @@ repository e sistema, con un backup di ogni file che tocca.
   layer-shell con sfocatura, colori dello sfondo, navigazione da tastiera. Menu: Wi-Fi, Bluetooth, audio, VPN
   (ExpressVPN / Tailscale), alimentazione e modalità HyDE, sessione, sistema (aggiornamenti, snapshot btrfs, risorse),
   processi, mouse (DPI, frequenza), calendario con promemoria, appunti, scelta dello sfondo, scrivanie, tray.
-  I vecchi menu rofi restano nel repository.
+  I vecchi menu rofi sono stati rimossi nella 2.1 (si trovano in [`v1.0`](https://github.com/sonoyumi/yumi-rice/releases/tag/v1.0)).
 - **Accento dallo sfondo (`yumi-accent`):** un colore d'accento preso dallo sfondo arriva tramite hook a Waybar, swaync,
   rofi, kitty, GTK/Qt, bordi delle finestre, VS Code e Telegram.
 - **Nuova schermata di blocco "Yumi Google":** `hyprlock-google-build` la genera da un template per ogni monitor —
@@ -346,6 +352,10 @@ repository e sistema, con un backup di ogni file che tocca.
 - **Inoltre:** promemoria del calendario (timer systemd), tray senza applet doppie, tema Telegram nei colori dello
   sfondo, launcher inutili nascosti (`yumi-app-hide`), `SUPER+K` cambia layout su tutte le tastiere insieme e la
   schermata di blocco si apre sempre con il layout inglese. Ogni aggiunta ha il proprio script `*-uninstall`.
+- **2.1 — più leggera:** le pillole di Waybar si aggiornano sugli eventi di sistema (`yumi-bar-events`: NetworkManager,
+  BlueZ, profili energetici) invece di interrogare ogni 2–5 s (~100 script al minuto → ~12); la batteria del mouse arriva
+  dal kernel (40 ms invece di ~1,7 s con Solaar); `nm-applet` e l'icona di blueman sono spenti; le parti private dei
+  config sono marcate `yumi:private` e la copia pubblica si crea da sola con `./rice pull`.
 
 ### Funzionalità
 
@@ -470,6 +480,8 @@ Il repository è la fonte di verità; `rice` lo sincronizza con il sistema.
 | `./rice add <percorso>` | Inizia a tracciare un file |
 | `./rice hyde-patches` | Riapplica le modifiche ai file di HyDE dopo un aggiornamento |
 | `./rice doctor` | Controllo rapido: errori di configurazione, processi, memoria, differenze |
+| `./rice check` | Controllo del repository prima del commit: sintassi, dati privati, segreti (`--install-hook` lo esegue a ogni commit) |
+| `./rice gc [--apply]` | Pulizia: `__pycache__`, vecchi archivi `rice-bak` (senza `--apply` mostra soltanto) |
 
 Le modifiche personali stanno fuori dal repository, in `~/.config/rice-local/` (stessa struttura di `home/`, più un proprio
 `manifest.txt`): `./rice` le installa al posto dei file pubblici, così le modifiche private non finiscono su GitHub.
@@ -575,8 +587,8 @@ MIT, vedi [LICENSE](LICENSE).
 > **Зібрано й перевірено лише на моїй машині:** MacBook Pro M1 (2560×1600, масштаб 1.666667) + MSI G27C3F
 > (1920×1080 @ 180 Гц, масштаб 1). У версії 2.0 багато підгонки саме під ці два монітори та їхні масштаби — розміри
 > меню й rofi, шрифти екрана блокування для кожного монітора, висоти панелей. Я не знаю, як збірка поведеться на
-> іншій конфігурації: використовуйте її як приклад і підлаштовуйте під своє залізо. Назви й масштаби моніторів
-> прописані прямо в `hyprlock-google-build`, `rofi`, `rofi-panel`, `yumipanel.py`, `yumi-player`, `yumi-menu-wallpaper`, `yumi-menu-workspaces`, `yumi-panel/style.css`, `waybar/user-style.css` і в шаблоні екрана блокування.
+> іншій конфігурації: використовуйте її як приклад і підлаштовуйте під своє залізо. З 2.1 назви моніторів,
+> масштаб інтерфейсу й DPI rofi зібрані в одному файлі `~/.config/yumi/monitors.conf` (монітор, якого там немає, отримує 1.0); значення для окремих моніторів лишилися тільки в `yumi-panel/style.css`, `waybar/user-style.css` і шаблоні екрана блокування.
 > Версія 1.0 (меню rofi, теми HyDE) лишається доступною: [`v1.0`](https://github.com/sonoyumi/yumi-rice/releases/tag/v1.0).
 >
 > **Далі:** я ще перевірятиму оптимізацію та функціональність і за потреби вноситиму правки. Найближчими днями додам скриншоти екрана блокування та ще дві речі, які вже зроблені, але поки не опубліковані.
@@ -584,7 +596,7 @@ MIT, vedi [LICENSE](LICENSE).
 - **Меню на GTK4 замість rofi на панелі (`yumi-panel`):** один каркас (`~/.local/lib/yumi-panel`) — вікно layer-shell
   з розмиттям, кольорами шпалер і керуванням з клавіатури. Меню: Wi-Fi, Bluetooth, звук, VPN (ExpressVPN / Tailscale),
   живлення й режими HyDE, сеанс, система (оновлення, знімки btrfs, ресурси), процеси, миша (DPI, частота), календар
-  з нагадуваннями, буфер обміну, вибір шпалер, робочі столи, трей. Старі меню rofi лишаються в репозиторії.
+  з нагадуваннями, буфер обміну, вибір шпалер, робочі столи, трей. Старі меню rofi прибрано у 2.1 (вони є у [`v1.0`](https://github.com/sonoyumi/yumi-rice/releases/tag/v1.0)).
 - **Акцент зі шпалер (`yumi-accent`):** один акцентний колір береться зі шпалер і через хуки потрапляє у Waybar,
   swaync, rofi, kitty, GTK/Qt, рамки вікон, VS Code і Telegram.
 - **Новий екран блокування «Yumi Google»:** `hyprlock-google-build` збирає його з шаблону для кожного монітора —
@@ -594,6 +606,10 @@ MIT, vedi [LICENSE](LICENSE).
 - **А ще:** нагадування календаря (таймер systemd), трей без дубльованих аплетів, тема Telegram у кольорах шпалер,
   приховані зайві ярлики (`yumi-app-hide`), `SUPER+K` перемикає розкладку одразу на всіх клавіатурах, а екран
   блокування завжди відкривається з англійською розкладкою. Кожне доповнення має власний скрипт `*-uninstall`.
+- **2.1 — легша:** пігулки Waybar оновлюються за системними подіями (`yumi-bar-events`: NetworkManager, BlueZ, профілі
+  живлення) замість опитування кожні 2–5 с (~100 запусків скриптів за хвилину → ~12); заряд миші — з ядра (40 мс замість
+  ~1,7 с через Solaar); `nm-applet` і значок blueman вимкнено; особисті частини конфігів позначені `yumi:private`,
+  а публічна копія збирається сама під час `./rice pull`.
 
 ### Можливості
 
@@ -715,6 +731,8 @@ hyprlock-google-build  # 2.0: build the lock screen for your monitors (edit MONI
 | `./rice add <шлях>` | Почати відстежувати файл |
 | `./rice hyde-patches` | Знову застосувати правки до файлів HyDE після його оновлення |
 | `./rice doctor` | Швидка перевірка: помилки конфігу, процеси, пам'ять, розбіжності |
+| `./rice check` | Перевірка репозиторію перед комітом: синтаксис, особисте, секрети (`--install-hook` — на кожен коміт) |
+| `./rice gc [--apply]` | Прибирання: `__pycache__`, старі архіви `rice-bak` (без `--apply` лише показує) |
 
 Особисті правки лежать поза репозиторієм, у `~/.config/rice-local/` (та сама структура, що й `home/`, плюс власний
 `manifest.txt`): `./rice` ставить їх замість публічних файлів, тож приватні зміни не потрапляють на GitHub.
@@ -820,8 +838,8 @@ MIT — див. [LICENSE](LICENSE).
 > **Собрано и проверено только на моей машине:** MacBook Pro M1 (2560×1600, масштаб 1.666667) + MSI G27C3F
 > (1920×1080 @ 180 Гц, масштаб 1). В версии 2.0 много подгонки именно под эти два монитора и их масштабы — размеры
 > меню и rofi, шрифты экрана блокировки для каждого монитора, высоты панелей. Я не знаю, как сборка поведёт себя на
-> другой конфигурации: используйте её как пример и подстраивайте под своё железо. Имена и масштабы мониторов
-> прописаны прямо в `hyprlock-google-build`, `rofi`, `rofi-panel`, `yumipanel.py`, `yumi-player`, `yumi-menu-wallpaper`, `yumi-menu-workspaces`, `yumi-panel/style.css`, `waybar/user-style.css` и в шаблоне экрана блокировки.
+> другой конфигурации: используйте её как пример и подстраивайте под своё железо. С 2.1 имена мониторов,
+> масштаб интерфейса и DPI rofi собраны в одном файле `~/.config/yumi/monitors.conf` (монитор, которого там нет, получает 1.0); значения для отдельных мониторов остались только в `yumi-panel/style.css`, `waybar/user-style.css` и шаблоне экрана блокировки.
 > Версия 1.0 (меню rofi, темы HyDE) остаётся доступной: [`v1.0`](https://github.com/sonoyumi/yumi-rice/releases/tag/v1.0).
 >
 > **Дальше:** я ещё проверю оптимизацию и функциональность и при необходимости внесу правки. В ближайшие дни добавлю скриншоты экрана блокировки и ещё две вещи, которые уже сделал, но пока не опубликовал.
@@ -829,7 +847,7 @@ MIT — див. [LICENSE](LICENSE).
 - **Меню на GTK4 вместо rofi на панели (`yumi-panel`):** один каркас (`~/.local/lib/yumi-panel`) — окно layer-shell
   с размытием, цветами обоев и управлением с клавиатуры. Меню: Wi-Fi, Bluetooth, звук, VPN (ExpressVPN / Tailscale),
   питание и режимы HyDE, сеанс, система (обновления, снимки btrfs, ресурсы), процессы, мышь (DPI, частота), календарь
-  с напоминаниями, буфер обмена, выбор обоев, рабочие столы, трей. Старые меню rofi остаются в репозитории.
+  с напоминаниями, буфер обмена, выбор обоев, рабочие столы, трей. Старые меню rofi убраны в 2.1 (они есть в [`v1.0`](https://github.com/sonoyumi/yumi-rice/releases/tag/v1.0)).
 - **Акцент из обоев (`yumi-accent`):** один акцентный цвет берётся из обоев и через хуки попадает в Waybar, swaync,
   rofi, kitty, GTK/Qt, рамки окон, VS Code и Telegram.
 - **Новый экран блокировки «Yumi Google»:** `hyprlock-google-build` собирает его из шаблона для каждого монитора —
@@ -839,6 +857,10 @@ MIT — див. [LICENSE](LICENSE).
 - **А ещё:** напоминания календаря (таймер systemd), трей без дублирующихся апплетов, тема Telegram в цветах обоев,
   скрытие лишних ярлыков (`yumi-app-hide`), `SUPER+K` переключает раскладку сразу на всех клавиатурах, а экран
   блокировки всегда открывается с английской раскладкой. У каждой доработки свой скрипт `*-uninstall`.
+- **2.1 — легче:** пилюли Waybar обновляются по системным событиям (`yumi-bar-events`: NetworkManager, BlueZ, профили
+  питания) вместо опроса каждые 2–5 с (~100 запусков скриптов в минуту → ~12); заряд мыши — из ядра (40 мс вместо
+  ~1,7 с через Solaar); `nm-applet` и значок blueman отключены; личные части конфигов помечены `yumi:private`,
+  а публичная копия собирается сама при `./rice pull`.
 
 ### Возможности
 
@@ -960,6 +982,8 @@ hyprlock-google-build  # 2.0: build the lock screen for your monitors (edit MONI
 | `./rice add <путь>` | Начать отслеживать файл |
 | `./rice hyde-patches` | Заново применить правки к файлам HyDE после его обновления |
 | `./rice doctor` | Быстрая проверка: ошибки конфига, процессы, память, расхождения |
+| `./rice check` | Проверка репозитория перед коммитом: синтаксис, личное, секреты (`--install-hook` — на каждый коммит) |
+| `./rice gc [--apply]` | Уборка: `__pycache__`, старые архивы `rice-bak` (без `--apply` только показывает) |
 
 Личные правки лежат вне репозитория, в `~/.config/rice-local/` (та же структура, что у `home/`, плюс свой
 `manifest.txt`): `./rice` ставит их вместо публичных файлов, поэтому личные изменения не попадают на GitHub.

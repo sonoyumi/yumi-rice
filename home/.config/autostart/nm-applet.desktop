@@ -1,0 +1,5 @@
+[Desktop Entry]
+Type=Application
+Name=Network (nm-applet)
+# Отключено: Wi-Fi/VPN — своё меню yumi-menu-wifi. Вернуть — удалить этот файл.
+Hidden=true

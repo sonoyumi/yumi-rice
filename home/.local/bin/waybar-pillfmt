@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """waybar-pillfmt РЕЖИМ — компактный текст пилюли поверх существующего скрипта (подсказка и класс — его же).
-  mem     — «󰘚 5.1G» (занятая память), подсказка = топ процессов из waybar-top"""
+  mem     — «󰘚 5.1G» (занятая память), подсказка = топ процессов из waybar-top
+"""
 import json, os, subprocess, sys
 
 BIN = os.path.expanduser("~/.local/bin")

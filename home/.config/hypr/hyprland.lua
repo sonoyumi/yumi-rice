@@ -25,8 +25,7 @@ hl.env("HYPRCURSOR_THEME", "Bibata-Modern-Ice")
 hl.env("HYPRCURSOR_SIZE", "20")
 
 hl.config({
-
-	-- Настройка монитора MacBook (имя, разрешение, позиция, масштаб)
+	-- Монитор по умолчанию (свои мониторы задайте ниже, в блоке «Два монитора»)
 	monitor = {
 		"eDP-1, preferred, auto, 1.666667"
 	},
@@ -104,6 +103,7 @@ hl.on("hyprland.start", function()
 	-- Solaar в фоне: держит DPI и частоту мыши (встроенный профиль выключен)
 	hl.exec_cmd("solaar --window=hide")
 end)
+
 
 -- === Два монитора (пример) ===
 -- Это МОЯ конфигурация: MacBook Pro M1 + MSI G27C3F справа. Всё индивидуально —
@@ -325,3 +325,10 @@ local function yumi_borders()
 end
 yumi_borders()
 hl.on("config.reloaded", yumi_borders)
+
+-- Апплет NetworkManager не нужен: Wi-Fi и VPN — свои пилюли и меню (yumi-menu-wifi, yumi-menu-vpn).
+-- HyDE запускает его из hyde.config.start при событии hyprland.start — к этому моменту строка ниже уже выполнена.
+-- blueman-applet остаётся: он агент сопряжения (окно PIN); его значок в трее выключен настройкой blueman (StatusIcon).
+if hyde and hyde.config and hyde.config.start then
+	hyde.config.start.applet_network_manager = nil
+end

@@ -38,6 +38,8 @@ usage() {
 ./rice add <путь>...  начать отслеживать файл(ы)
 ./rice hyde-patches   применить наши правки к файлам HyDE заново
 ./rice doctor         быстрая проверка системы
+./rice check          проверка репозитория (синтаксис, личное, секреты); --install-hook — перед каждым коммитом
+./rice gc [--apply]   уборка: __pycache__, старые бэкапы rice-bak (без --apply только показывает)
 EOF
 }
 
@@ -48,6 +50,11 @@ pull)
         [ -e "$src" ] || { echo "нет в системе: ~/$p"; continue; }
         read -r f from < <(source_of "$p")
         if [ "$f" = cat ]; then cp -p "$src" "$from"          # личная версия обновляется в слое
+            # есть метки yumi:private → публичная копия собирается из личной автоматически (tools/publicize)
+            if grep -q 'yumi:private' "$src"; then
+                dst="$repo/home/$p"; mkdir -p "$(dirname "$dst")"
+                "$repo/tools/publicize" "$p" < "$src" | to_repo > "$dst"; chmod --reference="$src" "$dst"
+            fi
         else dst="$repo/home/$p"; mkdir -p "$(dirname "$dst")"; put to_repo "$src" "$dst"; fi
     done < <(home_list)
     while read -r p; do
@@ -152,6 +159,32 @@ doctor)
     echo "--- служба обоев для блокировки:"; systemctl --user is-active hyprlock-bg.service
     echo "--- память:"; free -h | sed -n '1,3p'; zramctl --noheadings 2>/dev/null
     echo "--- расхождения с репозиторием:"; "$0" diff | grep -c '^@@' | sed 's/^/  изменённых блоков: /'
+    echo "--- службы yumi:"
+    for u in yumi-bar-events.service yumi-tray.service yumi-calendar-remind.timer; do
+        printf '  %-28s %s\n' "$u" "$(systemctl --user is-active "$u" 2>/dev/null)"
+    done
+    failed=$(systemctl --user --failed --no-legend --plain | awk '{print $1}' | tr '\n' ' ')
+    echo "--- упавшие службы: ${failed:-нет}"
+    echo "--- неудачных входов (faillock, 3 подряд = блокировка на 10 мин): $(faillock --user "$USER" 2>/dev/null | tail -n +3 | grep -c .)"
+    echo "--- ошибок Waybar за час: $(journalctl --user --since -1h -u 'hyde-*bar*' 2>/dev/null | grep -c -E '\[(error|critical)\]')"
+    echo "--- давление памяти (avg60): $(awk '/^some/{print $3}' /proc/pressure/memory)"
+    ;;
+check)
+    shift
+    "$repo/tools/check" "$@"
+    ;;
+gc)
+    apply=0; [ "${2:-}" = "--apply" ] && apply=1
+    state="${XDG_STATE_HOME:-$HOME/.local/state}/rice-bak"
+    say() { if [ $apply = 1 ]; then echo "удалено: $1"; else echo "удалил бы: $1"; fi; }
+    while read -r d; do say "${d/#$HOME/\~}"; [ $apply = 1 ] && rm -rf "$d"; done \
+        < <(find "$HOME/.local/bin" "$HOME"/.local/lib/yumi-* -maxdepth 2 -type d -name __pycache__ 2>/dev/null)
+    # архивы opt-*/v2-prep-* в rice-bak: оставить 5 последних
+    while read -r f; do say "${f/#$HOME/\~}"; [ $apply = 1 ] && rm -rf "$f"; done \
+        < <(ls -1dt "$state"/opt-* "$state"/v2-prep-* 2>/dev/null | tail -n +6)
+    echo "--- бэкапы доработок (удалять вручную, когда доработка проверена):"
+    du -sh "$HOME"/.local/share/*-backup "$HOME/.config/cfg_backups" "$HOME/.local/share/yumi-retired" 2>/dev/null | sort -h | sed 's/^/  /'
+    [ $apply = 0 ] && echo "Ничего не удалено. Удалить: ./rice gc --apply"
     ;;
 *)
     usage

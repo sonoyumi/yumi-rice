@@ -6,13 +6,19 @@ import os, re, json, subprocess
 
 D = os.path.expanduser('~/.config/hypr/hyprlock')
 BASE, OUT = f'{D}/yumi-google.base.tmpl', f'{D}/yumi-google.conf'
-MONITORS = [('eDP-1', 1.0), ('DP-1', 0.8)]   # встроенный экран MacBook, MSI
-SIZES = {'eDP-1': (1536, 960), 'DP-1': (1920, 1080)}   # логические px, если монитор сейчас не подключён
-DPR = {'eDP-1': 1.6666666, 'DP-1': 1.0}                # дробный масштаб монитора
+import sys
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-panel"))
+import yumimon  # noqa: E402
+_CONF = yumimon.load()   # ~/.config/yumi/monitors.conf
+MONITORS = [(n, m['ui']) for n, m in _CONF.items()]                       # выход, коэффициент
+SIZES = {n: m['size'] for n, m in _CONF.items() if m['size']}             # логические px, если монитор не подключён
+DPR = {n: m['dpr'] for n, m in _CONF.items() if m['dpr']}                 # дробный масштаб монитора
 try:
     for m in json.loads(subprocess.run(['hyprctl', 'monitors', '-j'], capture_output=True, text=True).stdout):
         SIZES[m['name']] = (round(m['width'] / m['scale']), round(m['height'] / m['scale']))
         DPR[m['name']] = m['scale']
+        if m['name'] not in dict(MONITORS):
+            MONITORS.append((m['name'], 1.0))
 except Exception:
     pass
 # hyprlock 0.9.6 всё (size, position, rounding, border, font_size) читает в ФИЗИЧЕСКИХ px буфера:

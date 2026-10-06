@@ -31,7 +31,9 @@ except (ValueError, ImportError):
 GRID = range(1, 11)
 COLS = 5
 MAX_ICONS = 3
-MON_NAMES = {"eDP-1": "Ноутбук", "DP-1": "MSI"}
+import yumimon  # noqa: E402
+MON_NAMES = yumimon.labels()   # ~/.config/yumi/monitors.conf
+_MONS = list(MON_NAMES) or ["eDP-1"]
 
 CSS = """
 .yp-ws-mon { font-size: 8.5pt; font-weight: 700; letter-spacing: 1px; color: alpha(@yp-fg2, 0.6); margin: 2px 4px 0 4px; }
@@ -243,7 +245,7 @@ class Workspaces:
         # столы 1–10 по мониторам (обычно 1–5 — ноутбук, 6–10 — MSI)
         groups = {}
         for i in GRID:
-            mon = d["ws"].get(i, {}).get("monitor") or ("eDP-1" if i <= 5 else "DP-1")
+            mon = d["ws"].get(i, {}).get("monitor") or (_MONS[0] if i <= 5 else _MONS[-1])
             groups.setdefault(mon, []).append(i)
         order = [m for m in d["mons"] if m in groups] + [m for m in groups if m not in d["mons"]]
         for mon in order:

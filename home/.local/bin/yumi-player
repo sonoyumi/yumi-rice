@@ -100,7 +100,9 @@ FALLBACK_COLORS = """
 """
 
 # Масштаб окна по монитору (как у экрана блокировки и rofi): на внешнем MSI всё ×0.8
-MONITOR_SCALE = {"DP-1": 0.8}
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-panel"))
+import yumimon  # noqa: E402
+MONITOR_SCALE = yumimon.ui_scale()   # ~/.config/yumi/monitors.conf
 
 PLAYER_ICONS = {"firefox": "󰈹 Firefox", "spotify": "󰓇 Spotify", "mpv": "󰐹 mpv",
                 "chromium": " Chromium", "vlc": "󰕼 VLC"}

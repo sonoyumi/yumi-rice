@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+"""publicize [ФАЙЛ] < личная_версия > публичная_версия
+
+Убирает из личной версии конфига всё, что помечено как личное, и включает строки только для публичной.
+Метки работают в любом синтаксисе комментариев (--, //, #, /* */):
+  … yumi:private-begin  …  yumi:private-end   — блок только в личной версии (строки с метками тоже убираются)
+  <строка>  … yumi:private-line                — одна строка только в личной версии
+  <комментарий> yumi:public: <строка>          — строка только в публичной версии (в личной это комментарий)
+Для .json/.jsonc после вырезания убираются висячие запятые перед ] и }.
+Используется в `./rice pull`: личная версия лежит в ~/.config/rice-local, публичная — в репозитории."""
+import re
+import sys
+
+PUBLIC = re.compile(r"^(\s*)(?:--|//|#|/\*)\s*yumi:public:\s?(.*?)(?:\s*\*/)?\s*$")
+
+
+def publicize(text: str, name: str = "") -> str:
+    out, skip = [], False
+    for line in text.splitlines(keepends=True):
+        if "yumi:private-begin" in line:
+            skip = True
+            continue
+        if "yumi:private-end" in line:
+            skip = False
+            continue
+        if skip or "yumi:private-line" in line:
+            continue
+        m = PUBLIC.match(line)
+        out.append(f"{m[1]}{m[2]}\n" if m else line)
+    if skip:
+        sys.exit("publicize: нет закрывающей метки yumi:private-end")
+    result = "".join(out)
+    if name.endswith((".json", ".jsonc")):
+        result = re.sub(r",(\s*(?://[^\n]*\n\s*)*[\]}])", r"\1", result)
+    return result
+
+
+if __name__ == "__main__":
+    sys.stdout.write(publicize(sys.stdin.read(), sys.argv[1] if len(sys.argv) > 1 else ""))

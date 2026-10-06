@@ -1,7 +1,0 @@
-#!/usr/bin/env bash
-# Обёртка для networkmanager_dmenu: наш стиль панелей, размер под список сетей
-export PANEL_HALF=210
-exec "$HOME/.local/bin/rofi-panel" "Wi-Fi" 10 \
-    -theme-str 'window {width: 20em; height: 31em;}' \
-    -theme-str 'listview {fixed-height: true;}' \
-    "$@"

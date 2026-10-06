@@ -54,7 +54,7 @@ window#waybar.top #pill label.module {
 window#waybar.top #pill label#custom-archlogo { padding: 0 0.6em; margin: 0; }
 window#waybar.top #pill label#clock           { padding: 0 0.5em; }
 window#waybar.top #pill label#custom-player-text { padding: 0 0.9em 0 0.5em; margin: 0; }
-/* Мышь бывает пустой (мышь выключена / нет данных): отступы у модуля,
+/* Мышь (и личные пилюли) бывают пустыми (мышь выключена / нет данных): отступы у модуля,
    а не у группы — тогда пустая пилюля нулевой ширины и «пузыря» не видно, как у плеера */
 window#waybar.top #pill.mouse { padding: 0; }
 window#waybar.top #pill label#custom-mouse { padding: 0 1.2em; margin: 0; }
@@ -136,6 +136,7 @@ window#waybar.top #pill label#custom-archlogo:hover {
 
 /* ───────── Система: CPU, память, тяжёлое приложение ───────── */
 #custom-top.heavy { color: @yb-warn; }
+
 
 /* ───────── Плеер ─────────
    group/pill#player по центру: круглая обложка + «Название — Артист  1:23/3:39» (окно — yumi-player).

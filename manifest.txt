@@ -3,18 +3,8 @@
 
 # --- Скрипты: меню и движок ---
 .local/bin/rofi-panel
-.local/bin/powermenu
-.local/bin/menu-network
-.local/bin/menu-bluetooth
-.local/bin/menu-sound
-.local/bin/menu-mic
-.local/bin/menu-power-profile
-.local/bin/menu-clipboard
-.local/bin/menu-workspaces
 .local/bin/menu-workflows
-.local/bin/menu-player
 .local/bin/player-cover
-.local/share/nm-rofi/rofi
 
 # --- Скрипты: центр управления ---
 .local/bin/cc
@@ -27,7 +17,6 @@
 .local/bin/waybar-ppd
 .local/bin/waybar-workflow
 .local/bin/waybar-vpn
-.local/bin/waybar-player
 
 # --- Плеер: окно GTK4 + layer-shell, цвета из обоев ---
 .local/bin/yumi-player
@@ -77,14 +66,12 @@
 .config/systemd/user/dev.slice
 .local/bin/lim
 .config/systemd/user/swaync.service.d/10-cairo.conf
-.local/bin/menu-top
 .local/bin/waybar-top
 .local/bin/top-procs-uninstall
 .local/bin/setup-snapshots
 .local/bin/waybar-center-uninstall
 .local/bin/rofi
 .local/bin/waybar-mouse
-.local/bin/menu-mouse
 .config/hyde/wallbash/always/keyboard.dcol
 .config/hyde/wallbash/scripts/keyboard.sh
 
@@ -152,3 +139,10 @@
 .local/bin/yumi-app-hide
 .local/bin/yumi-app-unhide
 .config/yumi-tray/hidden
+
+# --- 2.1: оптимизация — мониторы в одном файле, пилюли по событиям, без лишних апплетов ---
+.config/yumi/monitors.conf
+.local/lib/yumi-panel/yumimon.py
+.local/bin/yumi-bar-events
+.config/systemd/user/yumi-bar-events.service
+.config/autostart/nm-applet.desktop

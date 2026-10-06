@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# yumi-bar-events — пилюли Waybar по событиям, а не по таймеру.
+# Слушает системную шину и сразу посылает Waybar сигнал нужной пилюле:
+#   NetworkManager (nmcli monitor)     → RTMIN+16 Wi-Fi, RTMIN+10 VPN
+#   BlueZ (org.bluez)                  → RTMIN+17 Bluetooth
+#   power-profiles-daemon              → RTMIN+8  профиль питания
+# Пачку событий (их бывает десяток за секунду) склеивает: сигнал уходит через 0.4 с тишины.
+# Запуск: служба yumi-bar-events.service. Таймеры в yumi.jsonc остаются как страховка (раз в 1–2 мин).
+# Откат: systemctl --user disable --now yumi-bar-events.service и вернуть interval в yumi.jsonc.
+set -u
+fifo=$(mktemp -u "${XDG_RUNTIME_DIR:-/tmp}/yumi-bar-events.XXXX")
+mkfifo "$fifo"
+trap 'kill 0 2>/dev/null; rm -f "$fifo"' EXIT INT TERM
+
+{ nmcli monitor 2>/dev/null | while read -r _; do echo "16 10"; done; } >"$fifo" &
+{ gdbus monitor --system --dest org.bluez 2>/dev/null | while read -r _; do echo "17"; done; } >"$fifo" &
+{ gdbus monitor --system --dest net.hadess.PowerProfiles 2>/dev/null | while read -r _; do echo "8"; done; } >"$fifo" &
+
+declare -A pending=()
+exec 3<"$fifo"
+while true; do
+    if read -r -t 0.4 sigs <&3; then
+        for s in $sigs; do pending[$s]=1; done
+    elif [ ${#pending[@]} -gt 0 ]; then
+        for s in "${!pending[@]}"; do pkill -RTMIN+"$s" -x waybar 2>/dev/null; done
+        pending=()
+    fi
+done
