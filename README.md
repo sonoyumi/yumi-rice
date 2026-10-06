@@ -5,13 +5,16 @@
   <img alt="HyDE" src="https://img.shields.io/badge/HyDE-dotfiles-c6a0f6">
   <img alt="Asahi Linux" src="https://img.shields.io/badge/Asahi-Arch%20Linux%20ARM-1793D1?logo=archlinux&logoColor=white">
   <img alt="ARM64" src="https://img.shields.io/badge/aarch64-16K%20pages-f5a97f">
-  <img alt="Waybar" src="https://img.shields.io/badge/Waybar-swaync%20·%20rofi-a6da95">
+  <img alt="Version" src="https://img.shields.io/badge/version-2.0-ed8796">
+  <img alt="Waybar" src="https://img.shields.io/badge/Waybar-swaync%20·%20GTK4%20·%20rofi-a6da95">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-green">
 </p>
 
 **🇬🇧 [English](#en)** · **🇮🇹 [Italiano](#it)** · **🇺🇦 [Українська](#uk)** · **🇷🇺 [Русский](#ru)**
 
-![Desktop](assets/screenshots/desktop.jpg)
+![Desktop](assets/screenshots/v2/desktop.jpg)
+
+<p align="center"><b>2.0</b> — GTK4 menus, accent from the wallpaper, new lock screen · <a href="https://github.com/sonoyumi/yumi-rice/releases/tag/v1.0">1.0</a> — rofi menus, HyDE themes</p>
 
 ---
 
@@ -19,8 +22,8 @@
 
 ## 🇬🇧 English
 
-My Hyprland desktop on a MacBook Pro M1 running Asahi Linux: Waybar made of "pills", every menu drawn
-by one rofi engine, a macOS-like control center on swaync, a lock screen with a music player —
+My Hyprland desktop on a MacBook Pro M1 running Asahi Linux: Waybar made of "pills", menus on GTK4
+with blur and wallpaper colors, a macOS-like control center on swaync, a lock screen with a music player —
 and all of it recolors itself to match the current wallpaper. Plus a sync script that keeps the
 repository and the system in step, with a backup of every file it touches.
 
@@ -29,9 +32,33 @@ repository and the system in step, with a backup of every file it touches.
 | Hardware | MacBook Pro 13" M1 (2020), 8 GB RAM, 2560×1600 display, scale 1.666667 · second monitor MSI G27C3F 1920×1080 @ 180 Hz over USB-C · Logitech PRO keyboard and PRO X 2 mouse |
 | OS | Arch Linux ARM ([Asahi](https://asahilinux.org/)), `linux-asahi` kernel, 16K memory pages, btrfs |
 | Desktop | [HyDE](https://github.com/HyDE-Project/HyDE) + Hyprland 0.56 with the Lua config, started via uwsm |
-| Bar / notifications / menus | Waybar · swaync · rofi |
+| Bar / notifications / menus | Waybar · swaync · GTK4 (yumi-panel) + rofi |
 | Lock / idle / wallpaper | hyprlock · hypridle · awww |
 | Terminal / font | kitty · JetBrainsMono Nerd Font |
+
+### What's new in 2.0
+
+> [!IMPORTANT]
+> **Built and tested only on my own machine:** MacBook Pro M1 (2560×1600, scale 1.666667) + MSI G27C3F
+> (1920×1080 @ 180 Hz, scale 1). Version 2.0 contains a lot of fine-tuning for exactly these two monitors and their
+> scales — menu and rofi sizes, lock-screen fonts per monitor, panel heights. I don't know how the build behaves on
+> another configuration: treat it as an example and adjust it to your hardware. Monitor names and scales are written
+> directly in `hyprlock-google-build`, `rofi`, `rofi-panel`, `yumipanel.py`, `yumi-player`, `yumi-menu-wallpaper`, `yumi-menu-workspaces`, `yumi-panel/style.css`, `waybar/user-style.css` and the lock-screen template.
+> Version 1.0 (rofi menus, HyDE themes) is still available: [`v1.0`](https://github.com/sonoyumi/yumi-rice/releases/tag/v1.0).
+
+- **GTK4 menus instead of rofi in the bar (`yumi-panel`):** one framework (`~/.local/lib/yumi-panel`) — a layer-shell
+  window with blur, wallpaper colors, keyboard navigation. Menus: Wi-Fi, Bluetooth, sound, VPN (ExpressVPN / Tailscale),
+  power and HyDE modes, session, system (updates, btrfs snapshots, resources), processes, mouse (DPI, polling rate),
+  calendar with reminders, clipboard, wallpaper picker, workspaces, tray. The old rofi menus stay in the repository.
+- **Accent from the wallpaper (`yumi-accent`):** one accent color is taken from the wallpaper and passed through hooks
+  to Waybar, swaync, rofi, kitty, GTK/Qt, window borders, VS Code and Telegram.
+- **New lock screen "Yumi Google":** `hyprlock-google-build` builds it from a template for each monitor — clock,
+  quotes, player, system info. The previous layout (`layout20.conf`) is still there.
+- **Pills and control center:** Wi-Fi, Bluetooth, "keep awake" (☕ stops hypridle), a player pill with cover art and
+  the `yumi-player` popup; control center with "Do not disturb", keep-awake and mouse buttons.
+- **Also:** calendar reminders (systemd timer), a tray without duplicate applets, a Telegram theme in wallpaper colors,
+  hiding unneeded app launchers (`yumi-app-hide`), `SUPER+K` switches the layout on all keyboards at once, and the lock
+  screen always opens with the English layout. Every add-on has its own `*-uninstall` script.
 
 ### Features
 
@@ -87,19 +114,44 @@ repository and the system in step, with a backup of every file it touches.
 
 | | |
 |:---:|:---:|
-| ![Workspace](assets/screenshots/workspace.jpg) | ![Control center](assets/screenshots/control-center.jpg) |
+| ![Control center](assets/screenshots/v2/control-center.png) | ![Sound](assets/screenshots/v2/menu-sound.png) |
+| Control center | Sound |
+| ![Wi-Fi](assets/screenshots/v2/menu-wifi.png) | ![Bluetooth](assets/screenshots/v2/menu-bluetooth.png) |
+| Wi-Fi | Bluetooth |
+| ![Power](assets/screenshots/v2/menu-power.png) | ![System](assets/screenshots/v2/menu-system.png) |
+| Power and HyDE modes | System: updates, snapshots, resources |
+| ![Mouse](assets/screenshots/v2/menu-mouse.png) | ![Calendar](assets/screenshots/v2/menu-calendar.png) |
+| Mouse | Calendar |
+| ![Session](assets/screenshots/v2/menu-session.png) | ![Player](assets/screenshots/v2/player.png) |
+| Session | Player |
+
+![Wallpaper picker](assets/screenshots/v2/menu-wallpaper.png)
+<p align="center">Wallpaper picker</p>
+
+![Two monitors](assets/screenshots/v2/two-monitors.jpg)
+<p align="center">MacBook (2560×1600) and MSI (1920×1080 @ 180 Hz) side by side</p>
+
+![Waybar](assets/screenshots/v2/bar.png)
+
+<details>
+<summary><b>Version 1.0</b> — rofi menus (for comparison)</summary>
+
+| | |
+|:---:|:---:|
+| ![Workspace](assets/screenshots/v1/workspace.jpg) | ![Control center](assets/screenshots/v1/control-center.jpg) |
 | Workspace | Control center |
-| ![Bluetooth](assets/screenshots/menu-bluetooth.png) | ![Processes](assets/screenshots/menu-top.png) |
+| ![Bluetooth](assets/screenshots/v1/menu-bluetooth.png) | ![Processes](assets/screenshots/v1/menu-top.png) |
 | Bluetooth | Heaviest apps |
-| ![Player](assets/screenshots/menu-player.png) | ![Network](assets/screenshots/menu-network.png) |
+| ![Player](assets/screenshots/v1/menu-player.png) | ![Network](assets/screenshots/v1/menu-network.png) |
 | Player card | Network and VPN |
-| ![Sound](assets/screenshots/menu-sound.png) | ![Power](assets/screenshots/menu-power.png) |
+| ![Sound](assets/screenshots/v1/menu-sound.png) | ![Power](assets/screenshots/v1/menu-power.png) |
 | Sound | Power menu |
 
-![Two monitors](assets/screenshots/two-monitors.jpg)
-<p align="center">MacBook (2560×1600) and MSI (1920×1080 @ 180 Hz) side by side · cava on the external monitor</p>
+![Desktop 1.0](assets/screenshots/v1/desktop.jpg)
+![Two monitors 1.0](assets/screenshots/v1/two-monitors.jpg)
+![Waybar 1.0](assets/screenshots/v1/bar.png)
 
-![Waybar](assets/screenshots/bar.png)
+</details>
 
 ### Keys and gestures
 
@@ -107,13 +159,17 @@ My bindings on top of the standard [HyDE](https://github.com/HyDE-Project/HyDE) 
 
 | Keys | Action |
 |---|---|
-| `SUPER` + `Esc` | Power menu |
+| `SUPER` + `Esc`, `CTRL` + `ALT` + `Del` | Session: lock, sleep, logout, reboot, power off |
 | `SUPER` + `N` | Control center |
-| `SUPER` + `M` | Player card |
+| `SUPER` + `M` | Player |
 | `SUPER` + `V` | Clipboard |
-| `SUPER` + `` ` `` | Workspace overview |
-| `SUPER` + `/`, `SUPER` + `SHIFT` + `W` | HyDE modes |
+| `SUPER` + `TAB` | Workspaces |
+| `SUPER` + `` ` `` | System menu |
+| `SUPER` + `SHIFT` + `W` | Wallpaper picker |
+| `SUPER` + `/` | Power and HyDE modes |
 | `SUPER` + `ALT` + `↑` / `↓` | Next / previous HyDE mode |
+| `SUPER` + `K` | Keyboard layout on all keyboards |
+| `ALT` + `F9`…`F12`, `ALT` + `Print` / `Scroll Lock` / `Pause` | Media and volume on the external keyboard |
 | Keyboard backlight keys | Backlight brightness (works on the lock screen too) |
 | 3 fingers ← / → | Switch workspaces |
 | 3 fingers ↓ | Workspace overview |
@@ -130,7 +186,7 @@ You need [HyDE](https://github.com/HyDE-Project/HyDE) with Hyprland ≥ 0.56 (Lu
 sudo pacman -S --needed waybar swaync rofi jq cliphist wl-clipboard playerctl imagemagick \
     inotify-tools networkmanager-dmenu bluez-utils power-profiles-daemon libnotify \
     brightnessctl btop kitty ttf-jetbrains-mono-nerd yt-dlp earlyoom zram-generator \
-    solaar openrgb
+    solaar openrgb gtk4 gtk4-layer-shell python-gobject pacman-contrib
 ```
 
 ```bash
@@ -138,7 +194,9 @@ git clone https://github.com/sonoyumi/yumi-rice.git ~/Projects/yumi-rice
 cd ~/Projects/yumi-rice
 ./rice diff            # see what will change
 ./rice push            # copy the files into ~ (old versions go to ~/.local/state/rice-bak/)
-systemctl --user enable --now hyprlock-bg.service
+systemctl --user enable --now hyprlock-bg.service yumi-calendar-remind.timer yumi-tray.service
+yumi-accent            # 2.0: accent colors for Waybar, swaync, rofi, kitty, GTK (re-run after a wallpaper change is automatic)
+hyprlock-google-build  # 2.0: build the lock screen for your monitors (edit MONITORS / DPR at the top first)
 ./rice reload
 ./rice push-system     # optional: /etc, one file at a time with confirmation
 ```
@@ -246,8 +304,8 @@ MIT, see [LICENSE](LICENSE).
 
 **[🇬🇧 English](#en)** · **🇮🇹 Italiano** · **[🇺🇦 Українська](#uk)** · **[🇷🇺 Русский](#ru)**
 
-Il mio desktop Hyprland su un MacBook Pro M1 con Asahi Linux: una Waybar fatta di "pillole", tutti i menu
-disegnati da un unico motore rofi, un centro di controllo in stile macOS su swaync, una schermata di blocco con
+Il mio desktop Hyprland su un MacBook Pro M1 con Asahi Linux: una Waybar fatta di "pillole", i menu in GTK4
+con sfocatura e i colori dello sfondo, un centro di controllo in stile macOS su swaync, una schermata di blocco con
 il lettore musicale — e tutto si ricolora in base allo sfondo attuale. In più, uno script che tiene allineati
 repository e sistema, con un backup di ogni file che tocca.
 
@@ -259,6 +317,31 @@ repository e sistema, con un backup di ogni file che tocca.
 | Barra / notifiche / menu | Waybar · swaync · rofi |
 | Blocco / inattività / sfondo | hyprlock · hypridle · awww |
 | Terminale / font | kitty · JetBrainsMono Nerd Font |
+
+### Novità della 2.0
+
+> [!IMPORTANT]
+> **Costruita e provata solo sulla mia macchina:** MacBook Pro M1 (2560×1600, scala 1.666667) + MSI G27C3F
+> (1920×1080 @ 180 Hz, scala 1). La versione 2.0 contiene molte regolazioni fatte proprio per questi due monitor e le
+> loro scale — dimensioni dei menu e di rofi, font della schermata di blocco per ogni monitor, altezze dei pannelli.
+> Non so come si comporti su un'altra configurazione: usala come esempio e adattala al tuo hardware. Nomi e scale dei
+> monitor sono scritti direttamente in `hyprlock-google-build`, `rofi`, `rofi-panel`, `yumipanel.py`, `yumi-player`, `yumi-menu-wallpaper`, `yumi-menu-workspaces`, `yumi-panel/style.css`, `waybar/user-style.css` e nel template della schermata di blocco.
+> La versione 1.0 (menu rofi, temi HyDE) resta disponibile: [`v1.0`](https://github.com/sonoyumi/yumi-rice/releases/tag/v1.0).
+
+- **Menu GTK4 al posto di rofi nella barra (`yumi-panel`):** un unico framework (`~/.local/lib/yumi-panel`) — finestra
+  layer-shell con sfocatura, colori dello sfondo, navigazione da tastiera. Menu: Wi-Fi, Bluetooth, audio, VPN
+  (ExpressVPN / Tailscale), alimentazione e modalità HyDE, sessione, sistema (aggiornamenti, snapshot btrfs, risorse),
+  processi, mouse (DPI, frequenza), calendario con promemoria, appunti, scelta dello sfondo, scrivanie, tray.
+  I vecchi menu rofi restano nel repository.
+- **Accento dallo sfondo (`yumi-accent`):** un colore d'accento preso dallo sfondo arriva tramite hook a Waybar, swaync,
+  rofi, kitty, GTK/Qt, bordi delle finestre, VS Code e Telegram.
+- **Nuova schermata di blocco "Yumi Google":** `hyprlock-google-build` la genera da un template per ogni monitor —
+  orologio, citazioni, lettore, info di sistema. Il layout precedente (`layout20.conf`) c'è ancora.
+- **Pillole e centro di controllo:** Wi-Fi, Bluetooth, "non sospendere" (☕ ferma hypridle), pillola del lettore con
+  copertina e popup `yumi-player`; centro di controllo con "Non disturbare", "non sospendere" e mouse.
+- **Inoltre:** promemoria del calendario (timer systemd), tray senza applet doppie, tema Telegram nei colori dello
+  sfondo, launcher inutili nascosti (`yumi-app-hide`), `SUPER+K` cambia layout su tutte le tastiere insieme e la
+  schermata di blocco si apre sempre con il layout inglese. Ogni aggiunta ha il proprio script `*-uninstall`.
 
 ### Funzionalità
 
@@ -314,7 +397,7 @@ repository e sistema, con un backup di ogni file che tocca.
 
 ### Screenshot
 
-Vedi la [galleria nella sezione inglese](#screenshots).
+Vedi la [galleria nella sezione inglese](#screenshots) (2.0 e, più sotto, 1.0).
 
 ### Tasti e gesti
 
@@ -322,16 +405,20 @@ Le mie scorciatoie in aggiunta a quelle standard di [HyDE](https://github.com/Hy
 
 | Tasti | Azione |
 |---|---|
-| `SUPER` + `Esc` | Menu di spegnimento |
+| `SUPER` + `Esc`, `CTRL` + `ALT` + `Canc` | Sessione: blocco, sospensione, uscita, riavvio, spegnimento |
 | `SUPER` + `N` | Centro di controllo |
-| `SUPER` + `M` | Scheda del lettore |
+| `SUPER` + `M` | Lettore |
 | `SUPER` + `V` | Appunti |
-| `SUPER` + `` ` `` | Panoramica degli spazi di lavoro |
-| `SUPER` + `/`, `SUPER` + `SHIFT` + `W` | Modalità HyDE |
+| `SUPER` + `TAB` | Scrivanie |
+| `SUPER` + `` ` `` | Menu di sistema |
+| `SUPER` + `SHIFT` + `W` | Scelta dello sfondo |
+| `SUPER` + `/` | Alimentazione e modalità HyDE |
 | `SUPER` + `ALT` + `↑` / `↓` | Modalità HyDE successiva / precedente |
-| Tasti retroilluminazione tastiera | Luminosità (funziona anche sulla schermata di blocco) |
-| 3 dita ← / → | Cambia spazio di lavoro |
-| 3 dita ↓ | Panoramica degli spazi di lavoro |
+| `SUPER` + `K` | Layout su tutte le tastiere |
+| `ALT` + `F9`…`F12`, `ALT` + `Print` / `Scroll Lock` / `Pause` | Musica e volume dalla tastiera esterna |
+| Tasti della retroilluminazione | Luminosità della tastiera (anche sulla schermata di blocco) |
+| 3 dita ← / → | Cambio scrivania |
+| 3 dita ↓ | Panoramica delle scrivanie |
 
 ### Avvio rapido
 
@@ -345,7 +432,7 @@ Servono [HyDE](https://github.com/HyDE-Project/HyDE) con Hyprland ≥ 0.56 (conf
 sudo pacman -S --needed waybar swaync rofi jq cliphist wl-clipboard playerctl imagemagick \
     inotify-tools networkmanager-dmenu bluez-utils power-profiles-daemon libnotify \
     brightnessctl btop kitty ttf-jetbrains-mono-nerd yt-dlp earlyoom zram-generator \
-    solaar openrgb
+    solaar openrgb gtk4 gtk4-layer-shell python-gobject pacman-contrib
 ```
 
 ```bash
@@ -353,7 +440,9 @@ git clone https://github.com/sonoyumi/yumi-rice.git ~/Projects/yumi-rice
 cd ~/Projects/yumi-rice
 ./rice diff            # cosa cambierà
 ./rice push            # copia i file in ~ (le vecchie versioni vanno in ~/.local/state/rice-bak/)
-systemctl --user enable --now hyprlock-bg.service
+systemctl --user enable --now hyprlock-bg.service yumi-calendar-remind.timer yumi-tray.service
+yumi-accent            # 2.0: accent colors for Waybar, swaync, rofi, kitty, GTK (re-run after a wallpaper change is automatic)
+hyprlock-google-build  # 2.0: build the lock screen for your monitors (edit MONITORS / DPR at the top first)
 ./rice reload
 ./rice push-system     # facoltativo: /etc, un file alla volta con conferma
 ```
@@ -462,8 +551,8 @@ MIT, vedi [LICENSE](LICENSE).
 
 **[🇬🇧 English](#en)** · **[🇮🇹 Italiano](#it)** · **🇺🇦 Українська** · **[🇷🇺 Русский](#ru)**
 
-Мій робочий стіл Hyprland на MacBook Pro M1 з Asahi Linux: Waybar із «пігулок», усі меню малює один рушій
-на rofi, центр керування в стилі macOS на swaync, екран блокування з плеєром — і все це перефарбовується
+Мій робочий стіл Hyprland на MacBook Pro M1 з Asahi Linux: Waybar із «пігулок», меню на GTK4
+з розмиттям і кольорами шпалер, центр керування в стилі macOS на swaync, екран блокування з плеєром — і все це перефарбовується
 під поточні шпалери. А ще скрипт, який тримає репозиторій і систему синхронними та зберігає резервну копію
 кожного файлу, який змінює.
 
@@ -475,6 +564,30 @@ MIT, vedi [LICENSE](LICENSE).
 | Панель / сповіщення / меню | Waybar · swaync · rofi |
 | Блокування / простій / шпалери | hyprlock · hypridle · awww |
 | Термінал / шрифт | kitty · JetBrainsMono Nerd Font |
+
+### Що нового у 2.0
+
+> [!IMPORTANT]
+> **Зібрано й перевірено лише на моїй машині:** MacBook Pro M1 (2560×1600, масштаб 1.666667) + MSI G27C3F
+> (1920×1080 @ 180 Гц, масштаб 1). У версії 2.0 багато підгонки саме під ці два монітори та їхні масштаби — розміри
+> меню й rofi, шрифти екрана блокування для кожного монітора, висоти панелей. Я не знаю, як збірка поведеться на
+> іншій конфігурації: використовуйте її як приклад і підлаштовуйте під своє залізо. Назви й масштаби моніторів
+> прописані прямо в `hyprlock-google-build`, `rofi`, `rofi-panel`, `yumipanel.py`, `yumi-player`, `yumi-menu-wallpaper`, `yumi-menu-workspaces`, `yumi-panel/style.css`, `waybar/user-style.css` і в шаблоні екрана блокування.
+> Версія 1.0 (меню rofi, теми HyDE) лишається доступною: [`v1.0`](https://github.com/sonoyumi/yumi-rice/releases/tag/v1.0).
+
+- **Меню на GTK4 замість rofi на панелі (`yumi-panel`):** один каркас (`~/.local/lib/yumi-panel`) — вікно layer-shell
+  з розмиттям, кольорами шпалер і керуванням з клавіатури. Меню: Wi-Fi, Bluetooth, звук, VPN (ExpressVPN / Tailscale),
+  живлення й режими HyDE, сеанс, система (оновлення, знімки btrfs, ресурси), процеси, миша (DPI, частота), календар
+  з нагадуваннями, буфер обміну, вибір шпалер, робочі столи, трей. Старі меню rofi лишаються в репозиторії.
+- **Акцент зі шпалер (`yumi-accent`):** один акцентний колір береться зі шпалер і через хуки потрапляє у Waybar,
+  swaync, rofi, kitty, GTK/Qt, рамки вікон, VS Code і Telegram.
+- **Новий екран блокування «Yumi Google»:** `hyprlock-google-build` збирає його з шаблону для кожного монітора —
+  годинник, цитати, плеєр, відомості про систему. Попередня розкладка (`layout20.conf`) теж на місці.
+- **Пігулки й центр керування:** Wi-Fi, Bluetooth, «не засинати» (☕ зупиняє hypridle), пігулка плеєра з обкладинкою
+  та спливний `yumi-player`; у центрі керування — «Не турбувати», «не засинати» й миша.
+- **А ще:** нагадування календаря (таймер systemd), трей без дубльованих аплетів, тема Telegram у кольорах шпалер,
+  приховані зайві ярлики (`yumi-app-hide`), `SUPER+K` перемикає розкладку одразу на всіх клавіатурах, а екран
+  блокування завжди відкривається з англійською розкладкою. Кожне доповнення має власний скрипт `*-uninstall`.
 
 ### Можливості
 
@@ -527,7 +640,7 @@ MIT, vedi [LICENSE](LICENSE).
 
 ### Скриншоти
 
-Див. [галерею в англійському розділі](#screenshots).
+Див. [галерею в англійському розділі](#screenshots) (2.0, а нижче — 1.0).
 
 ### Клавіші й жести
 
@@ -535,15 +648,19 @@ MIT, vedi [LICENSE](LICENSE).
 
 | Клавіші | Дія |
 |---|---|
-| `SUPER` + `Esc` | Меню вимкнення |
+| `SUPER` + `Esc`, `CTRL` + `ALT` + `Del` | Сеанс: блокування, сон, вихід, перезавантаження, вимкнення |
 | `SUPER` + `N` | Центр керування |
-| `SUPER` + `M` | Картка плеєра |
+| `SUPER` + `M` | Плеєр |
 | `SUPER` + `V` | Буфер обміну |
-| `SUPER` + `` ` `` | Огляд робочих столів |
-| `SUPER` + `/`, `SUPER` + `SHIFT` + `W` | Режими HyDE |
+| `SUPER` + `TAB` | Робочі столи |
+| `SUPER` + `` ` `` | Меню системи |
+| `SUPER` + `SHIFT` + `W` | Вибір шпалер |
+| `SUPER` + `/` | Живлення й режими HyDE |
 | `SUPER` + `ALT` + `↑` / `↓` | Наступний / попередній режим HyDE |
-| Клавіші підсвітки клавіатури | Яскравість підсвітки (працює й на екрані блокування) |
-| 3 пальці ← / → | Перемикання робочих столів |
+| `SUPER` + `K` | Розкладка на всіх клавіатурах |
+| `ALT` + `F9`…`F12`, `ALT` + `Print` / `Scroll Lock` / `Pause` | Музика й гучність із зовнішньої клавіатури |
+| Клавіші підсвітки | Яскравість підсвітки (і на екрані блокування) |
+| 3 пальці ← / → | Перемикання столів |
 | 3 пальці ↓ | Огляд робочих столів |
 
 ### Швидкий старт
@@ -558,7 +675,7 @@ MIT, vedi [LICENSE](LICENSE).
 sudo pacman -S --needed waybar swaync rofi jq cliphist wl-clipboard playerctl imagemagick \
     inotify-tools networkmanager-dmenu bluez-utils power-profiles-daemon libnotify \
     brightnessctl btop kitty ttf-jetbrains-mono-nerd yt-dlp earlyoom zram-generator \
-    solaar openrgb
+    solaar openrgb gtk4 gtk4-layer-shell python-gobject pacman-contrib
 ```
 
 ```bash
@@ -566,7 +683,9 @@ git clone https://github.com/sonoyumi/yumi-rice.git ~/Projects/yumi-rice
 cd ~/Projects/yumi-rice
 ./rice diff            # що зміниться
 ./rice push            # розкласти файли в ~ (старі версії — в ~/.local/state/rice-bak/)
-systemctl --user enable --now hyprlock-bg.service
+systemctl --user enable --now hyprlock-bg.service yumi-calendar-remind.timer yumi-tray.service
+yumi-accent            # 2.0: accent colors for Waybar, swaync, rofi, kitty, GTK (re-run after a wallpaper change is automatic)
+hyprlock-google-build  # 2.0: build the lock screen for your monitors (edit MONITORS / DPR at the top first)
 ./rice reload
 ./rice push-system     # за бажанням: /etc, по одному файлу з підтвердженням
 ```
@@ -675,8 +794,8 @@ MIT — див. [LICENSE](LICENSE).
 
 **[🇬🇧 English](#en)** · **[🇮🇹 Italiano](#it)** · **[🇺🇦 Українська](#uk)** · **🇷🇺 Русский**
 
-Мой рабочий стол Hyprland на MacBook Pro M1 с Asahi Linux: Waybar из «пилюль», все меню рисует один движок
-на rofi, центр управления в стиле macOS на swaync, экран блокировки с плеером — и всё это перекрашивается
+Мой рабочий стол Hyprland на MacBook Pro M1 с Asahi Linux: Waybar из «пилюль», меню на GTK4
+с размытием и цветами обоев, центр управления в стиле macOS на swaync, экран блокировки с плеером — и всё это перекрашивается
 под текущие обои. А ещё скрипт, который держит репозиторий и систему синхронными и сохраняет резервную копию
 каждого файла, который меняет.
 
@@ -688,6 +807,30 @@ MIT — див. [LICENSE](LICENSE).
 | Бар / уведомления / меню | Waybar · swaync · rofi |
 | Блокировка / простой / обои | hyprlock · hypridle · awww |
 | Терминал / шрифт | kitty · JetBrainsMono Nerd Font |
+
+### Что нового в 2.0
+
+> [!IMPORTANT]
+> **Собрано и проверено только на моей машине:** MacBook Pro M1 (2560×1600, масштаб 1.666667) + MSI G27C3F
+> (1920×1080 @ 180 Гц, масштаб 1). В версии 2.0 много подгонки именно под эти два монитора и их масштабы — размеры
+> меню и rofi, шрифты экрана блокировки для каждого монитора, высоты панелей. Я не знаю, как сборка поведёт себя на
+> другой конфигурации: используйте её как пример и подстраивайте под своё железо. Имена и масштабы мониторов
+> прописаны прямо в `hyprlock-google-build`, `rofi`, `rofi-panel`, `yumipanel.py`, `yumi-player`, `yumi-menu-wallpaper`, `yumi-menu-workspaces`, `yumi-panel/style.css`, `waybar/user-style.css` и в шаблоне экрана блокировки.
+> Версия 1.0 (меню rofi, темы HyDE) остаётся доступной: [`v1.0`](https://github.com/sonoyumi/yumi-rice/releases/tag/v1.0).
+
+- **Меню на GTK4 вместо rofi на панели (`yumi-panel`):** один каркас (`~/.local/lib/yumi-panel`) — окно layer-shell
+  с размытием, цветами обоев и управлением с клавиатуры. Меню: Wi-Fi, Bluetooth, звук, VPN (ExpressVPN / Tailscale),
+  питание и режимы HyDE, сеанс, система (обновления, снимки btrfs, ресурсы), процессы, мышь (DPI, частота), календарь
+  с напоминаниями, буфер обмена, выбор обоев, рабочие столы, трей. Старые меню rofi остаются в репозитории.
+- **Акцент из обоев (`yumi-accent`):** один акцентный цвет берётся из обоев и через хуки попадает в Waybar, swaync,
+  rofi, kitty, GTK/Qt, рамки окон, VS Code и Telegram.
+- **Новый экран блокировки «Yumi Google»:** `hyprlock-google-build` собирает его из шаблона для каждого монитора —
+  часы, цитаты, плеер, сведения о системе. Прежняя раскладка (`layout20.conf`) тоже на месте.
+- **Пилюли и центр управления:** Wi-Fi, Bluetooth, «не засыпать» (☕ останавливает hypridle), пилюля плеера с обложкой
+  и всплывающий `yumi-player`; в центре управления — «Не беспокоить», «не засыпать» и мышь.
+- **А ещё:** напоминания календаря (таймер systemd), трей без дублирующихся апплетов, тема Telegram в цветах обоев,
+  скрытие лишних ярлыков (`yumi-app-hide`), `SUPER+K` переключает раскладку сразу на всех клавиатурах, а экран
+  блокировки всегда открывается с английской раскладкой. У каждой доработки свой скрипт `*-uninstall`.
 
 ### Возможности
 
@@ -740,7 +883,7 @@ MIT — див. [LICENSE](LICENSE).
 
 ### Скриншоты
 
-См. [галерею в английском разделе](#screenshots).
+См. [галерею в английском разделе](#screenshots) (2.0, а ниже — 1.0).
 
 ### Клавиши и жесты
 
@@ -748,15 +891,19 @@ MIT — див. [LICENSE](LICENSE).
 
 | Клавиши | Действие |
 |---|---|
-| `SUPER` + `Esc` | Меню выключения |
+| `SUPER` + `Esc`, `CTRL` + `ALT` + `Del` | Сеанс: блокировка, сон, выход, перезагрузка, выключение |
 | `SUPER` + `N` | Центр управления |
-| `SUPER` + `M` | Карточка плеера |
+| `SUPER` + `M` | Плеер |
 | `SUPER` + `V` | Буфер обмена |
-| `SUPER` + `` ` `` | Обзор рабочих столов |
-| `SUPER` + `/`, `SUPER` + `SHIFT` + `W` | Режимы HyDE |
+| `SUPER` + `TAB` | Рабочие столы |
+| `SUPER` + `` ` `` | Меню системы |
+| `SUPER` + `SHIFT` + `W` | Выбор обоев |
+| `SUPER` + `/` | Питание и режимы HyDE |
 | `SUPER` + `ALT` + `↑` / `↓` | Следующий / предыдущий режим HyDE |
-| Клавиши подсветки клавиатуры | Яркость подсветки (работает и на экране блокировки) |
-| 3 пальца ← / → | Переключение рабочих столов |
+| `SUPER` + `K` | Раскладка на всех клавиатурах |
+| `ALT` + `F9`…`F12`, `ALT` + `Print` / `Scroll Lock` / `Pause` | Музыка и громкость с внешней клавиатуры |
+| Клавиши подсветки | Яркость подсветки (и на экране блокировки) |
+| 3 пальца ← / → | Переключение столов |
 | 3 пальца ↓ | Обзор рабочих столов |
 
 ### Быстрый старт
@@ -771,7 +918,7 @@ MIT — див. [LICENSE](LICENSE).
 sudo pacman -S --needed waybar swaync rofi jq cliphist wl-clipboard playerctl imagemagick \
     inotify-tools networkmanager-dmenu bluez-utils power-profiles-daemon libnotify \
     brightnessctl btop kitty ttf-jetbrains-mono-nerd yt-dlp earlyoom zram-generator \
-    solaar openrgb
+    solaar openrgb gtk4 gtk4-layer-shell python-gobject pacman-contrib
 ```
 
 ```bash
@@ -779,7 +926,9 @@ git clone https://github.com/sonoyumi/yumi-rice.git ~/Projects/yumi-rice
 cd ~/Projects/yumi-rice
 ./rice diff            # что изменится
 ./rice push            # разложить файлы по ~ (старые версии — в ~/.local/state/rice-bak/)
-systemctl --user enable --now hyprlock-bg.service
+systemctl --user enable --now hyprlock-bg.service yumi-calendar-remind.timer yumi-tray.service
+yumi-accent            # 2.0: accent colors for Waybar, swaync, rofi, kitty, GTK (re-run after a wallpaper change is automatic)
+hyprlock-google-build  # 2.0: build the lock screen for your monitors (edit MONITORS / DPR at the top first)
 ./rice reload
 ./rice push-system     # по желанию: /etc, по одному файлу с подтверждением
 ```
