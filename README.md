@@ -45,6 +45,8 @@ repository and the system in step, with a backup of every file it touches.
 > another configuration: treat it as an example and adjust it to your hardware. Monitor names and scales are written
 > directly in `hyprlock-google-build`, `rofi`, `rofi-panel`, `yumipanel.py`, `yumi-player`, `yumi-menu-wallpaper`, `yumi-menu-workspaces`, `yumi-panel/style.css`, `waybar/user-style.css` and the lock-screen template.
 > Version 1.0 (rofi menus, HyDE themes) is still available: [`v1.0`](https://github.com/sonoyumi/yumi-rice/releases/tag/v1.0).
+>
+> **Coming next:** I will keep checking performance and functionality and fix things where needed. In the next few days I'll add lock-screen screenshots and two more things that are already done but not published yet.
 
 - **GTK4 menus instead of rofi in the bar (`yumi-panel`):** one framework (`~/.local/lib/yumi-panel`) — a layer-shell
   window with blur, wallpaper colors, keyboard navigation. Menus: Wi-Fi, Bluetooth, sound, VPN (ExpressVPN / Tailscale),
@@ -327,6 +329,8 @@ repository e sistema, con un backup di ogni file che tocca.
 > Non so come si comporti su un'altra configurazione: usala come esempio e adattala al tuo hardware. Nomi e scale dei
 > monitor sono scritti direttamente in `hyprlock-google-build`, `rofi`, `rofi-panel`, `yumipanel.py`, `yumi-player`, `yumi-menu-wallpaper`, `yumi-menu-workspaces`, `yumi-panel/style.css`, `waybar/user-style.css` e nel template della schermata di blocco.
 > La versione 1.0 (menu rofi, temi HyDE) resta disponibile: [`v1.0`](https://github.com/sonoyumi/yumi-rice/releases/tag/v1.0).
+>
+> **Prossimamente:** continuerò a verificare ottimizzazione e funzionalità e, se serve, farò correzioni. Nei prossimi giorni aggiungerò gli screenshot della schermata di blocco e altre due cose già pronte ma non ancora pubblicate.
 
 - **Menu GTK4 al posto di rofi nella barra (`yumi-panel`):** un unico framework (`~/.local/lib/yumi-panel`) — finestra
   layer-shell con sfocatura, colori dello sfondo, navigazione da tastiera. Menu: Wi-Fi, Bluetooth, audio, VPN
@@ -574,6 +578,8 @@ MIT, vedi [LICENSE](LICENSE).
 > іншій конфігурації: використовуйте її як приклад і підлаштовуйте під своє залізо. Назви й масштаби моніторів
 > прописані прямо в `hyprlock-google-build`, `rofi`, `rofi-panel`, `yumipanel.py`, `yumi-player`, `yumi-menu-wallpaper`, `yumi-menu-workspaces`, `yumi-panel/style.css`, `waybar/user-style.css` і в шаблоні екрана блокування.
 > Версія 1.0 (меню rofi, теми HyDE) лишається доступною: [`v1.0`](https://github.com/sonoyumi/yumi-rice/releases/tag/v1.0).
+>
+> **Далі:** я ще перевірятиму оптимізацію та функціональність і за потреби вноситиму правки. Найближчими днями додам скриншоти екрана блокування та ще дві речі, які вже зроблені, але поки не опубліковані.
 
 - **Меню на GTK4 замість rofi на панелі (`yumi-panel`):** один каркас (`~/.local/lib/yumi-panel`) — вікно layer-shell
   з розмиттям, кольорами шпалер і керуванням з клавіатури. Меню: Wi-Fi, Bluetooth, звук, VPN (ExpressVPN / Tailscale),
@@ -817,6 +823,8 @@ MIT — див. [LICENSE](LICENSE).
 > другой конфигурации: используйте её как пример и подстраивайте под своё железо. Имена и масштабы мониторов
 > прописаны прямо в `hyprlock-google-build`, `rofi`, `rofi-panel`, `yumipanel.py`, `yumi-player`, `yumi-menu-wallpaper`, `yumi-menu-workspaces`, `yumi-panel/style.css`, `waybar/user-style.css` и в шаблоне экрана блокировки.
 > Версия 1.0 (меню rofi, темы HyDE) остаётся доступной: [`v1.0`](https://github.com/sonoyumi/yumi-rice/releases/tag/v1.0).
+>
+> **Дальше:** я ещё проверю оптимизацию и функциональность и при необходимости внесу правки. В ближайшие дни добавлю скриншоты экрана блокировки и ещё две вещи, которые уже сделал, но пока не опубликовал.
 
 - **Меню на GTK4 вместо rofi на панели (`yumi-panel`):** один каркас (`~/.local/lib/yumi-panel`) — окно layer-shell
   с размытием, цветами обоев и управлением с клавиатуры. Меню: Wi-Fi, Bluetooth, звук, VPN (ExpressVPN / Tailscale),
