@@ -1,0 +1,11 @@
+[Unit]
+Description=Напоминания календаря yumi (yumi-calendar-remind)
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/yumi-calendar-remind
+Nice=10
+TimeoutStartSec=30
+# раз в минуту — без строк «Starting/Finished» в журнале
+LogLevelMax=warning

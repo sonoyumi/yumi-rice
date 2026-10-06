@@ -1,0 +1,8 @@
+$HOME/.config/waybar/theme.css
+@define-color bar-bg <wallbash_1xa1_rgba(0.01)>;
+@define-color main-bg <wallbash_1xa2_rgba(1)>;
+@define-color main-fg <wallbash_1xa9_rgba(1)>;
+@define-color wb-act-bg <wallbash_1xa5_rgba(1)>;
+@define-color wb-act-fg <wallbash_1xa9_rgba(1)>;
+@define-color wb-hvr-bg <wallbash_1xa4_rgba(1)>;
+@define-color wb-hvr-fg <wallbash_1xa9_rgba(1)>;

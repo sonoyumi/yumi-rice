@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Текст пилюли плеера в Waybar (custom/player-text): «Название — Артист  1:23/3:39».
+# Раз в секунду один запрос к playerctl (без --follow: браузер шлёт пачки событий при смене трека).
+# Ничего не играет → пустой текст, модуль скрыт (вместе с обложкой image#player-cover).
+# При смене трека/статуса будит обложку сигналом 14. Откат: yumi-player-uninstall
+export LANG=C.UTF-8 LC_ALL=C.UTF-8   # playerctl ломается на кириллице и «—» без UTF-8
+MAX=30                               # длина «Название — Артист» вместе с «…»
+
+t() { local s=$(( ${1:-0} / 1000000 )); (( s >= 3600 )) && printf '%d:%02d:%02d' $((s / 3600)) $((s % 3600 / 60)) $((s % 60)) || printf '%d:%02d' $((s / 60)) $((s % 60)); }
+esc() { local s=$1; s=${s//&/&amp;}; s=${s//</&lt;}; s=${s//>/&gt;}; printf '%s' "$s"; }
+json() { local s=$1; s=${s//\\/\\\\}; s=${s//\"/\\\"}; s=${s//$'\n'/\\n}; s=${s//$'\t'/ }; printf '%s' "$s"; }
+cut_to() { local s=$1 n=$2; (( ${#s} > n )) && s="${s:0:n-1}…"; printf '%s' "$s"; }
+
+last="" key_prev=""
+while :; do
+    # разделитель \x1f, а не таб: пустые поля (нет артиста) не должны схлопываться
+    IFS=$'\x1f' read -r st title artist pos len art < <(playerctl -p playerctld metadata --format \
+        $'{{status}}\x1f{{title}}\x1f{{artist}}\x1f{{position}}\x1f{{mpris:length}}\x1f{{mpris:artUrl}}' 2>/dev/null)
+    if [ -z "$st" ]; then   # playerctld иногда теряет активный плеер — спросить первый попавшийся напрямую
+        IFS=$'\x1f' read -r st title artist pos len art < <(playerctl metadata --format \
+            $'{{status}}\x1f{{title}}\x1f{{artist}}\x1f{{position}}\x1f{{mpris:length}}\x1f{{mpris:artUrl}}' 2>/dev/null)
+    fi
+    key="$st|$art"
+    if [ "$key" != "$key_prev" ]; then
+        key_prev=$key
+        name=$(playerctl -l 2>/dev/null | head -1)   # через playerctld имя плеера не видно
+        name=${name%%.*}
+        pkill -RTMIN+14 -x waybar 2>/dev/null   # перерисовать круглую обложку
+    fi
+    if [ "$st" != Playing ] && [ "$st" != Paused ]; then
+        out='{"text":"","class":"stopped"}'
+    else
+        [ -n "$title" ] || title="Без названия"
+        room=$(( MAX - ${#title} - 3 ))   # артиста показываем, если влезает хотя бы 6 символов
+        if [ -n "$artist" ] && (( room >= ${#artist} || room >= 6 )); then
+            s="$title — $(cut_to "$artist" $room)"
+        else
+            s=$(cut_to "$title" $MAX)
+        fi
+        tm=""
+        [[ $len =~ ^[0-9]+$ ]] && (( len > 0 )) && tm="  <span alpha='70%'>$(t "${pos%.*}")/$(t "$len")</span>"
+        case ${name,,} in firefox*) src="󰈹 Firefox" ;; spotify*) src="󰓇 Spotify" ;; mpv*) src="󰐹 mpv" ;; *) src="󰝚 $name" ;; esac
+        tip="$(esc "$title")"; [ -n "$artist" ] && tip+=$'\n'"$(esc "$artist")"
+        tip+=$'\n'"<span alpha='70%'>$src · $([ "$st" = Playing ] && echo играет || echo пауза)</span>"
+        out="{\"text\":\"$(json "$(esc "$s")$tm")\",\"tooltip\":\"$(json "$tip")\",\"class\":\"${st,,}\"}"
+    fi
+    [ "$out" != "$last" ] && { printf '%s\n' "$out"; last=$out; }
+    sleep 1
+done

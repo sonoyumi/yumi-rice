@@ -1,0 +1,1035 @@
+#!/usr/bin/env python3
+"""yumi-menu-sound — меню звука на GTK (каркас yumi-panel), замена старого окна pavucontrol.
+  yumi-menu-sound [--bar|--center]   открыть / закрыть
+Главная: громкость и микрофон, ПРИЛОЖЕНИЯ (у каждого потока свой ползунок, «без звука» и устройство вывода),
+ВЫХОД / ВХОД (клик — сделать основным; 󰇙, правый клик или долгое нажатие — страница устройства:
+громкость, баланс Л/П, разъём, профиль карты), чип «Запись» — кто сейчас слушает микрофон.
+Всё обновляется само (pactl subscribe). pavucontrol — маленькой ссылкой «Расширенные настройки…».
+Проверка:
+  YP_DRYRUN=1   команды, меняющие звук, только печатаются (громкость/устройства не трогаются)
+  YP_FAKE=1     (только с YP_DRYRUN) добавить выдуманные потоки и Bluetooth-наушники — для снимков
+  YP_OPEN=rec | dev:<часть имени/описания> | move:<индекс потока> | moverec:<индекс>   сразу открыть подстраницу
+  YP_TEST=actions   (только с YP_DRYRUN) прогнать действия меню и напечатать команды
+Откат: yumi-panel-uninstall"""
+import os
+import re
+import sys
+import threading
+import json
+import subprocess
+
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-panel"))
+import yumipanel as yp  # noqa: E402  (сам перезапускает процесс с layer-shell)
+from yumipanel import Gtk, GLib, Pango  # noqa: E402
+
+DRY = yp.DRY
+FAKE = DRY and os.environ.get("YP_FAKE") == "1"
+NO_DEV = 4294967295
+STEREO = "front-left,front-right"
+
+ICON_VOL, ICON_MUTED, ICON_MIC, ICON_MIC_OFF = "󰕾", "󰖁", "󰍬", "󰍭"
+ICON_MORE, ICON_REC, ICON_GEAR, ICON_CHECK, ICON_DOWN = "󰇙", "󰑊", "󰒓", "󰄬", "󰅀"
+
+EXTRA_CSS = """
+.ys-head-row { margin-top: 6px; }
+.ys-head-row .yp-section { margin-top: 0; }
+.ys-chip {
+  min-height: 26px; padding: 0 10px; border-radius: 13px;
+  font-size: 9.5pt; background: @yp-btn; color: @yp-fg; border: none; box-shadow: none;
+}
+.ys-chip:hover { background: @yp-hover; }
+.ys-chip:disabled { background: transparent; color: alpha(@yp-fg2, 0.65); }
+.ys-chip.live { color: #ed8796; box-shadow: inset 0 0 0 1px alpha(#ed8796, 0.5); }
+.ys-card { background: alpha(@yp-btn, 0.65); border-radius: 18px; padding: 8px 8px 2px 12px; }
+.ys-card .yp-slider-row { padding: 0; }
+.ys-card .yp-icon-btn { min-width: 30px; min-height: 30px; }
+.ys-card.event { background: alpha(@yp-btn, 0.35); }
+.ys-card.muted .ys-app-icon { color: alpha(@yp-fg2, 0.45); }
+.ys-app-icon { color: @yp-accent; font-size: 15pt; min-width: 26px; }
+.ys-app-name { font-weight: 700; font-size: 10.5pt; }
+.ys-app-sub  { font-size: 9pt; color: alpha(@yp-fg2, 0.75); }
+.ys-more { min-width: 36px; padding: 0; border-radius: 16px; background: @yp-btn; color: @yp-fg2;
+           border: none; box-shadow: none; font-size: 12pt; }
+.ys-more:hover { background: @yp-hover; color: @yp-fg; }
+.ys-dim  { color: alpha(@yp-fg2, 0.6); font-size: 10pt; padding: 6px 6px; }
+.ys-off .yp-row-icon { color: alpha(@yp-fg2, 0.5); }
+.ys-list scrollbar { background: transparent; border: none; }
+.ys-list scrollbar slider { min-width: 4px; border-radius: 2px; background: alpha(@yp-fg2, 0.35); }
+.ys-link {
+  background: none; border: none; box-shadow: none; padding: 2px 8px; min-height: 0;
+  color: alpha(@yp-fg2, 0.6); font-size: 9.5pt;
+}
+.ys-link:hover { color: @yp-fg; }
+.ys-dry { color: @yp-accent; font-size: 8.5pt; font-weight: 700; letter-spacing: 1px; padding: 0 6px; }
+.ys-balance highlight { background: transparent; }
+.ys-balance slider { opacity: 1; }
+.ys-default  { color: #a6da95; font-size: 10pt; font-weight: 700; padding: 6px 6px; }
+.ys-bal-side { color: @yp-fg2; font-size: 10pt; font-weight: 700; min-width: 16px; }
+.ys-bal-pct  { font-size: 9.5pt; color: @yp-fg2; min-width: 44px; }
+"""
+
+
+# ---------- чтение pactl ----------
+def pj(*what):
+    try:
+        return json.loads(yp.run("pactl", "-f", "json", *what) or "null")
+    except ValueError:
+        return None
+
+
+def pct(obj):
+    """Громкость как в pavucontrol: самый громкий канал, %."""
+    vals = []
+    for ch in (obj.get("volume") or {}).values():
+        try:
+            vals.append(int(str(ch.get("value_percent", "0")).rstrip("%")))
+        except ValueError:
+            pass
+    return max(vals) if vals else 0
+
+
+def is_monitor(src):
+    return src["name"].endswith(".monitor") or src.get("properties", {}).get("device.class") == "monitor"
+
+
+def hidden_stream(s):
+    """Служебные потоки: DSP-фильтры Asahi (динамики/микрофон), измерители pavucontrol, неподключённые."""
+    p = s.get("properties", {})
+    node = p.get("node.name", "")
+    return (p.get("node.passive") == "true" or node.startswith(("effect_output.", "effect_input.", "audio_effect."))
+            or str(p.get("node.group", "")).startswith("filter-chain")
+            or p.get("application.id") == "org.PulseAudio.pavucontrol" or p.get("media.name") == "Peak detect"
+            or s.get("sink", s.get("source")) == NO_DEV)
+
+
+def snapshot():
+    info = pj("info") or {}
+    srcs = pj("list", "sources") or []
+    d = {
+        "def_sink": info.get("default_sink_name", ""),
+        "def_src": info.get("default_source_name", ""),
+        "sinks": pj("list", "sinks") or [],
+        "sources": [s for s in srcs if not is_monitor(s)],
+        "monitors": {s["index"]: s for s in srcs if is_monitor(s)},
+        "inputs": [s for s in pj("list", "sink-inputs") or [] if not hidden_stream(s)],
+        "outputs": [s for s in pj("list", "source-outputs") or [] if not hidden_stream(s)],
+        "cards": {c["index"]: c for c in pj("list", "cards") or []},
+    }
+    if FAKE:
+        add_fakes(d)
+    return d
+
+
+def add_fakes(d):
+    """Только для проверки (YP_DRYRUN + YP_FAKE): выдуманные приложения и Bluetooth-наушники."""
+    def vol(p, chans=("front-left", "front-right")):
+        return {c: {"value_percent": f"{p}%"} for c in chans}
+    d["cards"][99001] = {
+        "index": 99001, "name": "bluez_card.AC_80_0A_00_00_01", "active_profile": "a2dp-sink-aac",
+        "properties": {"device.description": "WH-1000XM4", "device.bus": "bluetooth", "device.api": "bluez5"},
+        "profiles": {
+            "off": {"description": "Off", "available": True, "priority": 0},
+            "a2dp-sink-aac": {"description": "High Fidelity Playback (A2DP Sink, codec AAC)", "available": True, "priority": 130},
+            "a2dp-sink": {"description": "High Fidelity Playback (A2DP Sink, codec SBC)", "available": True, "priority": 128},
+            "headset-head-unit-msbc": {"description": "Headset Head Unit (HSP/HFP, codec mSBC)", "available": True, "priority": 30},
+        }}
+    d["sinks"].append({"index": 99002, "name": "bluez_output.AC_80_0A_00_00_01.1", "description": "WH-1000XM4",
+                       "mute": False, "volume": vol(55), "balance": -0.2, "channel_map": STEREO, "ports": [],
+                       "properties": {"device.id": "99001", "device.bus": "bluetooth", "device.api": "bluez5"}})
+    sink0 = next((s["index"] for s in d["sinks"] if s["name"] == d["def_sink"]), 0)
+    src0 = next((s["index"] for s in d["sources"] if s["name"] == d["def_src"]), 0)
+    d["inputs"] += [
+        {"index": 99010, "sink": sink0, "mute": False, "corked": False, "volume": vol(70),
+         "properties": {"application.name": "Spotify", "media.name": "Nils Frahm — Says",
+                        "application.process.binary": "spotify"}},
+        {"index": 99011, "sink": 99002, "mute": True, "corked": False, "volume": vol(100),
+         "properties": {"application.name": "Telegram Desktop", "media.name": "Звонок",
+                        "application.process.binary": "telegram-desktop"}},
+        {"index": 99012, "sink": sink0, "mute": False, "corked": True, "volume": vol(100),
+         "properties": {"application.name": "libcanberra", "media.role": "event", "media.name": "bell-window-system"}},
+    ]
+    d["outputs"] += [
+        {"index": 99020, "source": src0, "mute": False, "volume": vol(85),
+         "properties": {"application.name": "Telegram Desktop", "media.name": "Звонок",
+                        "application.process.binary": "telegram-desktop"}},
+        {"index": 99021, "source": src0, "mute": False, "volume": vol(100),
+         "properties": {"application.name": "OBS Studio", "media.name": "Запись экрана",
+                        "application.process.binary": "obs"}},
+    ]
+
+
+# ---------- названия и значки ----------
+APP_ICONS = (("firefox", "󰈹"), ("librewolf", "󰈹"), ("chrom", "󰊯"), ("brave", "󰊯"), ("spotify", "󰓇"),
+             ("telegram", ""), ("discord", "󰙯"), ("vesktop", "󰙯"), ("vlc", "󰕼"), ("mpv", "󰐊"),
+             ("celluloid", "󰐊"), ("steam", "󰓓"), ("obs", "󰑋"), ("zoom", "󰕧"), ("cava", "󰄨"),
+             ("yumi-player", "󰝚"), ("speech", "󰗋"))
+TRIVIAL_MEDIA = {"playback", "audio stream", "audiostream", "output", "record", "capture", "playstream",
+                 "recordstream", "audio", "simple dsp", "webrtc voiceengine"}
+
+
+def is_event(s):
+    return s.get("properties", {}).get("media.role") == "event"
+
+
+def app_icon(s):
+    p = s.get("properties", {})
+    if is_event(s):
+        return "󰂚"
+    key = " ".join(str(p.get(k, "")) for k in ("application.process.binary", "application.name",
+                                                  "application.icon_name", "node.name")).lower()
+    return next((ic for k, ic in APP_ICONS if k in key), "󰝚")
+
+
+def app_name(s):
+    p = s.get("properties", {})
+    if is_event(s):
+        return "Системные звуки"
+    name = p.get("application.name") or p.get("media.name") or p.get("node.name") or "Без названия"
+    return name
+
+
+def media_title(s):
+    p = s.get("properties", {})
+    m = (p.get("media.name") or "").strip()
+    if m == "cava" or p.get("node.name") == "cava":
+        return "визуализатор"
+    if is_event(s) or not m or m == p.get("application.name") or m.lower() in TRIVIAL_MEDIA:
+        return ""
+    return m
+
+
+def dev_kind(dev):
+    p = dev.get("properties", {})
+    txt = (dev.get("name", "") + " " + (dev.get("description") or "")).lower()
+    if p.get("device.bus") == "bluetooth" or p.get("device.api") == "bluez5" or "bluez" in txt:
+        return "bt"
+    if "hdmi" in txt or "displayport" in txt:
+        return "hdmi"
+    if p.get("device.bus") == "usb":
+        return "usb"
+    if (dev.get("description") or "").startswith(("Built-in Audio", "MacBook")) or p.get("device.form_factor") == "internal":
+        return "internal"
+    return "other"
+
+
+def dev_name(dev, kind):
+    """Понятное имя: «Динамики», «Наушники (3,5 мм)», «Встроенный микрофон»; иначе — как у устройства."""
+    if not dev:
+        return "—"
+    desc = dev.get("description") or dev.get("name", "")
+    if dev.get("_monitor"):
+        return "выход"
+    if dev_kind(dev) == "internal":
+        low = desc.lower()
+        if "speaker" in low:
+            return "Динамики"
+        if "headset mic" in low:
+            return "Микрофон гарнитуры (3,5 мм)"
+        if "headphone" in low:
+            return "Наушники (3,5 мм)"
+        if "mic" in low:
+            return "Встроенный микрофон"
+    return desc
+
+
+def dev_icon(dev, kind):
+    if not dev:
+        return ICON_VOL
+    k = dev_kind(dev)
+    low = (dev.get("description") or dev.get("name", "")).lower()
+    if dev.get("_monitor"):
+        return ICON_VOL
+    if k == "bt":
+        return "󰂰"
+    if k == "hdmi":
+        return "󰍹"
+    if "headset" in low and kind == "source":
+        return "󰋎"
+    if "headphone" in low:
+        return "󰋋"
+    if k == "usb":
+        return "󰕓"
+    return ICON_MIC if kind == "source" else "󰓃"
+
+
+def dev_type_text(dev, kind, default):
+    what = {"bt": "Bluetooth", "hdmi": "HDMI", "usb": "USB", "internal": "встроенный"}.get(dev_kind(dev), "")
+    side = "Выход" if kind == "sink" else "Вход"
+    return " · ".join(x for x in (side, what, "основной" if default else "") if x)
+
+
+PART_RU = {"analog-stereo": "Аналоговый стерео", "analog-mono": "Аналоговый моно",
+           "analog-surround-40": "Аналоговый 4.0", "analog-surround-51": "Аналоговый 5.1",
+           "analog-surround-71": "Аналоговый 7.1", "iec958-stereo": "Цифровой стерео (S/PDIF)",
+           "hdmi-stereo": "HDMI стерео", "hdmi-surround": "HDMI 5.1", "hdmi-surround71": "HDMI 7.1"}
+
+
+def part_ru(part):
+    base = re.sub(r"-extra\d+$", "", part)
+    return PART_RU.get(base) or (part.replace("-", " ").capitalize())
+
+
+def profile_ru(key, desc):
+    """Профиль карты по-русски: «Выкл.», «Высокое качество (A2DP, AAC)», «Гарнитура с микрофоном (HFP)»…"""
+    k = key.lower()
+    codec = re.search(r"codec ([\w\-.]+)", desc or "", re.I)
+    codec = f", {codec.group(1)}" if codec else ""
+    if k == "off":
+        return "Выкл."
+    if k.startswith("a2dp"):
+        return f"Высокое качество (A2DP{codec})"
+    if k.startswith(("headset", "handsfree")) or "hfp" in k or "hsp" in k:
+        return f"Гарнитура с микрофоном (HFP{codec})"
+    if k == "pro-audio":
+        return "Профессиональный (Pro Audio)"
+    if k == "hifi" or desc == "Default":
+        return "Обычный (HiFi)"
+    m = dict(re.findall(r"(output|input):([\w\-]+)", key))
+    out, inp = m.get("output"), m.get("input")
+    if out and inp:
+        return f"{part_ru(out)} дуплекс" if out == inp else f"{part_ru(out)} + вход {part_ru(inp).lower()}"
+    if out:
+        return f"{part_ru(out)} (только выход)"
+    if inp:
+        return f"{part_ru(inp)} (только вход)"
+    return desc or key
+
+
+def profile_icon(key):
+    k = key.lower()
+    if k == "off":
+        return ICON_MUTED
+    if k.startswith("a2dp"):
+        return "󰋋"
+    if k.startswith(("headset", "handsfree")) or "hfp" in k:
+        return "󰋎"
+    if "hdmi" in k:
+        return "󰍹"
+    return "󰓃"
+
+
+def text_label(text, classes):
+    return Gtk.Label(label=text, xalign=0, wrap=True, max_width_chars=1, hexpand=True, css_classes=classes)
+
+
+def clear(box):
+    while (c := box.get_first_child()):
+        box.remove(c)
+
+
+def scrolled(child, max_h, panel):
+    sw = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, propagate_natural_height=True,
+                            max_content_height=round(max_h * panel.k), css_classes=["ys-list"])
+    sw.set_child(child)
+    return sw
+
+
+def fit_height(panel):
+    """Окно само не сжимается, когда содержимое стало ниже — подогнать под естественную высоту."""
+    return                                # окно меню теперь постоянного размера (каркас yumipanel)
+    def run():
+        frame = panel.get_child()
+        w = panel.get_width() or frame.get_width()
+        _m, nat, _b1, _b2 = frame.measure(Gtk.Orientation.VERTICAL, w)
+        if nat > 0 and abs(panel.get_height() - nat) > 1:
+            panel.set_default_size(w, nat)
+        return False
+    GLib.timeout_add(260, run)            # после анимации стека
+
+
+# ---------- ползунки ----------
+class Throttle:
+    """Пока тянут ползунок — не чаще раза в 70 мс, последнее значение всегда доходит."""
+
+    def __init__(self, fn):
+        self.fn, self.pending, self.sent, self.timer = fn, None, None, 0
+
+    def push(self, v):
+        self.pending = v
+        if not self.timer:
+            self.flush()
+            self.timer = GLib.timeout_add(70, self.tick)
+
+    def flush(self):
+        if self.pending is not None and self.pending != self.sent:
+            self.sent = self.pending
+            self.fn(self.pending)
+
+    def tick(self):
+        if self.pending != self.sent:
+            self.flush()
+            return True
+        self.timer = 0
+        self.sent = None
+        return False
+
+
+class VolSlider:
+    """Кнопка «без звука» + ползунок 0–100 + процент; живые обновления не дёргают ползунок, пока его тянут."""
+
+    def __init__(self, on_icon, off_icon, tooltip, setter, muter):
+        self.on_icon, self.off_icon = on_icon, off_icon
+        self.block = 0
+        self.thr = Throttle(setter)
+        self.btn = yp.icon_button(on_icon, tooltip, lambda *_: muter())
+        self.box, self.scale, self.pct = yp.slider_row(self.btn, self.changed)
+
+    def changed(self, v):
+        v = round(v)
+        self.block = GLib.get_monotonic_time() + 800_000
+        self.pct.set_label(f"{v}%")
+        self.thr.push(v)
+
+    def update(self, vol, muted):
+        if GLib.get_monotonic_time() > self.block:
+            self.scale.set_value(min(vol, 100))
+            self.pct.set_label(f"{vol}%")
+        self.btn.set_label(self.off_icon if muted else self.on_icon)
+        for w in (self.btn, self.scale):
+            (w.add_css_class if muted else w.remove_css_class)("off")
+
+
+class StreamRow:
+    """Карточка потока: значок приложения, имя и трек, чип устройства, ползунок с «без звука».
+    kind: "sink" — воспроизведение (sink-input), "source" — запись (source-output)."""
+
+    def __init__(self, menu, kind, s):
+        self.menu, self.kind, self.idx = menu, kind, s["index"]
+        self.box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0, css_classes=["ys-card"])
+        if is_event(s):
+            self.box.add_css_class("event")
+        top = Gtk.Box(spacing=10)
+        self.icon = Gtk.Label(label=app_icon(s), css_classes=["ys-app-icon"])
+        txt = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True, valign=Gtk.Align.CENTER)
+        self.name = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END, max_width_chars=1, css_classes=["ys-app-name"])
+        self.sub = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END, max_width_chars=1, css_classes=["ys-app-sub"])
+        txt.append(self.name)
+        txt.append(self.sub)
+        self.chip_lbl = Gtk.Label(ellipsize=Pango.EllipsizeMode.END, max_width_chars=13)
+        self.chip = Gtk.Button(child=self.chip_lbl, css_classes=["ys-chip"], valign=Gtk.Align.CENTER)
+        self.chip.connect("clicked", lambda *_: menu.open_move(kind, self.idx))
+        for w in (self.icon, txt, self.chip):
+            top.append(w)
+        self.box.append(top)
+        on, off = (ICON_VOL, ICON_MUTED) if kind == "sink" else (ICON_MIC, ICON_MIC_OFF)
+        self.vol = VolSlider(on, off, "Без звука", lambda v: menu.set_stream_vol(kind, self.idx, v),
+                             lambda: menu.mute_stream(kind, self.idx))
+        self.box.append(self.vol.box)
+
+    def update(self, s):
+        d = self.menu.data
+        self.name.set_label(app_name(s))
+        sub = media_title(s)
+        if s.get("corked"):
+            sub = " · ".join(x for x in (sub, "на паузе") if x)
+        self.sub.set_label(sub)
+        self.sub.set_visible(bool(sub))
+        dev = self.menu.dev_by_index(self.kind, s[self.kind])
+        devs = d["sinks"] if self.kind == "sink" else d["sources"]
+        movable = len(devs) > 1 and not (dev or {}).get("_monitor")
+        arrow = f" {ICON_DOWN}" if movable else ""
+        short = re.sub(r"\s*\(.*\)$", "", dev_name(dev, self.kind))       # «Наушники (3,5 мм)» → «Наушники»
+        short = {"Встроенный микрофон": "Встроенный", "Микрофон гарнитуры": "Гарнитура"}.get(short, short)
+        self.chip_lbl.set_label(f"{dev_icon(dev, self.kind)} {short}{arrow}")
+        self.chip.set_sensitive(movable)
+        self.chip.set_tooltip_text(("Куда выводить звук" if self.kind == "sink" else "Какой микрофон")
+                                   if movable else None)
+        self.vol.update(pct(s), s.get("mute"))
+        (self.box.add_css_class if s.get("mute") else self.box.remove_css_class)("muted")
+
+
+# ---------- меню ----------
+class Sound:
+    def __init__(self, panel, body):
+        self.panel = panel
+        self.data = None
+        self.refreshing = self.again = False
+        self.refresh_timer = 0
+        self.watchers = []                 # обновление открытых подстраниц: fn(data)
+        self.dev_sig = self.apps_sig = None
+        self.app_rows = {}
+        self.proc = None
+        panel.add_css(EXTRA_CSS)
+
+        if DRY:
+            body.append(Gtk.Label(label="РЕЖИМ ПРОВЕРКИ · DRY-RUN", xalign=0, css_classes=["ys-dry"]))
+
+        self.out = VolSlider(ICON_VOL, ICON_MUTED, "Без звука",
+                             lambda v: self.set_dev_vol("sink", self.default("sink"), v),
+                             lambda: self.mute_dev("sink", "@DEFAULT_SINK@"))
+        self.inp = VolSlider(ICON_MIC, ICON_MIC_OFF, "Выключить микрофон",
+                             lambda v: self.set_dev_vol("source", self.default("source"), v),
+                             lambda: self.mute_dev("source", "@DEFAULT_SOURCE@"))
+        body.append(yp.section("ГРОМКОСТЬ"))
+        body.append(self.out.box)
+
+        head = Gtk.Box(spacing=8, css_classes=["ys-head-row"])
+        head.append(Gtk.Label(label="МИКРОФОН", xalign=0, hexpand=True, valign=Gtk.Align.CENTER,
+                              css_classes=["yp-section"]))
+        self.rec_lbl = Gtk.Label(label=f"{ICON_REC} Запись")
+        self.rec_btn = Gtk.Button(child=self.rec_lbl, css_classes=["ys-chip"], valign=Gtk.Align.CENTER,
+                                  tooltip_text="Кто сейчас использует микрофон")
+        self.rec_btn.connect("clicked", lambda *_: self.open_rec())
+        head.append(self.rec_btn)
+        body.append(head)
+        body.append(self.inp.box)
+
+        body.append(yp.section("ПРИЛОЖЕНИЯ"))
+        self.apps_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        body.append(scrolled(self.apps_box, 215, panel))       # ~2,5 карточки, дальше прокрутка
+
+        body.append(yp.section("ВЫХОД"))
+        self.sinks_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        body.append(self.sinks_box)
+        body.append(yp.section("ВХОД"))
+        self.sources_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        body.append(self.sources_box)
+
+        adv = Gtk.Button(label=f"{ICON_GEAR}  Расширенные настройки…", halign=Gtk.Align.CENTER,
+                         css_classes=["ys-link"], tooltip_text="pavucontrol")
+        adv.connect("clicked", self.open_settings)
+        body.append(adv)
+
+        panel.stack.connect("notify::visible-child", lambda *_: fit_height(panel))
+        panel.app.connect("shutdown", lambda *_: self.proc and self.proc.terminate())
+        self.request_refresh(first=True)
+        threading.Thread(target=self.subscribe, daemon=True).start()
+
+    # ---------- данные ----------
+    def default(self, kind):
+        d = self.data or {}
+        name = d.get("def_sink" if kind == "sink" else "def_src")
+        return next((x for x in d.get(kind + "s", []) if x["name"] == name), None)
+
+    def dev_by_name(self, kind, name):
+        return next((x for x in (self.data or {}).get(kind + "s", []) if x["name"] == name), None)
+
+    def dev_by_index(self, kind, idx):
+        d = self.data or {}
+        dev = next((x for x in d.get(kind + "s", []) if x["index"] == idx), None)
+        if dev is None and kind == "source" and idx in d.get("monitors", {}):
+            dev = dict(d["monitors"][idx], _monitor=True)
+        return dev
+
+    def stream(self, kind, idx):
+        lst = (self.data or {}).get("inputs" if kind == "sink" else "outputs", [])
+        return next((s for s in lst if s["index"] == idx), None)
+
+    def card_of(self, dev):
+        try:
+            return self.data["cards"].get(int(dev.get("properties", {}).get("device.id", -1)))
+        except (TypeError, ValueError):
+            return None
+
+    # ---------- обновление ----------
+    def request_refresh(self, first=False):
+        self.refresh_timer = 0
+        if self.refreshing:
+            self.again = True
+            return False
+        self.refreshing = True
+
+        def work():
+            d = snapshot()
+            GLib.idle_add(self.apply, d, first)
+        threading.Thread(target=work, daemon=True).start()
+        return False
+
+    def schedule_refresh(self, delay=120):
+        if not self.refresh_timer:          # пачка событий pactl → одно обновление
+            self.refresh_timer = GLib.timeout_add(delay, self.request_refresh)
+        return False
+
+    def subscribe(self):
+        """pactl subscribe: потоки и устройства появляются/исчезают сами."""
+        try:
+            self.proc = subprocess.Popen(["pactl", "subscribe"], stdout=subprocess.PIPE, text=True, env=yp.CHILD_ENV)
+            for line in self.proc.stdout:
+                if any(w in line for w in ("sink", "source", "server", "card")):
+                    GLib.idle_add(self.schedule_refresh)
+        except Exception:
+            pass
+
+    def apply(self, d, first=False):
+        self.refreshing = False
+        self.data = d
+        for slider, kind in ((self.out, "sink"), (self.inp, "source")):
+            dev = self.default(kind)
+            slider.update(pct(dev) if dev else 0, bool(dev and dev.get("mute")))
+
+        sig = (tuple((x["name"], x.get("description")) for x in d["sinks"]), d["def_sink"],
+               tuple((x["name"], x.get("description")) for x in d["sources"]), d["def_src"],
+               tuple((c["index"], c.get("active_profile")) for c in d["cards"].values()))
+        if sig != self.dev_sig:
+            self.dev_sig = sig
+            self.fill_devices()
+        self.fill_apps()
+
+        mics = [o for o in d["outputs"] if o["source"] not in d["monitors"]]
+        self.rec_lbl.set_label(f"{ICON_REC} Запись · {len(mics)}" if mics else f"{ICON_REC} Запись")
+        (self.rec_btn.add_css_class if mics else self.rec_btn.remove_css_class)("live")
+        if not self.panel.pages:
+            self.panel.set_subtitle(self.main_subtitle(), live=True)
+        for w in list(self.watchers):
+            w(d)
+        if first:
+            self.open_from_env()
+        if self.again:
+            self.again = False
+            self.schedule_refresh(60)
+        return False
+
+    def main_subtitle(self):
+        sink = self.default("sink")
+        return f"Выход: {dev_name(sink, 'sink')}" if sink else "Нет устройства вывода"
+
+    def toast(self, text, error=False):
+        self.panel.toast(("[проверка] " if DRY else "") + text, error, hold=3)
+        if not self.panel.pages:
+            GLib.timeout_add(3100, lambda: (not self.panel.pages and self.panel.set_subtitle(
+                self.main_subtitle(), live=True)) and False)
+
+    def fill_devices(self):
+        d = self.data
+        for box, kind, default in ((self.sinks_box, "sink", d["def_sink"]), (self.sources_box, "source", d["def_src"])):
+            clear(box)
+            devs = d[kind + "s"]
+            for dev in devs:
+                box.append(self.dev_row(kind, dev, dev["name"] == default))
+            if kind == "sink":        # выключенные карты — чтобы их можно было включить обратно
+                for card in d["cards"].values():
+                    if card.get("active_profile") == "off" and len(card.get("profiles", {})) > 1:
+                        cname = card.get("properties", {}).get("device.description") or card["name"]
+                        b = yp.row_button(ICON_MUTED, cname, lambda *_, i=card["index"]: self.open_card(i), meta="выкл.")
+                        b.add_css_class("ys-off")
+                        box.append(b)
+            if not box.get_first_child():
+                box.append(text_label("Нет устройств", ["ys-dim"]))
+        fit_height(self.panel)
+
+    def dev_row(self, kind, dev, active):
+        wrap = Gtk.Box(spacing=6)
+        b = yp.row_button(dev_icon(dev, kind), dev_name(dev, kind), lambda *_: self.set_default(kind, dev), active=active)
+        b.set_hexpand(True)
+        b.set_tooltip_text(dev.get("description") or dev["name"])
+
+        def open_page(*_):
+            self.open_device(kind, dev["name"])
+        rc = Gtk.GestureClick(button=3)
+        rc.connect("pressed", open_page)
+        b.add_controller(rc)
+        lp = Gtk.GestureLongPress()
+        lp.connect("pressed", open_page)
+        b.add_controller(lp)
+        more = Gtk.Button(label=ICON_MORE, tooltip_text="Настройки устройства", css_classes=["ys-more"])
+        more.connect("clicked", open_page)
+        wrap.append(b)
+        wrap.append(more)
+        return wrap
+
+    def fill_apps(self):
+        d = self.data
+        streams = sorted(d["inputs"], key=lambda s: (is_event(s), bool(s.get("corked")), app_name(s).lower()))
+        sig = tuple(s["index"] for s in streams)
+        if sig != self.apps_sig:
+            self.apps_sig = sig
+            clear(self.apps_box)
+            self.app_rows = {}
+            for s in streams:
+                row = StreamRow(self, "sink", s)
+                self.app_rows[s["index"]] = row
+                self.apps_box.append(row.box)
+            if not streams:
+                self.apps_box.append(text_label("󰝛  Сейчас ничего не играет", ["ys-dim"]))
+            fit_height(self.panel)
+        for s in streams:
+            self.app_rows[s["index"]].update(s)
+
+    # ---------- подстраницы ----------
+    def push(self, title, page, sub, watcher=None):
+        if watcher:
+            self.watchers.append(watcher)
+        self.panel.push(title, page, sub,
+                        on_leave=lambda: watcher in self.watchers and self.watchers.remove(watcher))
+        if watcher:
+            watcher(self.data)
+
+    def is_top(self, page):
+        vis = self.panel.stack.get_visible_child()
+        return vis is not None and page.get_parent() is vis
+
+    def close_page(self, page, text):
+        if self.is_top(page):
+            self.panel.pop()
+            self.toast(text)
+
+    # «Куда выводить звук» / «Какой микрофон» для одного потока
+    def open_move(self, kind, idx):
+        s = self.stream(kind, idx)
+        if not s:
+            return
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        page.append(yp.hint("Звук этого приложения пойдёт на выбранное устройство, остальные не изменятся."
+                            if kind == "sink" else "Какой микрофон слушает это приложение."))
+        page.append(yp.section("ВЫХОД" if kind == "sink" else "МИКРОФОН"))
+        lst = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        page.append(lst)
+        state = {"sig": None}
+
+        def fill(d):
+            s = self.stream(kind, idx)
+            if not s:
+                self.close_page(page, "Приложение закрыло поток")
+                return
+            devs = d[kind + "s"]
+            sig = (tuple(x["name"] for x in devs), s[kind])
+            if sig == state["sig"]:
+                return
+            state["sig"] = sig
+            clear(lst)
+            for dev in devs:
+                lst.append(yp.row_button(dev_icon(dev, kind), dev_name(dev, kind),
+                                         lambda *_, n=dev["name"]: self.move(kind, idx, n),
+                                         active=dev["index"] == s[kind]))
+        self.push("Вывод звука" if kind == "sink" else "Микрофон", page,
+                  f"{app_icon(s)} {app_name(s)}", fill)
+
+    # «Запись»: кто слушает микрофон
+    def open_rec(self):
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        mic_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        mon_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        mon_head = yp.section("СЛУШАЮТ ЗВУК СИСТЕМЫ")
+        mon_hint = yp.hint("Визуализаторы и запись экрана — микрофон им не нужен.")
+        page.append(yp.section("ИСПОЛЬЗУЮТ МИКРОФОН"))
+        page.append(scrolled(mic_box, 360, self.panel))
+        for w in (mon_head, mon_hint, mon_box):
+            page.append(w)
+        state = {"sig": None, "rows": {}}
+
+        def fill(d):
+            mics = sorted([o for o in d["outputs"] if o["source"] not in d["monitors"]], key=lambda s: app_name(s).lower())
+            mons = sorted([o for o in d["outputs"] if o["source"] in d["monitors"]], key=lambda s: app_name(s).lower())
+            sig = (tuple(s["index"] for s in mics), tuple(s["index"] for s in mons))
+            if sig != state["sig"]:
+                state["sig"] = sig
+                state["rows"] = {}
+                for box, lst in ((mic_box, mics), (mon_box, mons)):
+                    clear(box)
+                    for s in lst:
+                        row = StreamRow(self, "source", s)
+                        state["rows"][s["index"]] = row
+                        box.append(row.box)
+                if not mics:
+                    mic_box.append(text_label(f"{ICON_MIC_OFF}  Сейчас микрофон никто не использует", ["ys-dim"]))
+                for w in (mon_head, mon_hint, mon_box):
+                    w.set_visible(bool(mons))
+                fit_height(self.panel)
+            for s in mics + mons:
+                state["rows"][s["index"]].update(s)
+            if self.is_top(page):
+                self.panel.set_subtitle(f"Микрофон слушают: {len(mics)}" if mics else "Микрофон свободен", live=True)
+        self.push("Запись", page, "", fill)
+
+    # страница устройства: громкость, баланс, основное, разъём, профиль
+    def open_device(self, kind, name):
+        dev = self.dev_by_name(kind, name)
+        if not dev:
+            return
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+
+        on, off = (ICON_VOL, ICON_MUTED) if kind == "sink" else (ICON_MIC, ICON_MIC_OFF)
+        vol = VolSlider(on, off, "Без звука", lambda v: self.set_dev_vol(kind, self.dev_by_name(kind, name), v),
+                        lambda: self.mute_dev(kind, name))
+        page.append(yp.section("ГРОМКОСТЬ"))
+        page.append(vol.box)
+
+        # баланс Л/П (только стерео)
+        bal_head = yp.section("БАЛАНС")
+        bal_row = Gtk.Box(spacing=8, css_classes=["yp-slider-row"])
+        bal = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL, draw_value=False, hexpand=True,
+                        valign=Gtk.Align.CENTER, css_classes=["yp-slider", "ys-balance"], focusable=False)
+        bal.set_range(-100, 100)
+        bal.set_increments(5, 10)
+        bal.add_mark(0, Gtk.PositionType.BOTTOM, None)
+        bal_pct = Gtk.Label(xalign=1, css_classes=["ys-bal-pct"])
+        center = Gtk.Button(label="󰘞", tooltip_text="По центру", css_classes=["yp-icon-btn", "yp-small"],
+                            valign=Gtk.Align.CENTER)
+        state = {"bal_block": 0, "def": None, "ports": None, "prof": None}
+        bal_thr = Throttle(lambda v: self.set_balance(kind, name, v))
+
+        def bal_text(v):
+            v = round(v)
+            return "центр" if v == 0 else (f"Л {-v}%" if v < 0 else f"П {v}%")
+
+        def on_bal(v):
+            v = round(min(max(v, -100), 100))
+            if abs(v) < 4:            # лёгкое «прилипание» к центру
+                v = 0
+            state["bal_block"] = GLib.get_monotonic_time() + 800_000
+            bal_pct.set_label(bal_text(v))
+            bal_thr.push(v)
+        bal.connect("change-value", lambda _s, _t, v: on_bal(v) or False)
+        center.connect("clicked", lambda *_: (bal.set_value(0), on_bal(0)))
+        bal_row.append(Gtk.Label(label="Л", css_classes=["ys-bal-side"]))
+        bal_row.append(bal)
+        bal_row.append(Gtk.Label(label="П", css_classes=["ys-bal-side"]))
+        bal_row.append(bal_pct)
+        bal_row.append(center)
+        page.append(bal_head)
+        page.append(bal_row)
+
+        def_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        page.append(def_box)
+        ports_head = yp.section("РАЗЪЁМ")
+        ports_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        page.append(ports_head)
+        page.append(ports_box)
+        prof_head = yp.section("ПРОФИЛЬ")
+        prof_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        page.append(prof_head)
+        page.append(prof_box)
+        used = yp.hint("")
+        page.append(used)
+        tech = yp.hint("")              # системное имя, если оно отличается от понятного
+        page.append(tech)
+
+        def fill(d):
+            dev = self.dev_by_name(kind, name)
+            if not dev:
+                self.close_page(page, "Устройство отключилось")
+                return
+            is_def = name == (d["def_sink"] if kind == "sink" else d["def_src"])
+            desc = dev.get("description") or name
+            tech.set_label(f"Устройство: {desc}")
+            tech.set_visible(desc != dev_name(dev, kind))
+            vol.update(pct(dev), dev.get("mute"))
+            stereo = dev.get("channel_map") == STEREO
+            for w in (bal_head, bal_row):
+                w.set_visible(stereo)
+            if stereo and GLib.get_monotonic_time() > state["bal_block"]:
+                b = round(float(dev.get("balance") or 0) * 100)
+                bal.set_value(b)
+                bal_pct.set_label(bal_text(b))
+            if state["def"] != is_def:
+                state["def"] = is_def
+                clear(def_box)
+                if is_def:
+                    def_box.append(Gtk.Label(label=f"{ICON_CHECK}  Основное устройство", xalign=0,
+                                             css_classes=["ys-default"]))
+                else:
+                    def_box.append(yp.action_button("󰓎  Сделать основным", lambda *_: self.set_default(kind, dev)))
+            ports = dev.get("ports") or []
+            psig = (tuple(p["name"] for p in ports), dev.get("active_port"))
+            if psig != state["ports"]:
+                state["ports"] = psig
+                clear(ports_box)
+                for p in ports:
+                    ptxt = re.sub(r"^\[(In|Out)\]\s*", "", p.get("description") or p["name"])
+                    meta = "не подключён" if p.get("availability") == "not available" else ""
+                    ports_box.append(yp.row_button("󰡁" if kind == "sink" else ICON_MIC, ptxt,
+                                                   lambda *_, pn=p["name"]: self.set_port(kind, name, pn),
+                                                   active=p["name"] == dev.get("active_port"), meta=meta))
+                for w in (ports_head, ports_box):
+                    w.set_visible(len(ports) > 1)
+            card = self.card_of(dev)
+            csig = card and (card["index"], card.get("active_profile"), tuple(card.get("profiles", {})))
+            if csig != state["prof"]:
+                state["prof"] = csig
+                self.fill_profiles(prof_box, card)
+                for w in (prof_head, prof_box):
+                    w.set_visible(bool(card))
+            streams = d["inputs"] if kind == "sink" else d["outputs"]
+            names = sorted({app_name(s) for s in streams if s.get(kind) == dev["index"]})
+            verb = "Играет здесь" if kind == "sink" else "Слушают"
+            used.set_label(f"{verb}: {', '.join(names)}" if names else "")
+            used.set_visible(bool(names))
+            if self.is_top(page):
+                self.panel.set_subtitle(dev_type_text(dev, kind, is_def), live=True)
+            fit_height(self.panel)
+
+        is_def0 = name == (self.data["def_sink"] if kind == "sink" else self.data["def_src"])
+        self.push(f"{dev_icon(dev, kind)}  {dev_name(dev, kind)}", page, dev_type_text(dev, kind, is_def0), fill)
+
+    def fill_profiles(self, box, card):
+        clear(box)
+        if not card:
+            return
+        profs = [(k, v) for k, v in card.get("profiles", {}).items() if v.get("available", True)]
+        profs.sort(key=lambda kv: (kv[0] == "off", -int(kv[1].get("priority", 0))))
+        confirm = yp.revealer(Gtk.Box())
+        for k, v in profs:
+            active = k == card.get("active_profile")
+
+            def pick(*_, k=k, v=v, active=active):
+                if active:
+                    return
+                if k == "off":
+                    confirm.set_child(yp.confirm_box(
+                        "Выключить звуковую карту? Её выходы и входы пропадут, пока не выберете профиль снова.",
+                        lambda: (confirm.set_reveal_child(False), self.set_profile(card, k, v)),
+                        yes_text="Выключить", on_no=lambda: confirm.set_reveal_child(False)))
+                    confirm.set_reveal_child(True)
+                    return
+                self.set_profile(card, k, v)
+            box.append(yp.row_button(profile_icon(k), profile_ru(k, v.get("description", "")), pick, active=active))
+        box.append(confirm)
+        confirm.connect("notify::child-revealed", lambda *_: fit_height(self.panel))
+
+    # выключенная карта (профиль «Выкл.»): только выбор профиля
+    def open_card(self, idx):
+        card = (self.data or {}).get("cards", {}).get(idx)
+        if not card:
+            return
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        page.append(yp.hint("Карта выключена. Выберите профиль, чтобы снова появились её выходы и входы."))
+        page.append(yp.section("ПРОФИЛЬ"))
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        page.append(box)
+        state = {"sig": None}
+
+        def fill(d):
+            c = d["cards"].get(idx)
+            if not c:
+                self.close_page(page, "Карта пропала")
+                return
+            sig = (c.get("active_profile"), tuple(c.get("profiles", {})))
+            if sig != state["sig"]:
+                state["sig"] = sig
+                self.fill_profiles(box, c)
+        self.push("Звуковая карта", page, card.get("properties", {}).get("device.description") or card["name"], fill)
+
+    # ---------- действия (всё через yp.do: в YP_DRYRUN только печать) ----------
+    def after(self, ok, out, text):
+        if ok:
+            if text:
+                self.toast(text)
+        else:
+            self.toast(out.splitlines()[-1] if out else "Не получилось", error=True)
+        self.schedule_refresh()
+
+    def set_dev_vol(self, kind, dev, v):
+        if not dev:
+            return
+        bal = float(dev.get("balance") or 0)
+        if dev.get("channel_map") == STEREO and abs(bal) > 0.005:      # не сбивать баланс
+            left, right = (round(v * (1 - bal)), v) if bal > 0 else (v, round(v * (1 + bal)))
+            ok, out = yp.do("pactl", f"set-{kind}-volume", dev["name"], f"{left}%", f"{right}%")
+        else:
+            ok, out = yp.do("pactl", f"set-{kind}-volume", dev["name"], f"{round(v)}%")
+        self.after(ok, out, "")
+
+    def set_balance(self, kind, name, b):
+        dev = self.dev_by_name(kind, name)
+        if not dev:
+            return
+        v, f = pct(dev), b / 100
+        left, right = (round(v * (1 - f)), v) if f > 0 else (v, round(v * (1 + f)))
+        ok, out = yp.do("pactl", f"set-{kind}-volume", name, f"{left}%", f"{right}%")
+        self.after(ok, out, "")
+
+    def mute_dev(self, kind, name):
+        ok, out = yp.do("pactl", f"set-{kind}-mute", name, "toggle")
+        self.after(ok, out, "")
+
+    def set_default(self, kind, dev):
+        if dev["name"] == (self.data["def_sink"] if kind == "sink" else self.data["def_src"]):
+            return
+        ok, out = yp.do("pactl", f"set-default-{kind}", dev["name"])
+        self.after(ok, out, f"{'Выход' if kind == 'sink' else 'Вход'}: {dev_name(dev, kind)}")
+
+    def set_port(self, kind, name, port):
+        ok, out = yp.do("pactl", f"set-{kind}-port", name, port)
+        self.after(ok, out, "Разъём переключён")
+
+    def set_profile(self, card, key, prof):
+        ok, out = yp.do("pactl", "set-card-profile", card["name"], key)
+        self.after(ok, out, f"Профиль: {profile_ru(key, prof.get('description', ''))}")
+
+    def set_stream_vol(self, kind, idx, v):
+        what = "sink-input" if kind == "sink" else "source-output"
+        ok, out = yp.do("pactl", f"set-{what}-volume", str(idx), f"{round(v)}%")
+        self.after(ok, out, "")
+
+    def mute_stream(self, kind, idx):
+        what = "sink-input" if kind == "sink" else "source-output"
+        ok, out = yp.do("pactl", f"set-{what}-mute", str(idx), "toggle")
+        self.after(ok, out, "")
+
+    def move(self, kind, idx, target):
+        s = self.stream(kind, idx)
+        what = "sink-input" if kind == "sink" else "source-output"
+        ok, out = yp.do("pactl", f"move-{what}", str(idx), target)
+        if self.panel.pages:
+            self.panel.pop()
+        self.after(ok, out, f"{app_name(s) if s else 'Поток'} → {dev_name(self.dev_by_name(kind, target), kind)}")
+
+    def open_settings(self, *_):
+        yp.spawn("pavucontrol")
+        self.panel.app.quit()
+
+    # ---------- проверка ----------
+    def open_from_env(self):
+        what = os.environ.get("YP_OPEN", "")
+        if what == "rec":
+            self.open_rec()
+        elif what.startswith(("move:", "moverec:")):
+            kind = "sink" if what.startswith("move:") else "source"
+            try:
+                self.open_move(kind, int(what.split(":", 1)[1]))
+            except ValueError:
+                pass
+        elif what.startswith("dev:"):
+            key = what.split(":", 1)[1].lower()
+            for kind in ("sink", "source"):
+                dev = next((x for x in self.data[kind + "s"]
+                            if key in (x["name"] + " " + (x.get("description") or "") + " " + dev_name(x, kind)).lower()),
+                           None)
+                if dev:
+                    self.open_device(kind, dev["name"])
+                    break
+        if DRY and os.environ.get("YP_TEST") == "actions":
+            GLib.timeout_add(600, self.run_test)
+
+    def run_test(self):
+        d = self.data
+
+        def log(m):
+            print("[test]", m, file=sys.stderr, flush=True)
+        sink = self.default("sink")
+        other = next((x for x in d["sinks"] if x["name"] != d["def_sink"]), None)
+        log("громкость основного выхода → 40")
+        self.out.changed(40)
+        log("без звука основного выхода")
+        self.mute_dev("sink", "@DEFAULT_SINK@")
+        if other:
+            log("сделать основным другой выход")
+            self.set_default("sink", other)
+        if d["inputs"]:
+            s = d["inputs"][0]
+            log(f"поток {app_name(s)}: громкость 30, без звука")
+            self.set_stream_vol("sink", s["index"], 30)
+            self.mute_stream("sink", s["index"])
+            if other:
+                log("переместить поток")
+                self.move("sink", s["index"], other["name"])
+        if d["outputs"]:
+            o = d["outputs"][0]
+            log(f"запись {app_name(o)}: громкость 50")
+            self.set_stream_vol("source", o["index"], 50)
+        if sink:
+            log("баланс -30")
+            self.set_balance("sink", sink["name"], -30)
+            card = self.card_of(sink)
+            if card:
+                k = next((k for k in card["profiles"] if k not in ("off", card.get("active_profile"))), None)
+                if k:
+                    log("профиль карты")
+                    self.set_profile(card, k, card["profiles"][k])
+        log("готово")
+        return False
+
+
+if __name__ == "__main__":
+    app = yp.PanelApp("org.yumi.panel.sound", "Звук", ICON_VOL, lambda panel, body: Sound(panel, body))
+    sys.exit(app.run(sys.argv))

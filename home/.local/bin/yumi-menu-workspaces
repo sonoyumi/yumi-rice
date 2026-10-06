@@ -1,0 +1,397 @@
+#!/usr/bin/env python3
+"""yumi-menu-workspaces — меню «Рабочие столы» на GTK (каркас yumi-panel) вместо rofi menu-workspaces.
+  yumi-menu-workspaces [--bar|--center]   открыть / закрыть
+  yumi-menu-workspaces --close            закрыть открытое меню
+Сетка столов 1–10 (по мониторам): номер, число окон, значки приложений; клик — перейти на стол,
+правый клик — список его окон. Ниже, как в старом меню, — занятые столы с приложениями (клик — окна стола)
+и «Новый рабочий стол» (первый свободный номер). На подстранице: окна стола (клик — перейти к окну)
+и «Перейти на стол». Клавиши 1…9, 0 — перейти на стол 1…10. Обновляется само (события Hyprland, socket2).
+
+Отладка:
+  YP_DRYRUN=1          переходы не выполняются — команда hyprctl пишется в stderr, меню не закрывается
+  YP_WS_PAGE=N         сразу открыть окна стола N
+  YP_WS_ACT=go:N | win:N   через 1,5 с «нажать» плитку стола N / первое окно на подстранице (с YP_DRYRUN=1)
+Откат: удалить этот файл (старое меню ~/.local/bin/menu-workspaces не тронуто)."""
+import json
+import os
+import socket
+import sys
+import threading
+
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-panel"))
+import yumipanel as yp  # noqa: E402  (сам перезапускает процесс с layer-shell)
+from yumipanel import Gtk, Gdk, GLib, Pango  # noqa: E402
+import gi  # noqa: E402
+try:
+    gi.require_version("GioUnix", "2.0")
+    from gi.repository import GioUnix as DesktopNS  # noqa: E402
+except (ValueError, ImportError):
+    from gi.repository import Gio as DesktopNS  # noqa: E402
+
+GRID = range(1, 11)
+COLS = 5
+MAX_ICONS = 3
+MON_NAMES = {"eDP-1": "Ноутбук", "DP-1": "MSI"}
+
+CSS = """
+.yp-ws-mon { font-size: 8.5pt; font-weight: 700; letter-spacing: 1px; color: alpha(@yp-fg2, 0.6); margin: 2px 4px 0 4px; }
+.yp-ws-tile { background: @yp-btn; border-radius: 16px; padding: 6px 2px 6px 2px; border: none; box-shadow: none;
+              color: @yp-fg; min-height: 62px; transition: background 150ms, box-shadow 200ms; }
+.yp-ws-tile:hover { background: @yp-hover; }
+.yp-ws-tile.empty { background: alpha(@yp-btn, 0.45); }
+.yp-ws-tile.empty .yp-ws-num { color: alpha(@yp-fg, 0.45); }
+.yp-ws-tile.visible { box-shadow: inset 0 0 0 1px alpha(@yp-accent, 0.45); }
+.yp-ws-tile.active { background: alpha(@yp-accent, 0.25); box-shadow: inset 0 0 0 1px alpha(@yp-accent, 0.8); }
+.yp-ws-num { font-size: 13pt; font-weight: 800; }
+.yp-ws-tile.active .yp-ws-num { color: @yp-accent; }
+.yp-ws-count { font-size: 8pt; font-weight: 700; color: @yp-on-acc; background: alpha(@yp-accent, 0.85);
+               border-radius: 8px; padding: 0 5px; min-width: 8px; }
+.yp-ws-icons { min-height: 16px; }
+.yp-ws-icon { -gtk-icon-size: 15px; }
+.yp-ws-glyph { font-size: 10pt; color: @yp-accent; }
+.yp-ws-more { font-size: 8pt; color: alpha(@yp-fg2, 0.8); }
+.yp-ws-dash { font-size: 9pt; color: alpha(@yp-fg2, 0.35); }
+.yp-ws-row-icon { -gtk-icon-size: 18px; }
+.yp-ws-row-glyph { font-size: 13pt; color: @yp-accent; }
+.yp-ws-row-num { font-size: 11pt; font-weight: 800; color: @yp-accent; min-width: 22px; }
+.yp-ws-win { padding: 6px 12px; }
+.yp-ws-win-title { font-size: 10.5pt; }
+.yp-ws-win-sub { font-size: 8.5pt; color: alpha(@yp-fg2, 0.7); }
+.yp-ws-tag { font-size: 8pt; color: alpha(@yp-fg2, 0.75); background: alpha(@yp-fg, 0.08); border-radius: 8px; padding: 1px 6px; }
+"""
+
+
+def hypr(*args):
+    try:
+        return json.loads(yp.run("hyprctl", "-j", *args) or "null")
+    except ValueError:
+        return None
+
+
+def short(cls):
+    """org.telegram.desktop → telegram, com.mitchellh.ghostty → ghostty (как в старом меню)."""
+    parts = (cls or "?").split(".")
+    name = parts[-2] if parts[-1] == "desktop" and len(parts) > 1 else parts[-1]
+    return name.lower()
+
+
+GLYPHS = {"firefox": "󰈹", "kitty": "󰄛", "code": "󰨞", "telegram": "", "claude": "󰚩", "steam": "󰓓",
+          "discord": "󰙯", "spotify": "󰓇", "chromium": "", "obs": "󰑋", "thunar": "󰉋", "nautilus": "󰉋",
+          "btop": "󰨇", "mpv": "󰕼", "pavucontrol": "󰕾", "solaar": "󰍽"}
+_icons = {}
+
+
+def gicon_for(cls):
+    key = (cls or "").lower()
+    if key in _icons:
+        return _icons[key]
+    gicon = None
+    for cand in (cls, key, short(cls)):
+        if not cand:
+            continue
+        try:
+            info = DesktopNS.DesktopAppInfo.new(cand + ".desktop")
+        except TypeError:
+            info = None
+        if info and info.get_icon():
+            gicon = info.get_icon()
+            break
+    if gicon is None and key:
+        for group in DesktopNS.DesktopAppInfo.search(short(cls))[:1]:
+            for did in group[:1]:
+                info = DesktopNS.DesktopAppInfo.new(did)
+                wm = (info.get_startup_wm_class() or "").lower() if info else ""
+                if info and info.get_icon() and (wm == key or short(cls) in did.lower()):
+                    gicon = info.get_icon()
+    _icons[key] = gicon
+    return gicon
+
+
+def app_icon(cls, img_cls, glyph_cls):
+    g = gicon_for(cls)
+    if g is not None:
+        return Gtk.Image(gicon=g, css_classes=[img_cls], tooltip_text=short(cls))
+    glyph = next((v for k, v in GLYPHS.items() if k in (cls or "").lower()), "󰣆")
+    return Gtk.Label(label=glyph, css_classes=[glyph_cls], tooltip_text=short(cls))
+
+
+def lbl(text="", classes=(), xalign=0.0, **kw):
+    return Gtk.Label(label=text, xalign=xalign, css_classes=list(classes), **kw)
+
+
+def clear(box):
+    while (c := box.get_first_child()):
+        box.remove(c)
+
+
+def unique_classes(wins):
+    seen = []
+    for w in wins:
+        if w["class"] not in seen:
+            seen.append(w["class"])
+    return seen
+
+
+class Workspaces:
+    def __init__(self, panel, body):
+        self.panel = panel
+        self.data = None
+        self.refresh_timer = 0
+        self.page = None
+        panel.add_css(CSS)
+        panel.on_key_hook = self.on_key
+
+        self.grid_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        body.append(self.grid_box)
+        body.append(yp.section("ЗАНЯТЫЕ СТОЛЫ"))
+        self.list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        body.append(self.list)
+        body.append(yp.hint("Клик по плитке — перейти, правый клик — окна стола. Клавиши 1…9, 0 — стол 1…10."))
+
+        self.refresh()
+        threading.Thread(target=self.listen, daemon=True).start()
+        if os.environ.get("YP_WS_PAGE"):
+            GLib.timeout_add(300, lambda: self.open_ws(int(os.environ["YP_WS_PAGE"])) or False)
+        act = os.environ.get("YP_WS_ACT", "")
+        if act and yp.DRY:
+            what, _, arg = act.partition(":")
+            if what == "go":
+                GLib.timeout_add(1500, lambda: self.go(int(arg)) or False)
+            elif what == "win":
+                def win():
+                    wins = self.windows_of(int(arg))
+                    if wins:
+                        self.focus_window(wins[0])
+                    return False
+                GLib.timeout_add(1500, win)
+
+    # ---------- данные ----------
+    def load(self):
+        wss = hypr("workspaces") or []
+        clients = hypr("clients") or []
+        mons = hypr("monitors") or []
+        active = (hypr("activeworkspace") or {}).get("id")
+        visible = {m["activeWorkspace"]["id"]: m["name"] for m in mons if m.get("activeWorkspace")}
+        by_ws = {}
+        for c in clients:
+            wid = c.get("workspace", {}).get("id", 0)
+            if wid > 0 and c.get("mapped", True):
+                by_ws.setdefault(wid, []).append(c)
+        for wins in by_ws.values():       # порядок как на экране: слева направо, сверху вниз
+            wins.sort(key=lambda c: (c.get("at", [0, 0])[0], c.get("at", [0, 0])[1]))
+        ws = {w["id"]: w for w in wss if w["id"] > 0}
+        return {"ws": ws, "by_ws": by_ws, "active": active, "visible": visible,
+                "mons": [m["name"] for m in sorted(mons, key=lambda m: m["x"])]}
+
+    def windows_of(self, wid):
+        return (self.data or {}).get("by_ws", {}).get(wid, [])
+
+    def schedule_refresh(self):
+        if not self.refresh_timer:
+            self.refresh_timer = GLib.timeout_add(150, self.refresh)
+        return False
+
+    def schedule_title(self):
+        if not self.refresh_timer:
+            self.refresh_timer = GLib.timeout_add(1000, self.refresh)
+        return False
+
+    def refresh(self):
+        self.refresh_timer = 0
+        self.data = self.load()
+        self.build_grid()
+        self.build_list()
+        if self.page is not None:
+            self.fill_page()
+        else:
+            self.main_subtitle()
+        return False
+
+    def main_subtitle(self):
+        d = self.data
+        n = sum(len(v) for v in d["by_ws"].values())
+        busy = sum(1 for v in d["by_ws"].values() if v)
+        self.panel.set_subtitle(f"Сейчас: стол {d['active']} · окон {n} на {busy} стол.", live=True)
+
+    def listen(self):
+        """События Hyprland: открытие/закрытие/перенос окон, смена стола → обновить."""
+        sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
+        rt = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+        if not sig:
+            return
+        path = os.path.join(rt, "hypr", sig, ".socket2.sock")
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.connect(path)
+            f = s.makefile("r", encoding="utf-8", errors="replace")
+            for line in f:
+                ev = line.split(">>", 1)[0]
+                if ev in ("workspace", "workspacev2", "focusedmon", "focusedmonv2", "openwindow", "closewindow",
+                          "movewindow", "movewindowv2", "createworkspace", "createworkspacev2", "destroyworkspace",
+                          "destroyworkspacev2", "moveworkspace", "moveworkspacev2"):
+                    GLib.idle_add(self.schedule_refresh)
+                elif ev == "windowtitlev2" and self.page is not None:
+                    # заголовки (терминал с анимацией) меняются часто — только для открытого списка окон, реже
+                    GLib.idle_add(self.schedule_title)
+        except OSError:
+            pass
+
+    # ---------- сетка ----------
+    def build_grid(self):
+        clear(self.grid_box)
+        d = self.data
+        # столы 1–10 по мониторам (обычно 1–5 — ноутбук, 6–10 — MSI)
+        groups = {}
+        for i in GRID:
+            mon = d["ws"].get(i, {}).get("monitor") or ("eDP-1" if i <= 5 else "DP-1")
+            groups.setdefault(mon, []).append(i)
+        order = [m for m in d["mons"] if m in groups] + [m for m in groups if m not in d["mons"]]
+        for mon in order:
+            ids = groups[mon]
+            self.grid_box.append(lbl(f"{MON_NAMES.get(mon, mon).upper()} · {mon}", ["yp-ws-mon"]))
+            grid = Gtk.Grid(column_spacing=6, row_spacing=6, column_homogeneous=True)
+            for n, i in enumerate(ids):
+                grid.attach(self.tile(i), n % COLS, n // COLS, 1, 1)
+            self.grid_box.append(grid)
+
+    def tile(self, i):
+        d = self.data
+        wins = d["by_ws"].get(i, [])
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        top = Gtk.Box(spacing=4, halign=Gtk.Align.CENTER)
+        top.append(lbl(str(i), ["yp-ws-num"]))
+        if wins:
+            top.append(lbl(str(len(wins)), ["yp-ws-count"], 0.5, valign=Gtk.Align.CENTER))
+        box.append(top)
+        icons = Gtk.Box(spacing=3, halign=Gtk.Align.CENTER, css_classes=["yp-ws-icons"])
+        classes = unique_classes(wins)
+        for c in classes[:MAX_ICONS]:
+            icons.append(app_icon(c, "yp-ws-icon", "yp-ws-glyph"))
+        if len(classes) > MAX_ICONS:
+            icons.append(lbl(f"+{len(classes) - MAX_ICONS}", ["yp-ws-more"]))
+        if not classes:
+            icons.append(lbl("·", ["yp-ws-dash"]))
+        box.append(icons)
+        b = Gtk.Button(child=box, css_classes=["yp-ws-tile"])
+        if not wins:
+            b.add_css_class("empty")
+        if i in d["visible"]:
+            b.add_css_class("visible")
+        if i == d["active"]:
+            b.add_css_class("active")
+        names = ", ".join(short(c) for c in classes) or "пусто"
+        b.set_tooltip_text(f"Стол {i}: {names}")
+        b.connect("clicked", lambda *_: self.go(i))
+        rc = Gtk.GestureClick(button=Gdk.BUTTON_SECONDARY)
+        rc.connect("pressed", lambda *_: self.open_ws(i))
+        b.add_controller(rc)
+        return b
+
+    # ---------- список (как в старом меню) ----------
+    def build_list(self):
+        clear(self.list)
+        d = self.data
+        ids = sorted(i for i, w in d["ws"].items() if d["by_ws"].get(i))
+        if not ids:
+            self.list.append(yp.hint("Все столы пусты."))
+        for i in ids:
+            wins = d["by_ws"][i]
+            classes = unique_classes(wins)
+            box = Gtk.Box(spacing=10)
+            box.append(lbl(str(i), ["yp-ws-row-num"], 0.5))
+            ic = Gtk.Box(spacing=4)
+            for c in classes[:MAX_ICONS]:
+                ic.append(app_icon(c, "yp-ws-row-icon", "yp-ws-row-glyph"))
+            box.append(ic)
+            box.append(lbl(" · ".join(short(c) for c in classes), (), hexpand=True,
+                           ellipsize=Pango.EllipsizeMode.END, max_width_chars=1))
+            box.append(lbl(f"{len(wins)} ок.", ["yp-row-meta"]))
+            if i == d["active"]:
+                box.append(lbl("󰄬", ["yp-row-check"]))
+            box.append(lbl("󰅂", ["yp-row-meta"]))
+            b = Gtk.Button(child=box, css_classes=["yp-row"] + (["active"] if i == d["active"] else []),
+                           tooltip_text=f"Окна стола {i}")
+            b.connect("clicked", lambda *_, i=i: self.open_ws(i))
+            self.list.append(b)
+        free = 1
+        while free in d["ws"]:
+            free += 1
+        self.list.append(yp.row_button("󰐕", f"Новый рабочий стол ({free})", lambda *_: self.go(free)))
+
+    # ---------- подстраница стола ----------
+    def open_ws(self, i):
+        if self.page is not None:
+            return
+        self.page = i
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.page_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.append(yp.section("ОКНА"))
+        box.append(self.page_list)
+        box.append(yp.action_button(f"󰍹  Перейти на стол {i}", lambda *_: self.go(i), "primary"))
+        self.panel.push(f"󰍹  Стол {i}", box, "", on_leave=lambda: setattr(self, "page", None))
+        self.fill_page()
+
+    def fill_page(self):
+        i = self.page
+        clear(self.page_list)
+        wins = self.windows_of(i)
+        d = self.data
+        mon = d["ws"].get(i, {}).get("monitor", "")
+        state = "активный" if i == d["active"] else "на экране" if i in d["visible"] else "в фоне"
+        self.panel.set_subtitle(f"{MON_NAMES.get(mon, mon) or 'не создан'} · {state} · окон {len(wins)}", live=True)
+        if not wins:
+            self.page_list.append(yp.hint("На этом столе нет окон."))
+            return
+        for w in wins:
+            row = Gtk.Box(spacing=10)
+            row.append(app_icon(w["class"], "yp-ws-row-icon", "yp-ws-row-glyph"))
+            col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True)
+            col.append(lbl(w.get("title") or short(w["class"]), ["yp-ws-win-title"],
+                           ellipsize=Pango.EllipsizeMode.END, max_width_chars=1))
+            col.append(lbl(short(w["class"]) + (f" · PID {w['pid']}" if w.get("pid") else ""), ["yp-ws-win-sub"]))
+            row.append(col)
+            tags = []
+            if w.get("floating"):
+                tags.append("плав.")
+            if w.get("fullscreen"):
+                tags.append("весь экран")
+            if w.get("xwayland"):
+                tags.append("X11")
+            for t in tags:
+                row.append(lbl(t, ["yp-ws-tag"], valign=Gtk.Align.CENTER))
+            b = Gtk.Button(child=row, css_classes=["yp-row", "yp-ws-win"], tooltip_text="Перейти к окну")
+            b.connect("clicked", lambda *_, w=w: self.focus_window(w))
+            self.page_list.append(b)
+
+    # ---------- действия ----------
+    def dispatch(self, expr, done_text):
+        ok, msg = yp.do("hyprctl", "dispatch", expr)
+        if yp.DRY:
+            self.panel.toast(f"{done_text} (dry-run)", hold=3)
+            return
+        if ok and "error" not in msg.lower():
+            self.panel.app.quit()
+        else:
+            self.panel.toast(f"Не удалось: {msg[:60]}", error=True, hold=4)
+
+    def go(self, i):
+        self.dispatch(f"hl.dsp.focus({{ workspace = {int(i)} }})", f"Переход на стол {i}")
+
+    def focus_window(self, w):
+        addr = w.get("address", "")
+        if not addr.startswith("0x"):
+            return
+        self.dispatch(f'hl.dsp.focus({{ window = "address:{addr}" }})', f"Переход к окну {short(w['class'])}")
+
+    def on_key(self, keyval):
+        ch = yp.hotkey_char(keyval)
+        if ch.isdigit():
+            self.go(int(ch) or 10)
+            return True
+        return False
+
+
+if __name__ == "__main__":
+    app = yp.PanelApp("org.yumi.panel.workspaces", "Рабочие столы", "󰍹",
+                      lambda panel, body: Workspaces(panel, body))
+    sys.exit(app.run(sys.argv))

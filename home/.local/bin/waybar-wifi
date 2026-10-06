@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Пилюля Wi-Fi (вместо встроенного network): уровень сигнала значком, подсказка по-русски.
+# Без сканирования эфира (--rescan no) — быстро. Сигнал RTMIN+16 — обновить сразу.
+export LANG=C.UTF-8 LC_ALL=C.UTF-8
+esc() { local s=${1//&/&amp;}; s=${s//</&lt;}; printf '%s' "${s//\"/\\\"}"; }
+act=$(nmcli -t -f NAME,TYPE,DEVICE connection show --active 2>/dev/null)
+if grep -q ':802-3-ethernet:' <<< "$act"; then
+    printf '{"text":"󰈀","tooltip":"Проводная сеть","class":"ethernet"}\n'; exit
+fi
+if [ "$(nmcli radio wifi 2>/dev/null)" != "enabled" ]; then
+    printf '{"text":"\U000f05aa","tooltip":"Wi-Fi выключен","class":"off"}\n'; exit
+fi
+read -r sig freq chan < <(nmcli -t -f IN-USE,SIGNAL,FREQ,CHAN dev wifi list --rescan no 2>/dev/null \
+    | awk -F: '$1=="*"{gsub(/ MHz/,"",$3); print $2, $3, $4; exit}')
+prof=$(awk -F: '$2=="802-11-wireless"{print $1; exit}' <<< "$act")
+if [ -z "$prof" ] || [ -z "$sig" ]; then
+    printf '{"text":"󰤯","tooltip":"Wi-Fi включён · не подключено","class":"disconnected"}\n'; exit
+fi
+ssid=$(nmcli -g 802-11-wireless.ssid connection show id "$prof" 2>/dev/null); ssid=${ssid:-$prof}
+icons=($'\uf1eb'); i=0   # прежний значок «волны» (U+F1EB); уровень сигнала — в подсказке и цвете (слабый — оранжевый)
+band=$([ "${freq:-0}" -ge 5000 ] && echo "5 ГГц" || echo "2.4 ГГц")
+ip=$(ip -4 -br addr show 2>/dev/null | awk '$1 ~ /^wl/ {sub(/\/.*/,"",$3); print $3; exit}')
+ts=$(ip -br link show tailscale0 2>/dev/null | grep -q UP && echo "\\n󰒄 Tailscale подключён" || true)
+weak=$([ "$sig" -lt 30 ] && echo " weak" || true)
+printf '{"text":"%s","tooltip":"<b>%s</b>\\n%s · канал %s · сигнал %s%%\\nIP %s%s","class":"connected%s"}\n' \
+    "${icons[i]}" "$(esc "$ssid")" "$band" "$chan" "$sig" "${ip:-—}" "$ts" "$weak"

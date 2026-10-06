@@ -1,0 +1,143 @@
+/* yumi-player — стиль окна плеера.
+ * Цвета @yp-* приходят из colors.css (wallbash, шаблон ~/.config/hyde/wallbash/always/yumi-player.dcol)
+ * и обновляются на лету при смене обоев. Здесь — только формы и размеры. */
+
+window.yp-window,
+window.yp-window.background {
+  background: transparent;
+  box-shadow: none;
+}
+
+.yp-window * {
+  font-family: "JetBrainsMono Nerd Font";
+}
+
+/* Рамка как у меню rofi-panel и центра swaync */
+.yp-frame {
+  background: @yp-bg;
+  border: 2px solid @yp-border;
+  border-radius: 30px;
+}
+
+/* Размытая обложка под карточкой */
+.yp-bgart {
+  filter: blur(14px) saturate(1.2);
+  opacity: 0.45;
+}
+
+.yp-card {
+  padding: 16px 18px 14px 18px;
+  background: alpha(@yp-bg, 0.35);
+}
+
+.yp-cover-box {
+  border-radius: 18px;
+}
+.yp-cover-ph {
+  background: @yp-accent;
+  color: @yp-on-acc;
+  font-size: 40pt;
+}
+
+.yp-head {
+  font-size: 10pt;
+  color: alpha(@yp-fg2, 0.75);
+}
+.yp-title {
+  font-size: 15pt;
+  font-weight: bold;
+  color: @yp-fg;
+}
+.yp-artist {
+  font-size: 12pt;
+  color: @yp-fg2;
+}
+.yp-time {
+  font-size: 9pt;
+  color: alpha(@yp-fg2, 0.7);
+}
+
+/* Живая полоса прогресса: заполнено — акцент, остаток — текст 25% */
+scale.yp-progress {
+  padding: 8px 0 4px 0;
+  margin: 0;
+}
+scale.yp-progress > trough {
+  min-height: 4px;
+  border-radius: 2px;
+  border: none;
+  box-shadow: none;
+  background: alpha(@yp-fg, 0.25);
+}
+scale.yp-progress > trough > highlight {
+  min-height: 4px;
+  border-radius: 2px;
+  border: none;
+  background: @yp-accent;
+}
+scale.yp-progress > trough > slider {
+  min-width: 12px;
+  min-height: 12px;
+  margin: -4px;
+  border-radius: 999px;
+  border: none;
+  box-shadow: none;
+  background: @yp-accent;
+  opacity: 0;
+  transition: opacity 150ms;
+}
+scale.yp-progress:hover > trough > slider {
+  opacity: 1;
+}
+scale.yp-progress:disabled > trough > highlight {
+  background: alpha(@yp-fg, 0.25);
+}
+
+/* Кнопки-«таблетки» */
+button.yp-btn {
+  background: @yp-btn;
+  background-image: none;
+  color: @yp-fg;
+  border: none;
+  box-shadow: none;
+  border-radius: 16px;
+  min-width: 56px;
+  min-height: 38px;
+  padding: 0;
+  font-size: 16pt;
+  transition: background 150ms;
+}
+button.yp-btn:hover {
+  background: @yp-hover;
+}
+button.yp-btn:disabled {
+  opacity: 0.35;
+}
+button.yp-btn.yp-play {
+  background: @yp-accent;
+  color: @yp-on-acc;
+  border-radius: 999px;
+  min-width: 48px;
+  min-height: 48px;
+}
+button.yp-btn.yp-play:hover {
+  background: alpha(@yp-accent, 0.85);
+}
+
+/* Громкость */
+.yp-volume {
+  margin-top: 2px;
+}
+button.yp-btn.yp-mute {
+  background: transparent;
+  min-width: 32px;
+  min-height: 28px;
+  font-size: 13pt;
+  color: @yp-fg2;
+}
+button.yp-btn.yp-mute:hover {
+  background: @yp-hover;
+}
+scale.yp-vol {
+  padding: 4px 0;
+}

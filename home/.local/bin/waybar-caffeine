@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Пилюля ☕ «Не засыпать» — общее состояние с плиткой центра уведомлений (cc caffeine): включено = hypridle остановлен.
+# Обновление мгновенно по сигналу RTMIN+15 (его шлёт cc caffeine toggle).
+if pgrep -x hypridle >/dev/null; then
+    printf '{"text":"󰒲","tooltip":"Не засыпать: выключено\\nЭкран блокируется и засыпает по таймеру","class":"deactivated"}\n'
+else
+    printf '{"text":"󰅶","tooltip":"Не засыпать: включено\\nБлокировка и сон по таймеру отключены","class":"activated"}\n'
+fi

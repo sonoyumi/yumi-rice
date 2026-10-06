@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Откат yumi-tray: остановить демон (Watcher/Host трея), удалить сервис, скрипты, меню, настройки.
+# Блок "custom/tray" / "group/pill#tray" из ~/.config/waybar/layouts/yumi.jsonc и правила #custom-tray
+# из user-style.css убираются вручную (их добавляла основная сессия).
+set -u
+systemctl --user disable --now yumi-tray.service 2>/dev/null
+rm -f ~/.config/systemd/user/yumi-tray.service
+systemctl --user daemon-reload
+pkill -f '/.local/bin/yumi-tray bar' 2>/dev/null
+rm -f ~/.local/bin/yumi-tray ~/.local/bin/yumi-menu-tray
+rm -rf ~/.local/lib/yumi-tray ~/.config/yumi-tray "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/yumi-tray"
+rm -f ~/.local/bin/yumi-tray-uninstall
+echo "yumi-tray удалён. Не забудьте убрать custom/tray из yumi.jsonc и перезапустить Waybar."

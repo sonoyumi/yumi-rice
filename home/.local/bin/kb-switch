@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# kb-switch — следующая раскладка СРАЗУ на всех клавиатурах (замена HyDE keyboardswitch.sh на SUPER+K)
+# HyDE переключал только «текущую» клавиатуру (switchxkblayout current), а у Logitech два устройства
+# и у каждой клавиатуры своя раскладка — поэтому иногда язык «не менялся», особенно на экране блокировки.
+# kb-switch [next|en|ru|ua]   KB_SWITCH_QUIET=1 — без уведомления. Откат: kb-switch-uninstall
+
+names=(EN RU UA)
+idx=$(hyprctl devices -j | jq -r '[.keyboards[] | select(.main)][0].active_layout_index // 0')
+case ${1:-next} in
+    en) n=0 ;; ru) n=1 ;; ua) n=2 ;;
+    *)  n=$(( (idx + 1) % ${#names[@]} )) ;;
+esac
+hyprctl switchxkblayout all "$n" >/dev/null
+[[ -n $KB_SWITCH_QUIET ]] || notify-send -a "Раскладка" -r 91190 -t 800 -i input-keyboard "󰌌  ${names[n]}"
+echo "${names[n]}"

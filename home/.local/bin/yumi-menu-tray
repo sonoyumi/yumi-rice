@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+"""yumi-menu-tray — «Фоновые программы»: меню пилюли трея на каркасе yumi-panel.
+  yumi-menu-tray [--bar|--center|--close]
+Строка программы — показать окно (Activate), кнопка 󰇙 — пункты меню самой программы (dbusmenu:
+«Настройки», «Выход»…). Список обновляется сам (демон yumi-tray). Проверка: YP_DRYRUN=1,
+YUMI_TRAY_OPEN=<имя> — сразу открыть меню этой программы. Откат: yumi-tray-uninstall"""
+import os
+import re
+import sys
+
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-panel"))
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-tray"))
+import yumipanel as yp  # noqa: E402  (сам перезапускает процесс с layer-shell)
+from yumipanel import Gtk, GLib, Gio  # noqa: E402
+import yumitray as yt  # noqa: E402
+
+CSS = """
+.yp-tray-line { }
+.yp-tray-line > .yp-row { }
+.yp-row.attention .yp-row-icon { color: #f5a97f; }
+.yp-row.yp-tray-danger .yp-row-icon { color: #ed8796; }
+.yp-tray-sep { min-height: 1px; background: alpha(@yp-fg2, 0.18); margin: 2px 14px; }
+.yp-row.yp-tray-off { opacity: 0.45; }
+"""
+
+# значок пункта меню программы по его тексту (рус/англ)
+MENU_GLYPHS = [
+    (r"выход|выйти|вийти|вихід|закрыть|закрити|quit|exit|close", "󰗼"),
+    (r"настро|налашт|параметр|предпочт|settings|preferences|options|configure", "󰒓"),
+    (r"показ|открыть|відкри|развернуть|розгорн|show|open|restore|window", "󰖯"),
+    (r"скрыть|сховати|свернуть|згорн|hide|minimi", "󰖰"),
+    (r"звук|уведомл|сповіщ|mute|notif|sound", "󰂚"),
+    (r"обнов|update|check", "󰚰"),
+    (r"о программе|about|справк|help", "󰋽"),
+    (r"перезапуск|restart|reload", "󰑓"),
+    (r"пауза|pause|resume|продолж", "󰏤"),
+    (r"монтир|mount|eject|извлечь|unmount", "󰋊"),
+    (r"аккаунт|account|профил|profile", "󰀄"),
+    (r"новый|new|создать|compose", "󰐕"),
+]
+DANGER = re.compile(r"выход|выйти|вийти|вихід|закрыть|закрити|quit|exit", re.I)
+
+
+def menu_glyph(label):
+    low = label.lower()
+    for pat, g in MENU_GLYPHS:
+        if re.search(pat, low):
+            return g
+    return "󰄾"
+
+
+def clean(label):
+    """«_Выход» → «Выход» (мнемоники GTK/Qt), «&&» → «&»."""
+    return re.sub(r"_(?!_)", "", label).replace("__", "_").replace("&&", "&").strip()
+
+
+class TrayMenu:
+    def __init__(self, panel, body):
+        self.panel = panel
+        panel.add_css(CSS)
+        self.items = []
+        self.sig = None
+        body.append(yp.section("ФОНОВЫЕ ПРОГРАММЫ"))
+        self.list_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        body.append(self.list_box)
+        body.append(yp.hint("Строка — показать окно, 󰇙 — меню программы"))
+        self.refresh()
+        os.makedirs(yt.RUNTIME, exist_ok=True)
+        self.mon = Gio.File.new_for_path(yt.RUNTIME).monitor_directory(Gio.FileMonitorFlags.WATCH_MOVES, None)
+        self.mon.connect("changed", lambda *_: GLib.timeout_add(120, self.refresh))
+        want = os.environ.get("YUMI_TRAY_OPEN")
+        if want:
+            it = next((i for i in self.items if want.lower() in i["name"].lower()), None)
+            if it:
+                GLib.idle_add(lambda: self.open_menu(it) or False)
+
+    # ---------- список ----------
+    def refresh(self):
+        items = yt.load_items()
+        sig = [(i["key"], i["name"], i["status"]) for i in items]
+        if sig == self.sig:
+            return False
+        self.sig, self.items = sig, items
+        while (c := self.list_box.get_first_child()):
+            self.list_box.remove(c)
+        if not items:
+            self.list_box.append(yp.hint("Сейчас в фоне ничего нет"))
+        for it in items:
+            line = Gtk.Box(spacing=6, css_classes=["yp-tray-line"])
+            meta = "внимание" if it["status"] == "NeedsAttention" else ""
+            row = yp.row_button(it["glyph"], it["name"], lambda *_, i=it: self.on_row(i), meta=meta)
+            row.set_hexpand(True)
+            if meta:
+                row.add_css_class("attention")
+            line.append(row)
+            if it.get("menu") and it["menu"] != "/":
+                line.append(yp.icon_button("󰇙", "Меню программы", lambda *_, i=it: self.open_menu(i)))
+            self.list_box.append(line)
+        n = len(items)
+        self.panel.set_subtitle(f"{n} " + ("программа" if n % 10 == 1 and n % 100 != 11 else
+                                           "программы" if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14)
+                                           else "программ") if n else "", live=True)
+        return False
+
+    def on_row(self, it):
+        if it["item_is_menu"]:
+            self.open_menu(it)
+            return
+        if yt.activate(it):
+            if yp.DRY:
+                self.panel.toast(f"dry-run: показать {it['name']}", hold=3)
+            else:
+                self.panel.app.quit()
+        else:
+            self.open_menu(it)
+
+    # ---------- меню программы (dbusmenu) ----------
+    def open_menu(self, it, parent=0, title=None):
+        nodes = yt.menu_layout(it, parent)
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        own_show = any(re.search(MENU_GLYPHS[2][0], clean(p.get("label", "")).lower()) for _n, p, _c in nodes or [])
+        if parent == 0 and not it["item_is_menu"] and not own_show:   # у программы свой «Открыть» — без дубля
+            page.append(yp.row_button("󰖯", "Показать окно", lambda *_: self.on_row_show(it)))
+        if nodes is None:
+            page.append(yp.hint("Программа не отдаёт своё меню"))
+        else:
+            self.fill(page, it, nodes)
+        self.panel.push(f"{it['glyph']}  {title or it['name']}", page, "Меню программы")
+
+    def on_row_show(self, it):
+        if yt.activate(it):
+            if yp.DRY:
+                self.panel.toast(f"dry-run: показать {it['name']}", hold=3)
+            else:
+                self.panel.app.quit()
+        else:
+            self.panel.toast("Программа не открывает окно", error=True, hold=3)
+
+    def fill(self, page, it, nodes):
+        prev_sep = True
+        for nid, props, children in nodes:
+            if not props.get("visible", True):
+                continue
+            if props.get("type") == "separator":
+                if not prev_sep:
+                    page.append(Gtk.Box(css_classes=["yp-tray-sep"]))
+                prev_sep = True
+                continue
+            label = clean(props.get("label", ""))
+            if not label:
+                continue
+            prev_sep = False
+            toggle = props.get("toggle-type", "")
+            checked = toggle in ("checkmark", "radio") and props.get("toggle-state", 0) == 1
+            submenu = props.get("children-display") == "submenu" or bool(children)
+            icon = "󰄬" if checked else ("󰄱" if toggle == "checkmark" else menu_glyph(label))
+            if submenu:
+                row = yp.row_button(icon, label, lambda *_, n=nid, l=label: self.open_menu(it, n, l), meta="󰅂")
+            else:
+                row = yp.row_button(icon, label, lambda *_, n=nid, l=label: self.on_event(it, n, l), active=checked)
+            if DANGER.search(label):
+                row.add_css_class("yp-tray-danger")
+            if not props.get("enabled", True):
+                row.set_sensitive(False)
+                row.add_css_class("yp-tray-off")
+            page.append(row)
+        if prev_sep and page.get_last_child() and "yp-tray-sep" in page.get_last_child().get_css_classes():
+            page.remove(page.get_last_child())
+
+    def on_event(self, it, nid, label):
+        ok = yt.menu_event(it, nid)
+        if yp.DRY:
+            self.panel.toast(f"dry-run: «{label}»", hold=3)
+        elif ok:
+            self.panel.app.quit()
+        else:
+            self.panel.toast("Программа не ответила", error=True, hold=3)
+
+
+if __name__ == "__main__":
+    app = yp.PanelApp("org.yumi.panel.tray", "Фоновые программы", "󰀻", lambda panel, body: TrayMenu(panel, body))
+    sys.exit(app.run(sys.argv))

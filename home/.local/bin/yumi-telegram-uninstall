@@ -1,0 +1,11 @@
+#!/bin/sh
+# yumi-telegram-uninstall — убрать тему Telegram в цветах обоев (хук, генератор, файлы темы).
+# Уже применённую в Telegram тему НЕ трогает (Telegram хранит её копию у себя в tdata).
+# Вернуть стандартную: Telegram → Настройки → Настройки чатов → «Тема»: Классическая/Ночная
+# (или, если включена Local automation, тот же эффект даёт команда theme-reset через его сокет).
+pkill -f 'yumi-telegram-theme --notify' 2>/dev/null
+rm -f "$HOME/.config/yumi-accent/hooks.d/70-telegram"
+rm -rf "$HOME/.local/share/yumi-telegram" "$HOME/.local/lib/yumi-telegram"
+rm -f "$HOME/.local/bin/yumi-telegram-theme"
+echo "yumi-telegram удалён. Тема в Telegram осталась: сменить — Настройки → Настройки чатов → Тема."
+rm -f "$HOME/.local/bin/yumi-telegram-uninstall"

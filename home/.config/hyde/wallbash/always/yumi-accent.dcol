@@ -1,0 +1,2 @@
+${XDG_CACHE_HOME:-$HOME/.cache}/yumi-accent/wallbash-trigger|${HOME}/.local/bin/yumi-accent --from-wallbash
+yumi-accent: этот файл — только сигнал «обои сменились» (pry1 <wallbash_pry1>)

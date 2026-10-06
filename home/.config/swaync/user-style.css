@@ -1,315 +1,593 @@
+/* swaync — уведомления и центр управления в стиле меню yumi-panel и плеера.
+   Цвета только из обоев: те же формулы, что у @yp-* (шаблон always/yumi-player.dcol),
+   но прямо из ~/.cache/hyde/wallbash/gtk.css — он всегда готов к перезагрузке swaync.
+   Цвета состояний: красный #ed8796.
+   Стиль HyDE (theme.css) перебивается повышенной конкретностью :not(.zN). */
 @import url("file://@HOME@/.config/swaync/kitty-colors.css");
 @import url("file://@HOME@/.cache/hyde/wallbash/gtk.css");
+@import url("file://@HOME@/.cache/yumi-accent/accent-gtk.css");   /* живой акцент (yumi-accent) */
 
-/* === Цвета центра, привязанные к wallbash (читаемо в светлой и тёмной теме) === */
+/* ── палитра (как у плеера и меню) ── */
+@define-color yn-bg      @yumi_bg;
+@define-color yn-border  @yumi_acc5;
+@define-color yn-fg      @wallbash_txt1;
+@define-color yn-fg2     @wallbash_1xa9;
+@define-color yn-accent  @yumi_acc;
+@define-color yn-btn     alpha(@yumi_btn, 0.55);
+@define-color yn-hover   alpha(@yumi_hover, 0.80);
+@define-color yn-red     #ed8796;
+/* непрозрачные варианты для карточек центра (стопка группы не просвечивает) */
+@define-color yn-card    mix(@wallbash_pry1, @wallbash_1xa2, 0.55);
+@define-color yn-card-hv mix(@wallbash_pry1, @wallbash_1xa4, 0.80);
+@define-color yn-card-cr mix(mix(@wallbash_pry1, @wallbash_1xa2, 0.55), #ed8796, 0.14);
+
+/* переменные, которыми пользуется theme.css HyDE */
 @define-color text-color @wallbash_txt1;
 @define-color text-color-disabled alpha(@wallbash_txt1, 0.45);
-@define-color sw-cc-bg @wallbash_pry1;
+@define-color sw-cc-bg alpha(@wallbash_pry1, 0.94);
 @define-color sw-cc-border-color @wallbash_1xa5;
-@define-color sw-noti-window-bg @wallbash_pry1;
+@define-color sw-noti-window-bg alpha(@wallbash_pry1, 0.94);
 @define-color sw-noti-window-br @wallbash_1xa5;
 @define-color sw-noti-window-txt @wallbash_txt1;
-@define-color sw-noti-titl-fg @wallbash_txt1;
-@define-color sw-noti-bg-hover alpha(@wallbash_txt1, 0.10);
-@define-color noti-bg-opaque alpha(@wallbash_txt1, 0.06);
-@define-color noti-bg-hover-opaque alpha(@wallbash_txt1, 0.12);
-@define-color noti-bg-hover alpha(@wallbash_txt1, 0.10);
+@define-color sw-noti-bg-hover alpha(@wallbash_1xa4, 0.80);
+@define-color noti-bg-opaque alpha(@wallbash_1xa2, 0.55);
+@define-color noti-bg-hover alpha(@wallbash_1xa4, 0.80);
+@define-color noti-bg-hover-opaque alpha(@wallbash_1xa4, 0.80);
+@define-color noti-bg-focus transparent;
 @define-color sw-msg-sum-fg @wallbash_txt1;
-@define-color sw-msg-time alpha(@wallbash_txt1, 0.60);
-@define-color sw-msg-body alpha(@wallbash_txt1, 0.80);
-@define-color sw-noti-gr-icon @wallbash_txt1;
-@define-color sw-noti-gr-collapse-but-hvr alpha(@wallbash_txt1, 0.12);
-@define-color sw-noti-gr-collapse-but-icon @wallbash_txt1;
-/* Центр управления в стиле наших панелей (цвета — из темы HyDE) */
+@define-color sw-msg-body @wallbash_1xa9;
+@define-color sw-noti-gr-icon @wallbash_1xa7;
+@define-color sw-noti-gr-collapse-but-hvr alpha(@wallbash_1xa4, 0.80);
+@define-color sw-noti-gr-collapse-but-icon @wallbash_1xa7;
+
 * {
   font-family: "JetBrainsMono Nerd Font";
 }
 
-.control-center {
-  background: @sw-cc-bg;
-  border: 2px solid @sw-cc-border-color;
-  border-radius: 30px;
-  padding: 14px;
-}
-
-/* Шапка с картинкой из обоев */
-.widget-label {
-  min-height: 110px;
-  margin: 0 0 10px 0;
-  border-radius: 20px;
-  background-image: url("file://@HOME@/.cache/hyde/cc-header.png");
-  background-size: cover;
-  background-position: center;
-}
-.widget-label > label {
-  font-size: 1px;
-  color: transparent;
-}
-
-/* Кнопки-переключатели: один ряд, круглые */
-.widget-buttons-grid {
-  padding: 2px 0;
-  margin: 0 0 8px 0;
+window:not(.z1):not(.z2):not(.z3),
+notificationwindow, blankwindow,
+.blank-window, .floating-notifications {
   background: transparent;
 }
-.widget-buttons-grid button {
-  min-width: 38px;
-  min-height: 38px;
-  margin: 3px;
+
+/* ════════════════ Анимации ════════════════ */
+@keyframes yn-in {
+  from { opacity: 0; transform: translateX(36px) scale(0.97); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes yn-crit {
+  0%   { border-color: #ed8796; box-shadow: 0 0 0 0 alpha(#ed8796, 0.0), 0 4px 14px alpha(black, 0.35); }
+  50%  { border-color: #f5c2c9; box-shadow: 0 0 0 3px alpha(#ed8796, 0.55), 0 4px 14px alpha(black, 0.35); }
+  100% { border-color: #ed8796; box-shadow: 0 0 0 0 alpha(#ed8796, 0.0), 0 4px 14px alpha(black, 0.35); }
+}
+
+/* ════════════════ Карточка уведомления (общая основа) ════════════════ */
+.notification-row:not(.z1):not(.z2):not(.z3),
+.notification-row:focus:not(.z1):not(.z2):not(.z3),
+.notification-row:hover:not(.z1):not(.z2):not(.z3) {
+  background: transparent;
+  outline: none;
+}
+
+.notification-row .notification-background:not(.z1):not(.z2):not(.z3):not(.z4) {
+  background: transparent;
+  padding: 6px 10px;
+  border-radius: 0;
+}
+
+.notification-row .notification-background .notification:not(.z1):not(.z2):not(.z3):not(.z4) {
+  background: alpha(@yn-bg, 0.94);
+  color: @yn-fg;
+  border: 2px solid @yn-border;
+  border-radius: 20px;
+  padding: 10px 12px 10px 10px;
+  opacity: 1;
+  box-shadow: 0 4px 14px alpha(black, 0.35);
+  transition: background 150ms, border-color 150ms;
+}
+.notification-row .notification-background .notification.low:not(.z1):not(.z2):not(.z3):not(.z4) {
+  border-color: alpha(@yn-border, 0.55);
+}
+.notification-row .notification-background .notification.critical:not(.z1):not(.z2):not(.z3):not(.z4) {
+  border-color: @yn-red;
+  background: mix(alpha(@yn-bg, 0.94), alpha(#ed8796, 0.94), 0.10);
+}
+
+/* основное действие (вся область текста) */
+.notification-row .notification-background .notification .notification-default-action:not(.z1):not(.z2):not(.z3):not(.z4),
+.notification-row .notification-background .notification .notification-default-action:hover:not(.z1):not(.z2):not(.z3):not(.z4) {
+  background: transparent;
   padding: 0;
-  border-radius: 16px;
-  font-size: 16px;
-}
-
-/* Ползунки: одинаковые «пилюли» */
-.widget-volume,
-.widget-backlight {
-  padding: 4px 10px;
-  margin: 3px 0;
-  background: @noti-bg-opaque;
-  border-radius: 20px;
-}
-.widget-volume label,
-.widget-backlight label {
-  font-size: 16px;
-  margin-right: 6px;
-}
-
-/* Плеер */
-.widget-mpris {
-  margin: 6px 0;
-  border-radius: 20px;
-}
-
-/* Заголовок уведомлений и «Не беспокоить» */
-.widget-title {
-  margin: 10px 4px 4px 4px;
-  font-size: 14px;
-}
-.widget-title > button {
-  border-radius: 14px;
-  padding: 4px 12px;
-  font-size: 12px;
-}
-.widget-dnd {
-  margin: 2px 4px 8px 4px;
-  font-size: 13px;
-}
-.widget-dnd > switch {
+  margin: 0;
+  border: none;
+  box-shadow: none;
   border-radius: 14px;
 }
-
-/* Карточки уведомлений */
-.notification,
-.notification-row .notification-background {
-  border-radius: 20px;
+.notification-row .notification-background .notification .notification-default-action .notification-content:not(.z1):not(.z2):not(.z3):not(.z4) {
+  background: transparent;
+  padding: 0;
 }
-.control-center-list {
+
+/* картинка / значок: скруглённый квадрат, как обложка в плеере */
+.notification-row .notification-background .notification .notification-content .image:not(.z1):not(.z2):not(.z3):not(.z4) {
+  -gtk-icon-size: 44px;
+  border-radius: 14px;
+  margin: 2px 12px 2px 2px;
   background: transparent;
 }
-
-/* Ползунки громкости и микрофона */
-.widget-slider {
-  padding: 4px 10px;
-  margin: 3px 0;
-  background: @noti-bg-opaque;
-  border-radius: 20px;
-}
-.widget-slider label {
-  font-size: 16px;
-  margin-right: 6px;
+.notification-row .notification-background .notification .notification-content .app-icon:not(.z1):not(.z2):not(.z3):not(.z4) {
+  -gtk-icon-size: 18px;
+  -gtk-icon-shadow: 0 1px 3px alpha(black, 0.7);
+  border-radius: 6px;
+  margin: 0 8px 0 0;
 }
 
-/* Ползунки в цветах темы */
-.widget-slider,
-.widget-backlight {
-  background: alpha(@sw-cc-border-color, 0.12);
+/* заголовок, время, текст */
+.notification-row .notification-background .notification .notification-default-action .notification-content .text-box .summary:not(.z1):not(.z2):not(.z3):not(.z4) {
+  font-size: 14px;
+  font-weight: 800;
+  color: @yn-fg;
+  background: transparent;
+  text-shadow: none;
 }
-.widget-slider scale trough,
-.widget-backlight scale trough {
-  background: alpha(@text-color, 0.18);
-  border-radius: 10px;
+.notification-row .notification-background .notification .notification-default-action .notification-content .text-box .time:not(.z1):not(.z2):not(.z3):not(.z4) {
+  font-size: 10.5px;
+  font-weight: 400;
+  color: alpha(@yn-fg2, 0.65);
+  background: transparent;
+  text-shadow: none;
+  margin: 2px 26px 0 8px;
+}
+.notification-row .notification-background .notification .notification-default-action .notification-content .text-box .body:not(.z1):not(.z2):not(.z3):not(.z4) {
+  font-size: 12.5px;
+  font-weight: 400;
+  color: alpha(@yn-fg2, 0.92);
+  background: transparent;
+  text-shadow: none;
+  margin-top: 3px;
+}
+.notification-row .notification-background .notification.critical .notification-default-action .notification-content .text-box .summary:not(.z1):not(.z2):not(.z3):not(.z4) {
+  color: @yn-red;
+}
+
+/* полоса прогресса (громкость, яркость, загрузка: -h int:value:N) */
+.notification-row .notification-background .notification .notification-content progressbar:not(.z1):not(.z2):not(.z3):not(.z4) {
+  margin: 4px 2px 2px 2px;
   min-height: 6px;
 }
-.widget-slider scale trough highlight,
-.widget-backlight scale trough highlight {
-  background: @sw-cc-border-color;
-  border-radius: 10px;
+.notification-row .notification-background .notification .notification-content progressbar trough:not(.z1):not(.z2):not(.z3):not(.z4) {
+  min-height: 6px;
+  border-radius: 3px;
+  border: none;
+  background: alpha(@yn-fg, 0.18);
 }
-.widget-slider scale slider,
-.widget-backlight scale slider {
-  background: @text-color;
-  min-width: 14px;
-  min-height: 14px;
-  border-radius: 999px;
+.notification-row .notification-background .notification .notification-content progressbar progress:not(.z1):not(.z2):not(.z3):not(.z4) {
+  min-height: 6px;
+  border-radius: 3px;
+  border: none;
+  background: @yn-accent;
 }
-
-/* === Цвета текста и значков из wallbash: читаемо и в светлой, и в тёмной теме === */
-.control-center label,
-.widget-title > label,
-.widget-slider label,
-.widget-backlight label {
-  color: @wallbash_txt1;
+.notification-row .notification-background .notification.critical .notification-content progressbar progress:not(.z1):not(.z2):not(.z3):not(.z4) {
+  background: @yn-red;
 }
 
-/* Кнопки: лёгкая подложка и значок в цвет текста темы */
-.widget-buttons-grid button {
-  background: alpha(@wallbash_txt1, 0.08);
-  color: @wallbash_txt1;
-}
-.widget-buttons-grid button label {
-  color: @wallbash_txt1;
-}
-.widget-buttons-grid button:hover {
-  background: alpha(@wallbash_txt1, 0.16);
+/* большая картинка в теле */
+.notification-row .notification-background .notification .notification-content .body-image:not(.z1):not(.z2):not(.z3):not(.z4) {
+  background: transparent;
+  border-radius: 14px;
+  margin-top: 4px;
 }
 
-/* Надпись «нет уведомлений» */
-.control-center-list-placeholder {
-  color: alpha(@wallbash_txt1, 0.45);
+/* кнопки действий — «таблетки» */
+.notification-row .notification-background .notification .notification-alt-actions:not(.z1):not(.z2):not(.z3):not(.z4) {
+  background: transparent;
+  padding: 8px 0 0 0;
 }
-
-/* === Кнопки-переключатели: чётко видно вкл/выкл === */
-/* Выключено: приглушено */
-.widget-buttons-grid button.toggle:not(:checked) {
-  background: alpha(@wallbash_txt1, 0.05);
-}
-.widget-buttons-grid button.toggle:not(:checked) label {
-  color: alpha(@wallbash_txt1, 0.40);
-}
-/* Включено: акцентная заливка, контрастный значок */
-.widget-buttons-grid button:checked,
-.widget-buttons-grid button.toggle:checked {
-  background: @wallbash_1xa5;
-}
-.widget-buttons-grid button:checked label,
-.widget-buttons-grid button.toggle:checked label {
-  color: @wallbash_pry1;
-}
-
-/* === Область уведомлений в цветах темы === */
-.widget-notifications,
-.control-center-list,
-.notification-group,
-.notification-group.collapsed,
-.notification-row {
+.notification-row .notification-background .notification .notification-alt-actions flowboxchild:not(.z1):not(.z2):not(.z3):not(.z4) {
+  padding: 0;
   background: transparent;
 }
-.notification,
-.notification-row .notification-background {
-  background: alpha(@wallbash_txt1, 0.06);
-  border-radius: 20px;
+.notification-row .notification-background .notification .notification-action:not(.z1):not(.z2):not(.z3):not(.z4) {
+  margin: 0 3px;
+  padding: 0;
+  background: transparent;
 }
-.notification:hover,
-.notification-row .notification-background:hover {
-  background: alpha(@wallbash_txt1, 0.12);
-}
-.notification-action {
-  background: alpha(@wallbash_1xa5, 0.18);
-  color: @wallbash_txt1;
+.notification-row .notification-background .notification .notification-action > button:not(.z1):not(.z2):not(.z3):not(.z4),
+.notification-row .notification-background .notification .notification-alt-actions button:not(.z1):not(.z2):not(.z3):not(.z4) {
+  background: @yn-btn;
+  color: @yn-fg;
+  border: none;
+  box-shadow: none;
   border-radius: 14px;
+  padding: 6px 12px;
+  min-height: 18px;
+  font-size: 12px;
+  font-weight: 700;
+  transition: background 150ms;
+}
+.notification-row .notification-background .notification .notification-action > button:hover:not(.z1):not(.z2):not(.z3):not(.z4),
+.notification-row .notification-background .notification .notification-alt-actions button:hover:not(.z1):not(.z2):not(.z3):not(.z4) {
+  background: @yn-hover;
+}
+.notification-row .notification-background .notification .notification-alt-actions flowboxchild:first-child button:not(.z1):not(.z2):not(.z3):not(.z4) {
+  background: @yn-accent;
+  color: @yn-bg;
 }
 
-/* === Без рамки фокуса после нажатия === */
+/* быстрый ответ */
+.notification-row .notification-background .notification .notification-content .inline-reply .inline-reply-entry:not(.z1):not(.z2):not(.z3):not(.z4) {
+  background: @yn-btn;
+  color: @yn-fg;
+  caret-color: @yn-accent;
+  border: 1px solid alpha(@yn-accent, 0.35);
+  border-radius: 14px;
+  padding: 4px 12px;
+}
+.notification-row .notification-background .notification .notification-content .inline-reply .inline-reply-button:not(.z1):not(.z2):not(.z3):not(.z4) {
+  background: @yn-accent;
+  color: @yn-bg;
+  border: none;
+  border-radius: 14px;
+  margin-left: 6px;
+  font-weight: 700;
+}
+
+/* крестик: круглый, виден при наведении */
+.notification-row .close-button:not(.z1):not(.z2):not(.z3) {
+  background: @yn-btn;
+  color: @yn-fg;
+  border: none;
+  box-shadow: none;
+  border-radius: 999px;
+  min-width: 22px;
+  min-height: 22px;
+  padding: 0;
+  margin: 12px 16px 0 0;
+  opacity: 0;
+  transition: opacity 150ms, background 150ms;
+}
+.notification-row:hover .close-button:not(.z1):not(.z2):not(.z3) {
+  opacity: 1;
+}
+.notification-row .close-button:hover:not(.z1):not(.z2):not(.z3) {
+  background: alpha(#ed8796, 0.85);
+  color: @yn-bg;
+}
+
+/* ════════════════ Всплывающие ════════════════ */
+.floating-notifications .notification-row .notification-background .notification:not(.z1):not(.z2):not(.z3):not(.z4) {
+  animation: yn-in 260ms cubic-bezier(0.2, 0.9, 0.3, 1.0);
+}
+.floating-notifications .notification-row .notification-background .notification.critical:not(.z1):not(.z2):not(.z3):not(.z4) {
+  animation: yn-in 260ms cubic-bezier(0.2, 0.9, 0.3, 1.0), yn-crit 1.6s ease-in-out 300ms 4;
+}
+.floating-notifications .notification-row:hover .notification-background .notification:not(.z1):not(.z2):not(.z3):not(.z4) {
+  border-color: @yn-accent;
+}
+.floating-notifications .notification-row:hover .notification-background .notification.critical:not(.z1):not(.z2):not(.z3):not(.z4) {
+  border-color: @yn-red;
+}
+
+/* ════════════════ Центр управления ════════════════ */
+.control-center:not(.z1):not(.z2):not(.z3):not(.z4):not(.z5):not(.z6) {
+  background: alpha(@yn-bg, 0.94);
+  color: @yn-fg;
+  border: 2px solid @yn-border;
+  border-radius: 30px;
+  padding: 0;
+  opacity: 1;
+}
+.control-center .widgets {
+  padding: 0 0 6px 0;
+}
+.control-center .widget {
+  margin: 0;
+  padding: 0;
+}
+
+/* шапка из обоев с заголовком, как у меню */
+.control-center .widget-label:not(.z1):not(.z2) {
+  margin: 0 0 8px 0;
+  padding: 74px 20px 12px 20px;
+  border-radius: 28px 28px 0 0;
+  background-image:
+    linear-gradient(to bottom, alpha(@yn-bg, 0) 30%, alpha(@yn-bg, 0.94) 100%),
+    url("file://@HOME@/.cache/hyde/cc-header.png");
+  background-size: cover, cover;
+  background-position: center, center;
+  background-repeat: no-repeat, no-repeat;
+  background-origin: border-box, border-box;
+  background-clip: border-box, border-box;
+}
+.control-center .widget-label > label:not(.z1):not(.z2) {
+  font-size: 22px;
+  font-weight: 800;
+  color: @yn-fg;
+  text-shadow: 0 1px 4px alpha(black, 0.6);
+}
+
+/* кнопки-плитки (как сегменты меню) */
+.control-center .widget-buttons-grid:not(.z1):not(.z2) {
+  background: transparent;
+  padding: 0;
+  margin: 4px 12px 8px 12px;
+}
+.control-center .widget-buttons-grid flowboxchild {
+  padding: 0;
+  background: transparent;
+}
+.control-center .widget-buttons-grid flowboxchild > button:not(.z1):not(.z2):not(.z3),
+.control-center .widget-buttons-grid button:not(.z1):not(.z2):not(.z3) {
+  min-width: 40px;
+  min-height: 44px;
+  margin: 4px;
+  padding: 0;
+  border: none;
+  border-radius: 16px;
+  background: @yn-btn;
+  color: @yn-fg;
+  font-size: 18px;
+  box-shadow: none;
+  outline: none;
+  transition: background 220ms, box-shadow 220ms;
+}
+.control-center .widget-buttons-grid button:hover:not(.z1):not(.z2):not(.z3) {
+  background: @yn-hover;
+}
+.control-center .widget-buttons-grid button label:not(.z1):not(.z2) {
+  color: @yn-fg;
+}
+.control-center .widget-buttons-grid button.toggle:not(:checked) label:not(.z1):not(.z2) {
+  color: alpha(@yn-fg, 0.45);
+}
+.control-center .widget-buttons-grid button:checked:not(.z1):not(.z2):not(.z3),
+.control-center .widget-buttons-grid button.toggle:checked:not(.z1):not(.z2):not(.z3) {
+  background: alpha(@yn-accent, 0.25);
+  box-shadow: inset 0 0 0 1px alpha(@yn-accent, 0.7);
+}
+.control-center .widget-buttons-grid button:checked label:not(.z1):not(.z2),
+.control-center .widget-buttons-grid button.toggle:checked label:not(.z1):not(.z2) {
+  color: @yn-accent;
+}
+
+.control-center .widgets > .widget-buttons-grid:first-child:not(.z1):not(.z2):not(.z3) {
+  margin-top: 14px;
+}
+
+/* ползунки как в меню звука: круглый значок + тонкая полоса, кругляш при наведении */
+.control-center .widget-slider:not(.z1):not(.z2),
+.control-center .widget-backlight:not(.z1):not(.z2) {
+  background: transparent;
+  margin: 2px 16px;
+  padding: 2px 0;
+  border-radius: 0;
+}
+.control-center .widget-slider > label:not(.z1):not(.z2),
+.control-center .widget-backlight > label:not(.z1):not(.z2),
+.control-center .widget-slider label:not(.z1):not(.z2),
+.control-center .widget-backlight label:not(.z1):not(.z2) {
+  min-width: 34px;
+  min-height: 34px;
+  margin: 0 10px 0 0;
+  padding: 0;
+  border-radius: 17px;
+  background: @yn-btn;
+  color: @yn-accent;
+  font-size: 15px;
+}
+.control-center .widget-slider scale:not(.z1):not(.z2),
+.control-center .widget-backlight scale:not(.z1):not(.z2) {
+  padding: 0 6px;
+  margin: 0;
+}
+.control-center .widget-slider scale trough:not(.z1):not(.z2),
+.control-center .widget-backlight scale trough:not(.z1):not(.z2) {
+  min-height: 6px;
+  border-radius: 3px;
+  border: none;
+  background: alpha(@yn-fg, 0.18);
+}
+.control-center .widget-slider scale highlight:not(.z1):not(.z2),
+.control-center .widget-backlight scale highlight:not(.z1):not(.z2) {
+  border-radius: 3px;
+  border: none;
+  background: @yn-accent;
+}
+.control-center .widget-slider scale slider:not(.z1):not(.z2),
+.control-center .widget-backlight scale slider:not(.z1):not(.z2) {
+  min-width: 14px;
+  min-height: 14px;
+  margin: -5px;
+  border-radius: 7px;
+  border: none;
+  background: @yn-fg;
+  box-shadow: 0 1px 3px alpha(black, 0.4);
+  opacity: 0;
+  transition: opacity 150ms;
+}
+.control-center .widget-slider:hover scale slider:not(.z1):not(.z2),
+.control-center .widget-backlight:hover scale slider:not(.z1):not(.z2) {
+  opacity: 1;
+}
+.control-center .widget-slider scale value,
+.control-center .widget-backlight scale value {
+  font-size: 12px;
+  color: @yn-fg2;
+}
+
+/* заголовок раздела «УВЕДОМЛЕНИЯ» + «Очистить» */
+.control-center .widget-title:not(.z1):not(.z2) {
+  margin: 12px 16px 6px 20px;
+  padding: 0;
+}
+.control-center .widget-title > label:not(.z1):not(.z2) {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: alpha(@yn-fg2, 0.7);
+  margin: 0;
+}
+.control-center .widget-title > button:not(.z1):not(.z2):not(.z3) {
+  background: @yn-btn;
+  color: @yn-fg;
+  border: none;
+  box-shadow: none;
+  border-radius: 14px;
+  padding: 4px 12px;
+  min-height: 0;
+  font-size: 11.5px;
+  font-weight: 700;
+  transition: background 150ms, color 150ms;
+}
+.control-center .widget-title > button:hover:not(.z1):not(.z2):not(.z3) {
+  background: alpha(#ed8796, 0.22);
+  color: #ed8796;
+}
+.control-center .widget-title > button label { color: inherit; }
+
+/* «Не беспокоить» — строка-таблетка с переключателем */
+.control-center .widget-dnd:not(.z1):not(.z2) {
+  margin: 2px 16px 6px 16px;
+  padding: 6px 10px 6px 14px;
+  border-radius: 16px;
+  background: @yn-btn;
+}
+.control-center .widget-dnd > label:not(.z1):not(.z2) {
+  font-size: 13px;
+  color: @yn-fg;
+  margin: 0;
+}
+.control-center .widget-dnd > switch:not(.z1):not(.z2) {
+  border-radius: 14px;
+  background: alpha(@yn-fg, 0.18);
+  border: none;
+  box-shadow: none;
+  min-height: 24px;
+  margin: 0;
+}
+.control-center .widget-dnd > switch:checked:not(.z1):not(.z2) {
+  background: @yn-accent;
+}
+.control-center .widget-dnd > switch slider:not(.z1):not(.z2) {
+  border-radius: 12px;
+  min-width: 20px;
+  min-height: 20px;
+  margin: 2px;
+  background: @yn-fg;
+  border: none;
+  box-shadow: none;
+}
+.control-center .widget-dnd > switch:checked slider:not(.z1):not(.z2) {
+  background: @yn-bg;
+}
+.control-center .widget-dnd > switch image { color: transparent; }
+
+/* список уведомлений в центре */
+.control-center .control-center-list:not(.z1):not(.z2),
+.control-center .widget-notifications,
+.control-center .widget-notifications viewport,
+.control-center .widget-notifications list {
+  background: transparent;
+}
+.control-center .widget-notifications {
+  margin: 0 6px;
+}
+.control-center .control-center-list .notification-row .notification-background .notification:not(.z1):not(.z2):not(.z3):not(.z4) {
+  background: @yn-card;
+  border: none;
+  border-radius: 16px;
+  box-shadow: none;
+  padding: 10px 12px 10px 10px;
+}
+.control-center .control-center-list .notification-row .notification-background .notification.critical:not(.z1):not(.z2):not(.z3):not(.z4) {
+  background: @yn-card-cr;
+  box-shadow: inset 0 0 0 1px alpha(#ed8796, 0.6);
+}
+.control-center .control-center-list .notification-row:hover .notification-background .notification:not(.z1):not(.z2):not(.z3):not(.z4) {
+  background: @yn-card-hv;
+}
+.control-center .control-center-list .notification-row .notification-background:not(.z1):not(.z2):not(.z3):not(.z4) {
+  padding: 3px 8px;
+}
+.control-center .control-center-list .notification-row .close-button:not(.z1):not(.z2):not(.z3) {
+  margin: 8px 14px 0 0;
+}
+
+/* группы по приложениям */
+.control-center .notification-group:not(.z1):not(.z2),
+.control-center .notification-group:focus:not(.z1):not(.z2) {
+  background: transparent;
+  outline: none;
+}
+.control-center .notification-group .notification-group-headers:not(.z1):not(.z2) {
+  margin: 6px 12px 2px 14px;
+  color: @yn-fg2;
+}
+.control-center .notification-group .notification-group-headers .notification-group-icon:not(.z1):not(.z2):not(.z3) {
+  -gtk-icon-size: 18px;
+  color: @yn-accent;
+  margin-right: 6px;
+}
+.control-center .notification-group .notification-group-headers .notification-group-header:not(.z1):not(.z2):not(.z3) {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: alpha(@yn-fg2, 0.75);
+}
+.control-center .notification-group .notification-group-buttons:not(.z1):not(.z2) {
+  margin: 4px 10px 0 10px;
+}
+.control-center .notification-group .notification-group-buttons button:not(.z1):not(.z2):not(.z3),
+.control-center .notification-group .notification-group-close-button .close-button:not(.z1):not(.z2):not(.z3) {
+  background: @yn-btn;
+  color: @yn-fg;
+  border: none;
+  box-shadow: none;
+  border-radius: 999px;
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0;
+  opacity: 1;
+}
+.control-center .notification-group .notification-group-buttons button:hover:not(.z1):not(.z2):not(.z3) {
+  background: @yn-hover;
+}
+.control-center .notification-group .notification-group-close-button .close-button:hover:not(.z1):not(.z2):not(.z3) {
+  background: alpha(#ed8796, 0.85);
+  color: @yn-bg;
+}
+.control-center .notification-group.collapsed .notification-row .notification:not(.z1):not(.z2):not(.z3):not(.z4) {
+  background-color: @yn-card;
+}
+.control-center .notification-group.collapsed:hover .notification-row:not(:only-child) .notification:not(.z1):not(.z2):not(.z3):not(.z4) {
+  background-color: @yn-card-hv;
+}
+.control-center .notification-group.collapsed.not-expanded {
+  opacity: 0.45;
+}
+
+/* пусто */
+.control-center .control-center-list-placeholder:not(.z1):not(.z2) {
+  color: alpha(@yn-fg2, 0.5);
+  opacity: 1;
+  margin-top: 0;
+}
+.control-center .control-center-list-placeholder image {
+  -gtk-icon-size: 40px;
+  color: alpha(@yn-fg2, 0.35);
+}
+.control-center .control-center-list-placeholder label {
+  font-size: 12px;
+  color: alpha(@yn-fg2, 0.55);
+}
+
+/* без рамки фокуса */
 .control-center button,
 .control-center button:focus,
 .control-center button:focus-visible,
 .control-center button:active {
   outline: none;
-  box-shadow: none;
 }
 
-/* === Полупрозрачный центр, как окна kitty === */
-@define-color sw-cc-bg alpha(@wallbash_pry1, 0.80);
-@define-color sw-noti-window-bg alpha(@wallbash_pry1, 0.85);
-.control-center {
-  background: @sw-cc-bg;
-}
-
-/* === Наведение на уведомление: цвет темы вместо серого === */
-.notification-row:hover,
-.notification-row:focus,
-.notification-row:focus-within {
-  background: transparent;
-}
-.notification-row:hover .notification-background,
-.notification-row:focus .notification-background,
-.notification-row:focus-within .notification-background,
-.notification-row .notification-background:hover,
-.notification-row .notification-background .notification:hover {
-  background: alpha(@wallbash_1xa5, 0.18);
-}
-
-/* === Полупрозрачный центр: прозрачность прямо в правиле === */
-window,
-.control-center-window {
-  background: transparent;
-}
-.control-center {
-  background: alpha(@wallbash_pry1, 0.75);
-}
-.notification-window .notification,
-.floating-notifications .notification {
-  background: alpha(@wallbash_pry1, 0.85);
-}
-
-/* === Правила с повышенной конкретностью: перебивают style.css HyDE === */
-.control-center.control-center {
-  background: alpha(@wallbash_pry1, 0.75);
-}
-.notification-row.notification-row:hover .notification-background,
-.notification-row.notification-row:focus .notification-background,
-.notification-row.notification-row .notification-background:hover {
-  background: alpha(@wallbash_1xa5, 0.18);
-}
-.notification.notification,
-.notification-row.notification-row .notification-background {
-  background: alpha(@wallbash_txt1, 0.06);
-}
-
-
-/* === Сильные правила: перебивают стиль HyDE === */
-@define-color sw-noti-bg-hover alpha(@wallbash_1xa5, 0.25);
-@define-color noti-bg-hover alpha(@wallbash_1xa5, 0.25);
-@define-color noti-bg-hover-opaque alpha(@wallbash_1xa5, 0.25);
-@define-color noti-bg-focus alpha(@wallbash_1xa5, 0.25);
-
-window:not(.x1):not(.x2):not(.x3):not(.x4) {
-  background: transparent;
-}
-.control-center:not(.x1):not(.x2):not(.x3):not(.x4):not(.x5) {
-  background: alpha(@wallbash_pry1, 0.85);
-}
-/* Карточки уведомлений (в центре и всплывающие) */
-.notification-row .notification-background:not(.x1):not(.x2):not(.x3):not(.x4),
-.notification:not(.x1):not(.x2):not(.x3):not(.x4) {
-  background: alpha(@wallbash_1xa5, 0.12);
-}
-.floating-notifications .notification-background:not(.x1):not(.x2):not(.x3):not(.x4) {
-  background: alpha(@wallbash_pry1, 0.90);
-}
-/* Наведение: акцент темы вместо серого */
-.notification-row:hover:not(.x1):not(.x2):not(.x3):not(.x4),
-.notification-row:focus:not(.x1):not(.x2):not(.x3):not(.x4) {
-  background: transparent;
-}
-.notification-row:hover .notification-background:not(.x1):not(.x2):not(.x3):not(.x4),
-.notification-default-action:hover:not(.x1):not(.x2):not(.x3):not(.x4) {
-  background: alpha(@wallbash_1xa5, 0.25);
-}
-
-/* === Центр в цвет kitty, без подсветки при наведении === */
-.control-center:not(.x1):not(.x2):not(.x3):not(.x4):not(.x5):not(.x6) {
-  background: alpha(@kitty_bg, 0.85);
-}
-.floating-notifications .notification-background:not(.x1):not(.x2):not(.x3):not(.x4):not(.x5) {
-  background: alpha(@kitty_bg, 0.85);
-}
-.notification-row:hover .notification-background:not(.x1):not(.x2):not(.x3):not(.x4):not(.x5),
-.notification-row:focus .notification-background:not(.x1):not(.x2):not(.x3):not(.x4):not(.x5) {
-  background: alpha(@wallbash_1xa5, 0.12);
-}
-.notification-default-action:not(.x1):not(.x2):not(.x3):not(.x4):not(.x5),
-.notification-default-action:hover:not(.x1):not(.x2):not(.x3):not(.x4):not(.x5) {
-  background: transparent;
-}
+scrollbar, scrollbar trough { background: transparent; border: none; }
+scrollbar slider { min-width: 4px; border-radius: 2px; background: alpha(@yn-fg, 0.3); border: none; }

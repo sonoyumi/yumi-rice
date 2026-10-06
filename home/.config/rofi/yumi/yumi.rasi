@@ -1,0 +1,204 @@
+/**
+ * rofi-yumi — единая тема rofi в стиле GTK-меню yumi-panel.
+ * Шапка из обоев с затемнением, заголовок, поле поиска-«таблетка», строки-«таблетки».
+ * Цвета: colors.rasi (генерирует wallbash-шаблон ~/.config/hyde/wallbash/always/rofi-yumi.dcol).
+ * Размеры — в em: масштаб под монитор задаёт обёртка ~/.local/bin/rofi (шрифт),
+ * заголовок/подпись/иконка меню — тоже она (по тому, какой скрипт открыл меню).
+ * Откат: ~/.local/bin/rofi-yumi-uninstall
+ */
+
+configuration {
+    font:                 "JetBrainsMono Nerd Font 11";
+    drun-display-format:  "{name}";
+    window-format:        "{c}  ·  {t}";
+}
+
+@import "~/.config/rofi/yumi/colors.rasi"
+
+* {
+    /* акцент и рамка — из живого акцента yumi-accent (yumi-acc*, см. colors.rasi / обёртку);
+       полупрозрачные yr-sel / yr-sel-br / yr-entry-br обёртка тоже пересчитывает из него */
+    yr-accent:            @yumi-acc;
+    yr-border:            @yumi-acc5;
+    /* фоны в тоне обоев (yumi-accent): окно, строки и поле поиска */
+    yr-bg:                @yumi-deep;
+    yr-btn:               @yumi-btn;
+    yr-hover:             @yumi-hover;
+    font:                 "JetBrainsMono Nerd Font 11";
+    background-color:     transparent;
+    text-color:           @yr-fg;
+    border-color:         @yr-border;
+    spacing:              0;
+    margin:               0;
+    padding:              0;
+}
+
+window {
+    width:                21em;
+    transparency:         "real";
+    fullscreen:           false;
+    location:             center;
+    anchor:               center;
+    x-offset:             0;
+    y-offset:             0;
+    border:               2px;
+    border-radius:        1.55em;
+    border-color:         @yr-border;
+    background-color:     @yr-bg;
+    padding:              0;
+    cursor:               "default";
+}
+
+mainbox {
+    orientation:          vertical;
+    spacing:              0;
+    padding:              0;
+    children:             [ "header", "body" ];
+}
+
+/* ── шапка из обоев ── */
+header {
+    orientation:          vertical;
+    expand:               false;
+    background-image:     url("~/.cache/hyde/wall.thmb", width);
+    border-radius:        1.45em 1.45em 0 0;
+    children:             [ "shade" ];
+}
+shade {
+    orientation:          vertical;
+    expand:               false;
+    padding:              4.3em 1.05em 0.55em 1.05em;
+    spacing:              0.1em;
+    border-radius:        1.45em 1.45em 0 0;
+    children:             [ "textbox-title", "textbox-sub" ];
+}
+textbox-title {
+    content:              "Меню";
+    expand:               false;
+    font:                 "JetBrainsMono Nerd Font ExtraBold 17";
+    text-color:           @yr-fg;
+    vertical-align:       0.5;
+}
+textbox-sub {
+    content:              "";
+    expand:               false;
+    font:                 "JetBrainsMono Nerd Font 10";
+    text-color:           @yr-fg2;
+}
+
+/* ── тело ── */
+body {
+    orientation:          vertical;
+    spacing:              0.55em;
+    padding:              0.6em 0.8em 0.85em 0.8em;
+    children:             [ "inputbar", "message", "listview" ];
+}
+
+/* поле поиска-«таблетка» */
+inputbar {
+    orientation:          horizontal;
+    expand:               false;
+    spacing:              0.55em;
+    padding:              0.45em 0.8em;
+    border:               1px;
+    border-radius:        0.85em;
+    border-color:         @yr-entry-br;
+    background-color:     @yr-btn;
+    children:             [ "textbox-search", "entry" ];
+}
+textbox-search {
+    content:              "󰍉";
+    expand:               false;
+    text-color:           @yr-accent;
+    vertical-align:       0.5;
+}
+entry {
+    enabled:              true;
+    expand:               true;
+    placeholder:          "Поиск";
+    placeholder-color:    @yr-fg2-dim;
+    text-color:           @yr-fg;
+    cursor:               text;
+    vertical-align:       0.5;
+}
+prompt, textbox-prompt-colon, case-indicator { enabled: false; }
+
+/* сообщение (калькулятор, ошибки) */
+message {
+    padding:              0.45em 0.8em;
+    border-radius:        0.85em;
+    background-color:     @yr-btn;
+}
+textbox {
+    text-color:           @yr-fg2;
+    vertical-align:       0.5;
+    horizontal-align:     0;
+}
+
+/* ── список ── */
+listview {
+    columns:              1;
+    lines:                9;
+    spacing:              0.32em;
+    cycle:                true;
+    dynamic:              true;
+    fixed-height:         true;
+    fixed-columns:        true;
+    scrollbar:            false;
+    layout:               vertical;
+    reverse:              false;
+    cursor:               "default";
+}
+
+/* строки-«таблетки» */
+element {
+    orientation:          horizontal;
+    spacing:              0.6em;
+    padding:              0.42em 0.8em;
+    border:               1px;
+    border-radius:        0.85em;
+    border-color:         @yr-none;
+    cursor:               pointer;
+}
+element normal.normal, element alternate.normal {
+    background-color:     @yr-btn;
+    text-color:           @yr-fg;
+}
+element normal.active, element alternate.active {
+    background-color:     @yr-btn;
+    text-color:           @yr-accent;
+}
+element normal.urgent, element alternate.urgent {
+    background-color:     @yr-btn;
+    text-color:           #ed8796;
+}
+element selected.normal, element selected.active, element selected.urgent {
+    background-color:     @yr-sel;
+    border-color:         @yr-sel-br;
+    text-color:           @yr-fg;
+}
+element-icon {
+    size:                 1.35em;
+    cursor:               inherit;
+    vertical-align:       0.5;
+    background-color:     transparent;
+    text-color:           inherit;
+}
+element-text {
+    expand:               true;
+    vertical-align:       0.5;
+    horizontal-align:     0;
+    cursor:               inherit;
+    highlight:            bold;
+    background-color:     transparent;
+    text-color:           inherit;
+}
+
+error-message {
+    padding:              1em;
+    border:               2px;
+    border-radius:        1.55em;
+    border-color:         @yr-border;
+    background-color:     @yr-bg;
+    text-color:           @yr-fg;
+}

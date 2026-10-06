@@ -1,0 +1,653 @@
+#!/usr/bin/env python3
+"""yumi-menu-power — меню «Питание» на GTK (каркас yumi-panel): батарея, профиль питания, workflow HyDE.
+  yumi-menu-power [--bar|--center]   открыть / закрыть
+  yumi-menu-power --close            закрыть открытое меню
+Батарея — UPower (D-Bus, живые сигналы) + /sys/class/power_supply, плюс опрос раз в 5 с в потоке.
+Профиль — power-profiles-daemon (D-Bus, переключение через powerprofilesctl).
+Workflow — как menu-workflows: hyde-shell workflows --set NAME, сигнал Waybar RTMIN+9.
+
+Отладка:
+  YP_DRYRUN=1        смена профиля и workflow не выполняется: команда пишется в stderr, меню имитирует результат
+  YP_POWER_FAKE=pct:state[:watts]   подменить батарею для снимков (state = charging|discharging|full|pending)
+  YP_POWER_PAGE=details             сразу открыть «Подробнее»
+  YP_POWER_ACT=profile:NAME | workflow:NAME   через 0,8 с «нажать» плитку/строку
+  YP_POWER_DEBUG=1  кадры анимации подсветки и смена профиля — в stderr
+Откат: yumi-panel-uninstall"""
+import os
+import shutil
+import subprocess
+import sys
+import threading
+import time
+
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-panel"))
+import yumipanel as yp  # noqa: E402  (сам перезапускает процесс с layer-shell)
+from yumipanel import Gtk, Gio, GLib, Pango  # noqa: E402
+
+DRY = os.environ.get("YP_DRYRUN") == "1"
+FAKE = os.environ.get("YP_POWER_FAKE", "")
+POLL_S = 5
+SYS_BAT = "/sys/class/power_supply/macsmc-battery"
+UPOWER = "org.freedesktop.UPower"
+PPD = "org.freedesktop.UPower.PowerProfiles"
+PPD_PATH = "/org/freedesktop/UPower/PowerProfiles"
+STATERC = os.path.expanduser("~/.local/state/hyde/staterc")
+WF_DIR = os.path.expanduser("~/.local/share/hypr/lua/workflows")
+HYDE_SHELL = shutil.which("hyde-shell") or os.path.expanduser("~/.local/bin/hyde-shell")
+
+PROFILES = [("power-saver", "󰌪", "Эконом"), ("balanced", "󰾅", "Баланс"), ("performance", "󱐋", "Производит.")]
+PROFILE_SUB = {"power-saver": "тише и дольше от батареи", "balanced": "обычный режим",
+               "performance": "максимум частоты"}
+
+WORKFLOWS = {   # имя файла → (значок, русское название, имя в Waybar, описание)
+    "01-default": ("󰍹", "Обычный", "Main", "Прозрачность, размытие, анимации"),
+    "editing": ("󰏫", "Редактирование", "Editing", "Без прозрачности — точные цвета"),
+    "gaming": ("󰊗", "Игры", "Gaming", "Без теней и отступов — для скорости"),
+    "powersaver": ("󰌪", "Экономия", "Powersaver", "Без эффектов — бережёт батарею"),
+    "snappy": ("󱐋", "Отзывчивый", "Snappy", "Без анимаций — мгновенный отклик"),
+}
+
+ICONS_BAT = "󰁺󰁻󰁼󰁽󰁾󰁿󰂀󰂁󰂂󰁹"
+ICONS_CHG = "󰢜󰂆󰂇󰂈󰢝󰂉󰢞󰂊󰂋󰂅"
+RED, ORANGE, GREEN = "#ed8796", "#f5a97f", "#a6da95"
+
+CSS = f"""
+.yp-pw-card {{ background: alpha(@yp-btn, 0.55); border-radius: 20px; padding: 12px 14px 12px 14px; }}
+.yp-pw-pct {{ font-size: 26pt; font-weight: 800; color: @yp-accent; }}
+.yp-pw-pct-sign {{ font-size: 14pt; font-weight: 700; color: alpha(@yp-fg2, 0.8); }}
+.yp-pw-state {{ font-size: 11pt; font-weight: 700; color: @yp-fg; }}
+.yp-pw-time {{ font-size: 10pt; color: alpha(@yp-fg2, 0.8); }}
+.yp-pw-bar trough {{ min-height: 12px; border-radius: 6px; background: alpha(@yp-fg, 0.13); }}
+.yp-pw-bar progress {{ min-height: 12px; border-radius: 6px; background: @yp-accent;
+                       transition: background 300ms; }}
+.yp-pw-chip {{ font-size: 9.5pt; color: alpha(@yp-fg2, 0.85); }}
+.yp-pw-chip-icon {{ color: @yp-accent; }}
+.yp-pw-more {{ background: none; box-shadow: none; border: none; padding: 2px 8px; min-height: 0;
+               border-radius: 10px; font-size: 9.5pt; color: alpha(@yp-fg2, 0.85); }}
+.yp-pw-more:hover {{ background: @yp-hover; color: @yp-fg; }}
+
+.yp-pw-card.charging .yp-pw-pct, .yp-pw-card.charging .yp-pw-chip-icon {{ color: {GREEN}; }}
+.yp-pw-card.charging .yp-pw-bar progress {{ background: {GREEN}; }}
+.yp-pw-card.low .yp-pw-pct, .yp-pw-card.low .yp-pw-chip-icon {{ color: {ORANGE}; }}
+.yp-pw-card.low .yp-pw-bar progress {{ background: {ORANGE}; }}
+.yp-pw-card.critical .yp-pw-pct, .yp-pw-card.critical .yp-pw-chip-icon {{ color: {RED}; }}
+.yp-pw-card.critical .yp-pw-bar progress {{ background: {RED}; }}
+.yp-pw-card.critical {{ box-shadow: inset 0 0 0 1px alpha({RED}, 0.45); }}
+
+/* профиль: сегменты с «бегущей» подсветкой */
+.yp-pw-seg {{ background: alpha(@yp-btn, 0.55); border-radius: 18px; padding: 4px; }}
+.yp-pw-hl {{ background: alpha(@yp-accent, 0.22); border-radius: 14px;
+             box-shadow: inset 0 0 0 1px alpha(@yp-accent, 0.6); }}
+.yp-pw-tile {{ background: none; border: none; box-shadow: none; border-radius: 14px;
+               padding: 8px 4px; color: alpha(@yp-fg, 0.75); transition: background 150ms, color 200ms; }}
+.yp-pw-tile:hover {{ background: alpha(@yp-hover, 0.55); color: @yp-fg; }}
+.yp-pw-tile.active {{ color: @yp-fg; }}
+.yp-pw-tile.active:hover {{ background: none; }}
+.yp-pw-tile-icon {{ font-size: 17pt; color: alpha(@yp-fg2, 0.6); transition: color 200ms; }}
+.yp-pw-tile.active .yp-pw-tile-icon {{ color: @yp-accent; }}
+.yp-pw-tile-text {{ font-size: 9.5pt; font-weight: 700; }}
+.yp-pw-tile:disabled {{ opacity: 0.35; }}
+
+/* workflow: строка с описанием */
+.yp-pw-wf {{ padding: 7px 14px; }}
+.yp-pw-wf-title {{ font-size: 11pt; }}
+.yp-pw-wf-desc {{ font-size: 9pt; color: alpha(@yp-fg2, 0.7); }}
+.yp-pw-wf-name {{ font-size: 8.5pt; color: alpha(@yp-fg2, 0.55); }}
+"""
+
+
+# ---------- данные ----------
+def read_sys(name, path=SYS_BAT):
+    try:
+        with open(os.path.join(path, name)) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def num(v, k=1.0):
+    try:
+        return float(v) * k
+    except (TypeError, ValueError):
+        return None
+
+
+def battery_path(bus):
+    """Батарея ноутбука в UPower (первая с PowerSupply=true)."""
+    try:
+        paths = bus.call_sync(UPOWER, "/org/freedesktop/UPower", UPOWER, "EnumerateDevices", None, None,
+                              Gio.DBusCallFlags.NONE, 1500, None).unpack()[0]
+        for p in paths:
+            props = get_all(bus, p, UPOWER + ".Device")
+            if props.get("Type") == 2 and props.get("PowerSupply"):
+                return p
+    except GLib.Error:
+        pass
+    return "/org/freedesktop/UPower/devices/battery_macsmc_battery"
+
+
+def get_all(bus, path, iface, name=UPOWER):
+    try:
+        return bus.call_sync(name, path, "org.freedesktop.DBus.Properties", "GetAll",
+                             GLib.Variant("(s)", (iface,)), None, Gio.DBusCallFlags.NONE, 1500, None).unpack()[0]
+    except GLib.Error:
+        return {}
+
+
+def read_battery(bus, path):
+    """Снимок батареи: UPower + sysfs. Вызывается в потоке."""
+    up = get_all(bus, path, UPOWER + ".Device") if bus else {}
+    ac = read_sys("online", "/sys/class/power_supply/macsmc-ac")
+    st_sys = (read_sys("status") or "").lower()
+    state = {1: "charging", 2: "discharging", 3: "discharging", 4: "full", 5: "pending", 6: "discharging"}.get(
+        up.get("State"), {"charging": "charging", "discharging": "discharging", "full": "full",
+                          "not charging": "pending"}.get(st_sys, "unknown"))
+    pct = num(read_sys("capacity"))           # как у пилюли Waybar (ядро), иначе UPower
+    if pct is None:
+        pct = up.get("Percentage")
+    rate = up.get("EnergyRate") or num(read_sys("power_now"), 1e-6) or 0.0
+    tte = up.get("TimeToEmpty") or num(read_sys("time_to_empty_now")) or 0
+    ttf = up.get("TimeToFull") or num(read_sys("time_to_full_now")) or 0
+    temp = up.get("Temperature") or num(read_sys("temp"), 0.1)
+    full, design = num(read_sys("charge_full")), num(read_sys("charge_full_design"))
+    health = full / design * 100 if full and design else up.get("Capacity")
+    d = {
+        "pct": pct or 0, "state": state, "ac": ac == "1" if ac is not None else state in ("charging", "full", "pending"),
+        "rate": abs(rate), "tte": int(tte), "ttf": int(ttf), "temp": temp or None,
+        "cycles": up.get("ChargeCycles") or (int(read_sys("cycle_count") or 0) or None),
+        "health": health, "energy": up.get("Energy") or num(read_sys("energy_now"), 1e-6),
+        "energy_full": up.get("EnergyFull") or num(read_sys("energy_full"), 1e-6),
+        "energy_design": up.get("EnergyFullDesign") or num(read_sys("energy_full_design"), 1e-6),
+        "voltage": up.get("Voltage") or num(read_sys("voltage_now"), 1e-6),
+        "model": up.get("Model") or read_sys("model_name"),
+        "made": None,
+    }
+    y, m, dd = read_sys("manufacture_year"), read_sys("manufacture_month"), read_sys("manufacture_day")
+    if y and m and dd:
+        d["made"] = f"{int(dd):02d}.{int(m):02d}.{y}"
+    if FAKE:                                   # для снимков: pct:state[:watts]
+        parts = FAKE.split(":")
+        d["pct"] = float(parts[0])
+        d["state"] = parts[1] if len(parts) > 1 else d["state"]
+        d["rate"] = float(parts[2]) if len(parts) > 2 else 8.0
+        d["ac"] = d["state"] in ("charging", "full", "pending")
+        d["tte"] = int(d["pct"] / 100 * 49 / max(d["rate"], 0.1) * 3600) if d["state"] == "discharging" else 0
+        d["ttf"] = int((100 - d["pct"]) / 100 * 49 / max(d["rate"], 0.1) * 3600) if d["state"] == "charging" else 0
+    return d
+
+
+def hm(sec):
+    if not sec or sec <= 0:
+        return ""
+    m = int(sec) // 60
+    return f"{m // 60}:{m % 60:02d}"
+
+
+def bat_icon(d):
+    i = min(max(int(d["pct"]) - 1, 0) // 10, 9)
+    return (ICONS_CHG if d["state"] in ("charging", "full", "pending") else ICONS_BAT)[i]
+
+
+def state_words(d):
+    """(состояние, время) по-русски."""
+    st = d["state"]
+    if st == "charging":
+        t = hm(d["ttf"])
+        return "заряжается", f"до полного {t}" if t else ""
+    if st == "full":
+        return "заряжено", "от сети"
+    if st == "pending":
+        return "не заряжается", "от сети"
+    if st == "discharging":
+        t = hm(d["tte"])
+        return "от батареи", f"осталось {t}" if t else ""
+    return "нет данных", ""
+
+
+def current_workflow():
+    try:
+        with open(STATERC) as f:
+            for line in f:
+                if line.startswith("HYPR_WORKFLOW="):
+                    return line.split("=", 1)[1].strip().strip('"')
+    except OSError:
+        pass
+    return None
+
+
+def workflow_names():
+    try:
+        return sorted(f[:-4] for f in os.listdir(WF_DIR) if f.endswith(".lua"))
+    except OSError:
+        return list(WORKFLOWS)
+
+
+def run_cmd(*cmd, timeout=10):
+    """Команда, меняющая систему. В dry-run — только stderr."""
+    if DRY:
+        print("[dry-run] " + " ".join(cmd), file=sys.stderr, flush=True)
+        time.sleep(0.6)
+        return True, ""
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return r.returncode == 0, (r.stderr or r.stdout).strip()
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, str(e)
+
+
+def lbl(text="", classes=(), xalign=0.0, **kw):
+    return Gtk.Label(label=text, xalign=xalign, css_classes=list(classes), **kw)
+
+
+# ---------- сегменты профиля с плавной подсветкой ----------
+class Segmented(Gtk.Overlay):
+    """Плитки в ряд; подсветка активной плавно «переезжает» (кадры GTK, ease-out 260 мс)."""
+    DURATION = 0.26
+
+    def __init__(self, items, on_pick):
+        super().__init__(css_classes=["yp-pw-seg"])
+        self.fixed = Gtk.Fixed()
+        self.set_child(self.fixed)
+        self.hl = Gtk.Box(css_classes=["yp-pw-hl"], visible=False)
+        self.fixed.put(self.hl, 0, 0)
+        self.row = Gtk.Box(homogeneous=True, spacing=4)
+        self.add_overlay(self.row)
+        self.set_measure_overlay(self.row, True)
+        self.tiles = {}
+        for key, icon, text in items:
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            box.append(lbl(icon, ["yp-pw-tile-icon"], 0.5))
+            box.append(lbl(text, ["yp-pw-tile-text"], 0.5, ellipsize=Pango.EllipsizeMode.END, max_width_chars=1))
+            b = Gtk.Button(child=box, css_classes=["yp-pw-tile"], hexpand=True, focusable=False)
+            b.connect("clicked", lambda *_, k=key: on_pick(k))
+            self.row.append(b)
+            self.tiles[key] = b
+        self.active = None
+        self.pos = None             # текущий прямоугольник подсветки (x, y, w, h)
+        self.anim = None            # (начало, из, в, время старта)
+        self.tick_id = 0
+        self.settle = 6
+
+    def set_available(self, keys):
+        for k, b in self.tiles.items():
+            b.set_sensitive(k in keys)
+            b.set_tooltip_text(None if k in keys else "Не поддерживается драйвером этого ноутбука")
+
+    def set_active(self, key):
+        if key == self.active:
+            return
+        self.active = key
+        for k, b in self.tiles.items():
+            (b.add_css_class if k == key else b.remove_css_class)("active")
+        self.anim = None
+        self.settle = 6
+        if not self.tick_id:
+            self.tick_id = self.add_tick_callback(self.on_tick)
+
+    def target(self):
+        b = self.tiles.get(self.active)
+        if not b or self.fixed.get_width() <= 0 or b.get_width() <= 0:    # ещё не разложено
+            return None
+        ok, r = b.compute_bounds(self.fixed)
+        if not ok or r.get_width() <= 0:
+            return None
+        return (r.get_x(), r.get_y(), r.get_width(), r.get_height())
+
+    def on_tick(self, _w, clock):
+        tgt = self.target()
+        if os.environ.get("YP_POWER_DEBUG"):
+            print("tick", self.active, tgt, self.pos, self.fixed.get_width(), self.fixed.get_height(), file=sys.stderr)
+        if tgt is None:
+            return self.active in self.tiles          # ждать раскладки
+        now = clock.get_frame_time() / 1e6
+        if self.pos is None:                           # первый показ — сразу на месте
+            cur = tgt
+        else:
+            if self.anim is None or self.anim[1] != tgt:
+                self.anim = (self.pos, tgt, now)
+            src, dst, t0 = self.anim
+            p = min((now - t0) / self.DURATION, 1.0)
+            e = 1 - (1 - p) ** 3
+            cur = tuple(a + (b - a) * e for a, b in zip(src, dst))
+        self.pos = cur
+        self.fixed.move(self.hl, cur[0], cur[1])
+        self.hl.set_size_request(max(int(round(cur[2])), 1), max(int(round(cur[3])), 1))
+        self.hl.set_visible(True)
+        if cur == tgt:
+            self.settle -= 1               # пару кадров после остановки — на случай поздней раскладки
+        else:
+            self.settle = 6
+        if self.settle <= 0:
+            self.tick_id = 0
+            return False
+        return True
+
+
+# ---------- меню ----------
+class Power:
+    def __init__(self, panel, body):
+        self.panel, self.app = panel, panel.app
+        self.closed = False
+        self.data = None
+        self.refresh_timer = 0
+        self.reading = False
+        self.toast_until = 0
+        self.details = None            # {ключ: Gtk.Label} открытой страницы «Подробнее»
+        self.profile = None
+        self.fake_wf = None            # dry-run: «применённый» workflow
+        if hasattr(panel, "css"):
+            panel.add_css(CSS)
+        else:                          # build() идёт до setup_css(): add_css() тут упал бы — стиль подхватит load_css
+            panel.extra_css.append(CSS)
+        self.app.connect("shutdown", lambda *_: setattr(self, "closed", True))
+
+        # ── батарея ──
+        self.card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, css_classes=["yp-pw-card"])
+        top = Gtk.Box(spacing=12)
+        pct_box = Gtk.Box(valign=Gtk.Align.END)
+        self.pct_l = lbl("", ["yp-pw-pct"])
+        pct_box.append(self.pct_l)
+        pct_box.append(lbl("%", ["yp-pw-pct-sign"], valign=Gtk.Align.END, margin_bottom=5))
+        top.append(pct_box)
+        right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER, hexpand=True)
+        self.state_l = lbl("", ["yp-pw-state"], 1, ellipsize=Pango.EllipsizeMode.END, max_width_chars=1)
+        self.time_l = lbl("", ["yp-pw-time"], 1, ellipsize=Pango.EllipsizeMode.END, max_width_chars=1)
+        right.append(self.state_l)
+        right.append(self.time_l)
+        top.append(right)
+        self.card.append(top)
+        self.bar = Gtk.ProgressBar(css_classes=["yp-pw-bar"])
+        self.card.append(self.bar)
+        chips = Gtk.Box(spacing=12)
+        self.chip_power = self.chip(chips, "󱐋")
+        self.chip_temp = self.chip(chips, "󰔏")
+        self.chip_health = self.chip(chips, "󰂑")
+        chips.append(Gtk.Box(hexpand=True))
+        more = Gtk.Button(label="Подробнее 󰅂", css_classes=["yp-pw-more"], focusable=False)
+        more.connect("clicked", lambda *_: self.open_details())
+        chips.append(more)
+        self.card.append(chips)
+        body.append(self.card)
+
+        # ── профиль ──
+        body.append(yp.section("ПРОФИЛЬ"))
+        self.seg = Segmented(PROFILES, self.set_profile)
+        body.append(self.seg)
+
+        # ── workflow ──
+        body.append(yp.section("WORKFLOW"))
+        self.wf_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        body.append(self.wf_box)
+        self.wf_rows = {}
+        for name in workflow_names():
+            self.wf_box.append(self.wf_row(name))
+
+        # ── D-Bus и слежение ──
+        try:
+            self.bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+        except GLib.Error:
+            self.bus = None
+        self.bat_path = battery_path(self.bus) if self.bus else None
+        if self.bus:
+            # UPower: заряд/подключение зарядки; PPD: профиль сменили снаружи (пилюля, powerprofilesctl)
+            self.bus.signal_subscribe(UPOWER, "org.freedesktop.DBus.Properties", "PropertiesChanged", None, None,
+                                      Gio.DBusSignalFlags.NONE, lambda *_: self.schedule_refresh())
+            self.bus.signal_subscribe(None, "org.freedesktop.DBus.Properties", "PropertiesChanged", PPD_PATH,
+                                      None, Gio.DBusSignalFlags.NONE, lambda *_: self.read_profile())
+        self.wf_mon = Gio.File.new_for_path(os.path.dirname(STATERC)).monitor_directory(
+            Gio.FileMonitorFlags.WATCH_MOVES, None)
+        self.wf_mon.connect("changed", lambda _m, f, o, _e: (
+            "staterc" in {x.get_basename() for x in (f, o) if x}) and self.update_workflows())
+
+        self.apply_battery(read_battery(self.bus, self.bat_path))   # первый раз — сразу, окно открывается готовым
+        self.read_profile()
+        self.update_workflows()
+        GLib.timeout_add_seconds(POLL_S, self.poll)
+        if os.environ.get("YP_POWER_PAGE") == "details":
+            GLib.timeout_add(400, lambda: self.open_details() or False)
+        if os.environ.get("YP_POWER_ACT"):           # для проверки: «клик» profile:NAME | workflow:NAME
+            what, _, arg = os.environ["YP_POWER_ACT"].partition(":")
+            act = {"profile": self.set_profile, "workflow": self.set_workflow}.get(what)
+            if act:
+                GLib.timeout_add(800, lambda: act(arg) or False)
+
+    # ---------- элементы ----------
+    @staticmethod
+    def chip(parent, icon):
+        box = Gtk.Box(spacing=5)
+        box.append(lbl(icon, ["yp-pw-chip", "yp-pw-chip-icon"]))
+        val = lbl("", ["yp-pw-chip"])
+        box.append(val)
+        parent.append(box)
+        return val
+
+    def wf_row(self, name):
+        icon, title, short, desc = WORKFLOWS.get(name, ("󰍹", name, "", ""))
+        box = Gtk.Box(spacing=12)
+        box.append(lbl(icon, ["yp-row-icon"], valign=Gtk.Align.CENTER))
+        texts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True, valign=Gtk.Align.CENTER)
+        head = Gtk.Box(spacing=8)
+        head.append(lbl(title, ["yp-pw-wf-title"]))
+        if short:
+            head.append(lbl(short, ["yp-pw-wf-name"], valign=Gtk.Align.BASELINE))
+        texts.append(head)
+        if desc:
+            texts.append(lbl(desc, ["yp-pw-wf-desc"], wrap=True, max_width_chars=1))
+        box.append(texts)
+        stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.NONE, transition_duration=0)
+        stack.add_named(lbl("󰄬", ["yp-row-check"]), "check")
+        stack.add_named(Gtk.Spinner(spinning=True), "spin")
+        stack.add_named(Gtk.Box(), "none")
+        box.append(stack)
+        b = Gtk.Button(child=box, css_classes=["yp-row", "yp-pw-wf"], focusable=False)
+        b.connect("clicked", lambda *_: self.set_workflow(name))
+        self.wf_rows[name] = (b, stack)
+        return b
+
+    # ---------- батарея ----------
+    def poll(self):
+        if self.closed:
+            return False
+        self.schedule_refresh(0)
+        return True
+
+    def schedule_refresh(self, delay=250):
+        if not self.refresh_timer and not self.closed:
+            self.refresh_timer = GLib.timeout_add(delay, self.refresh)
+        return False
+
+    def refresh(self):
+        self.refresh_timer = 0
+        if self.reading:
+            return False
+        self.reading = True
+
+        def work():
+            try:
+                d = read_battery(self.bus, self.bat_path)
+            except Exception:
+                d = None
+            GLib.idle_add(self.apply_battery, d)
+        threading.Thread(target=work, daemon=True).start()
+        return False
+
+    def apply_battery(self, d):
+        self.reading = False
+        if d is None or self.closed:
+            return False
+        self.data = d
+        pct = round(d["pct"])
+        st, tm = state_words(d)
+        self.pct_l.set_label(str(pct))
+        self.state_l.set_label(st[:1].upper() + st[1:])
+        self.time_l.set_label(tm)
+        self.bar.set_fraction(min(max(d["pct"] / 100, 0), 1))
+        for c in ("charging", "low", "critical"):
+            self.card.remove_css_class(c)
+        if d["state"] == "charging":
+            self.card.add_css_class("charging")
+        elif pct < 15:
+            self.card.add_css_class("critical")
+        elif pct < 30:
+            self.card.add_css_class("low")
+
+        sign = "+" if d["state"] == "charging" else ("−" if d["state"] == "discharging" else "")
+        self.chip_power.set_label(f"{sign}{d['rate']:.1f} Вт" if d["rate"] >= 0.05 else "0 Вт")
+        self.chip_temp.set_label(f"{d['temp']:.0f}°C" if d["temp"] else "—")
+        self.chip_health.set_label(f"{d['health']:.0f}%" if d["health"] else "—")
+        self.chip_health.get_parent().set_tooltip_text("Здоровье батареи: ёмкость сейчас / новой")
+        self.chip_power.get_parent().set_tooltip_text("Мощность: + заряд, − разряд")
+        self.chip_temp.get_parent().set_tooltip_text("Температура батареи")
+
+        if GLib.get_monotonic_time() > self.toast_until and not self.panel.pages:
+            self.panel.set_subtitle(self.main_sub())
+        self.update_details()
+        return False
+
+    def main_sub(self):
+        d = self.data
+        if not d:
+            return ""
+        st, tm = state_words(d)
+        return " · ".join(x for x in (f"{bat_icon(d)} {round(d['pct'])}%", st, tm) if x)
+
+    def toast(self, text, error=False, hold=3):
+        self.toast_until = GLib.get_monotonic_time() + int(hold * 1e6)
+        self.panel.toast(text, error)
+        GLib.timeout_add(int(hold * 1000) + 50, self.release_toast)
+
+    def release_toast(self):
+        if GLib.get_monotonic_time() >= self.toast_until and not self.panel.pages and not self.closed:
+            self.panel.set_subtitle(self.main_sub())
+        return False
+
+    # ---------- «Подробнее» ----------
+    def open_details(self):
+        if self.panel.pages:
+            return
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self.details = {}
+        groups = [("СЕЙЧАС", [("state", "Состояние"), ("source", "Питание"), ("power", "Мощность"),
+                               ("time", "Время"), ("energy", "Запас энергии"), ("voltage", "Напряжение"),
+                               ("temp", "Температура")]),
+                  ("БАТАРЕЯ", [("health", "Здоровье"), ("capacity", "Ёмкость сейчас / новой"),
+                               ("cycles", "Циклы заряда"), ("model", "Модель"), ("made", "Изготовлена")])]
+        for title, rows in groups:
+            page.append(yp.section(title))
+            for key, name in rows:
+                row = yp.info_row(name, "…")
+                self.details[key] = row.get_first_child().get_next_sibling()
+                page.append(row)
+        self.panel.push("󰂑  Батарея", page, "", on_leave=lambda: setattr(self, "details", None))
+        self.update_details()
+
+    def update_details(self):
+        d = self.data
+        if not self.details or not d:
+            return
+        st, tm = state_words(d)
+        sign = "+" if d["state"] == "charging" else ("−" if d["state"] == "discharging" else "")
+        f = lambda v, fmt: (fmt.format(v) if v is not None else "—")  # noqa: E731
+        vals = {
+            "state": f"{bat_icon(d)} {round(d['pct'])}% · {st}",
+            "source": "от сети" if d["ac"] else "от батареи",
+            "power": f"{sign}{d['rate']:.1f} Вт",
+            "time": (f"до полного {hm(d['ttf'])}" if d["ttf"] else
+                     f"осталось {hm(d['tte'])}" if d["tte"] else "—"),
+            "energy": (f"{d['energy']:.1f} из {d['energy_full']:.1f} Вт·ч"
+                       if d["energy"] and d["energy_full"] else "—"),
+            "voltage": f(d["voltage"], "{:.2f} В"),
+            "temp": f(d["temp"], "{:.1f} °C"),
+            "health": f(d["health"], "{:.1f}%"),
+            "capacity": (f"{d['energy_full']:.1f} / {d['energy_design']:.1f} Вт·ч"
+                         if d["energy_full"] and d["energy_design"] else "—"),
+            "cycles": str(d["cycles"]) if d["cycles"] else "—",
+            "model": d["model"] or "—",
+            "made": d["made"] or "—",
+        }
+        for k, l in self.details.items():
+            l.set_label(vals.get(k, "—"))
+        self.panel.set_subtitle(f"{round(d['pct'])}% · {st}" + (f" · {tm}" if tm else ""))
+
+    # ---------- профиль ----------
+    def read_profile(self):
+        if not self.bus:
+            return False
+        props = get_all(self.bus, PPD_PATH, PPD, PPD)
+        if not props:
+            props = get_all(self.bus, "/net/hadess/PowerProfiles", "net.hadess.PowerProfiles",
+                            "net.hadess.PowerProfiles")
+        avail = [p.get("Profile") for p in props.get("Profiles", [])]
+        if avail:
+            self.seg.set_available(avail)
+        if DRY and self.profile:            # dry-run: держать «выбранный» профиль
+            return False
+        self.profile = props.get("ActiveProfile")
+        if os.environ.get("YP_POWER_DEBUG"):
+            print("profile", self.profile, avail, file=sys.stderr, flush=True)
+        self.seg.set_active(self.profile)
+        return False
+
+    def set_profile(self, key):
+        if key == self.profile:
+            return
+        old, self.profile = self.profile, key
+        self.seg.set_active(key)                       # подсветка едет сразу, команда — в потоке
+        self.panel.busy += 1
+        name = next(t for k, _i, t in PROFILES if k == key)
+
+        def work():
+            ok, msg = run_cmd("powerprofilesctl", "set", key)
+            if ok:
+                run_cmd("pkill", "-RTMIN+8", "waybar")
+            GLib.idle_add(done, ok, msg)
+
+        def done(ok, msg):
+            self.panel.busy -= 1
+            if ok:
+                self.toast(f"Профиль: {name} — {PROFILE_SUB.get(key, '')}")
+            else:
+                self.profile = old
+                self.seg.set_active(old)
+                self.toast(f"Не удалось: {msg[:60] or 'ошибка powerprofilesctl'}", error=True, hold=6)
+            return False
+        threading.Thread(target=work, daemon=True).start()
+
+    # ---------- workflow ----------
+    def update_workflows(self, busy=None):
+        cur = self.fake_wf or current_workflow() or (workflow_names() or [None])[0]
+        for name, (b, stack) in self.wf_rows.items():
+            (b.add_css_class if name == cur else b.remove_css_class)("active")
+            stack.set_visible_child_name("spin" if name == busy else "check" if name == cur else "none")
+        return False
+
+    def set_workflow(self, name):
+        cur = self.fake_wf or current_workflow()
+        if name == cur or self.panel.busy:
+            return
+        self.panel.busy += 1
+        self.update_workflows(busy=name)
+        title = WORKFLOWS.get(name, ("", name))[1]
+        self.toast(f"Применяю «{title}»…", hold=30)
+
+        def work():
+            ok, msg = run_cmd(HYDE_SHELL, "workflows", "--set", name, timeout=20)
+            run_cmd("pkill", "-RTMIN+9", "waybar")
+            GLib.idle_add(done, ok, msg)
+
+        def done(ok, msg):
+            self.panel.busy -= 1
+            if ok and DRY:
+                self.fake_wf = name
+            self.update_workflows()
+            if ok:
+                self.toast(f"Workflow: {title}")
+            else:
+                self.toast(f"Не удалось: {msg[:60] or 'hyde-shell'}", error=True, hold=6)
+            return False
+        threading.Thread(target=work, daemon=True).start()
+
+
+if __name__ == "__main__":
+    app = yp.PanelApp("org.yumi.panel.power", "Питание", "󰂄", lambda panel, body: Power(panel, body))
+    sys.exit(app.run(sys.argv))

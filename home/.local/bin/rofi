@@ -1,19 +1,234 @@
 #!/usr/bin/env bash
-# Обёртка rofi: масштаб меню по монитору под курсором.
+# Обёртка rofi: масштаб меню по монитору под курсором + единая тема yumi для меню HyDE.
 # rofi 1.7 работает через XWayland с force_zero_scaling и рисует в физических пикселях,
 # поэтому на MSI (1080p, масштаб 1) меню выходят вдвое крупнее, чем на MacBook.
 # Размеры подобраны на MacBook (DPI 96), на остальных мониторах DPI меньше.
 # Монитор — тот, где курсор: при клике в Waybar фокус может остаться на другом экране.
 # Имена и DPI ниже — пример для моего MSI; свои выходы: `hyprctl monitors all`.
-# Откат: удалить этот файл.
+#
+# Тема yumi (~/.config/rofi/yumi/yumi.rasi, как GTK-меню yumi-panel) подставляется вместо
+# тем HyDE style_10 / clipboard / notification / steam_deck / gamelauncher_* (и selector
+# для «выбора лаунчера»). Заголовок, подпись, подсказка поиска и сетка (эмодзи, глифы) —
+# по скрипту, который открыл меню. Размер шрифта — как у GTK-меню на этом мониторе.
+# Отключить тему (оставить только DPI): ROFI_YUMI=0. Откат всего: rofi-yumi-uninstall.
 declare -A DPI=(
     [DP-1]=64   # MSI G27C3F: ×0.67
 )
+# Во сколько физических пикселей GTK-меню рисует 1 px (yumi-panel: на DP-1 всё ×0.8);
+# для остальных мониторов — их масштаб.
+declare -A UI=(
+    [DP-1]=0.8
+)
 
 read -r cx cy < <(hyprctl cursorpos 2>/dev/null | awk -F', *' '{printf "%d %d\n", $1, $2}')
-mon=$(hyprctl -j monitors 2>/dev/null | jq -r --argjson x "${cx:-0}" --argjson y "${cy:-0}" \
-    '.[] | select($x >= .x and $x < .x + .width / .scale and $y >= .y and $y < .y + .height / .scale) | .name' 2>/dev/null)
-if [[ -n "$mon" && -n "${DPI[$mon]}" ]]; then
-    exec /usr/bin/rofi -dpi "${DPI[$mon]}" "$@"
+read -r mon scale < <(hyprctl -j monitors 2>/dev/null | jq -r --argjson x "${cx:-0}" --argjson y "${cy:-0}" \
+    '.[] | select($x >= .x and $x < .x + .width / .scale and $y >= .y and $y < .y + .height / .scale) | "\(.name) \(.scale)"' 2>/dev/null)
+pre=()
+[[ -n "$mon" && -n "${DPI[$mon]}" ]] && pre=(-dpi "${DPI[$mon]}")
+
+[[ "${ROFI_YUMI:-1}" == 0 ]] && exec /usr/bin/rofi "${pre[@]}" "$@"
+
+yumi="$HOME/.config/rofi/yumi/yumi.rasi"
+[[ -f "$yumi" ]] || exec /usr/bin/rofi "${pre[@]}" "$@"
+
+# Кто открыл меню: ближайший предок, похожий на известный скрипт (HyDE, rofi-panel, lua)
+caller=""
+p=$PPID
+for _ in 1 2 3 4 5 6; do
+    [[ -r /proc/$p/cmdline ]] || break
+    c="$(tr '\0' ' ' </proc/"$p"/cmdline)"
+    case "$c" in
+        *rofilaunch* | *emoji-picker* | *glyph-picker* | *keybinds_hint* | *calculator* | *websearch* | \
+            *rofiselect* | *animations* | *hyprlock* | *gamelauncher* | *rofi-panel*)
+            caller="$c"; break ;;
+    esac
+    p=$(awk '{print $4}' /proc/"$p"/stat 2>/dev/null)
+    [[ -z "$p" || "$p" -le 1 ]] && break
+done
+
+# Заменить тему HyDE на yumi
+args=("$@")
+use=0 wide=0 mode="" prompt=""
+for ((i = 0; i < ${#args[@]}; i++)); do
+    case "${args[i]}" in
+        -theme | -config)
+            base="${args[i + 1]##*/}"; base="${base%.rasi}"
+            case "$base" in
+                # Стили лаунчера HyDE (SUPER+SHIFT+A): широкие макеты «картинка слева + список» →
+                # yumi-wide, вертикальные → yumi. Выбор стиля меняет композицию, оформление общее.
+                style_1 | style_4 | style_6 | style_8 | style_9 | style_11 | style_12)
+                    args[i]=-theme; args[i + 1]="${yumi%/*}/yumi-wide.rasi"; use=1 wide=1; continue ;;
+                style_[0-9]* | clipboard | notification | steam_deck | gamelauncher_*) ;;
+                selector) [[ "$caller" == *rofiselect* ]] || continue ;;
+                *) continue ;;
+            esac
+            args[i]=-theme; args[i + 1]="$yumi"; use=1 ;;
+        -show) mode="${args[i + 1]}" ;;
+        -p) prompt="${args[i + 1]}" ;;
+    esac
+done
+((use)) || exec /usr/bin/rofi "${pre[@]}" "$@"
+
+# Размеры: шрифт как у GTK-меню (11pt × множитель монитора) с поправкой на DPI rofi
+k="${UI[$mon]:-${scale:-1}}"
+dpi="${DPI[$mon]:-96}"
+read -r F T S G B < <(awk -v k="$k" -v d="$dpi" 'BEGIN{
+    f = 11 * k * 96 / d
+    b = int(2 * k + 0.5); if (b < 1) b = 1
+    printf "%.1f %.1f %.1f %.1f %d\n", f, f * 17 / 11, f * 10 / 11, f * 1.75, b }')
+
+font="JetBrainsMono Nerd Font"
+title="" sub="" ph="Поиск" extra="" post=()
+grid="listview {columns: 7; lines: 5; spacing: 0.4em; flow: horizontal; fixed-columns: true;}
+      element {orientation: vertical; padding: 0.25em 0; children: [element-text];}
+      element-text {horizontal-align: 0.5; font: \"$font $G\";}"
+case "$caller" in
+    *rofilaunch*)
+        case "$mode" in
+            filebrowser) title="󰉋  Файлы";      sub="Enter — открыть · Esc — закрыть" ;;
+            window)      title="  Окна";       sub="Enter — перейти · Esc — закрыть" ;;
+            run)         title="  Команды";    sub="Enter — выполнить · Esc — закрыть" ;;
+            *)           title="󰀻  Приложения"; sub="Enter — запустить · Esc — закрыть" ;;
+        esac ;;
+    *emoji-picker*)
+        title="󰞅  Эмодзи"; sub="Enter — вставить"; ph="Поиск: smile, heart…"
+        post=(-display-columns 1 -display-column-separator " "); extra="$grid" ;;
+    *glyph-picker*)
+        title="󰛖  Глифы"; sub="Значки Nerd Font · Enter — вставить"; ph="Поиск по имени значка"
+        post=(-display-columns 1); extra="$grid" ;;
+    *keybinds_hint*)
+        title="󰌌  Горячие клавиши"; sub="Enter — выполнить действие"; ph="Поиск по клавишам и действиям"
+        extra="window {width: 34em; height: 0;} listview {columns: 1; lines: 11;}" ;;
+    *calculator*)
+        title="󰃬  Калькулятор"; sub="Enter — скопировать результат"; ph="Выражение, например 2+2*3"
+        extra="window {width: 24em; height: 0;} listview {columns: 1; lines: 6;}" ;;
+    *websearch*)
+        title="󰖟  Поиск в сети"; sub="Выберите поисковик или введите запрос"; ph="Поисковик или запрос"
+        extra="window {width: 24em; height: 0;} listview {columns: 1; lines: 9;}" ;;
+    *rofiselect*)
+        title="󰕰  Стиль лаунчера"; sub="Enter — выбрать оформление SUPER+A"; ph="Поиск стиля"
+        extra="window {width: 44em; height: 0;}
+               listview {columns: 4; lines: 2; spacing: 0.5em; flow: horizontal;}
+               element {orientation: vertical; padding: 0.5em; spacing: 0.3em; children: [element-icon, element-text];}
+               element-icon {size: 5.5em; horizontal-align: 0.5;}
+               element-text {horizontal-align: 0.5;}" ;;
+    *animations*)
+        title="󰔡  Анимации"; sub="Enter — применить набор анимаций"; ph="Поиск анимаций" ;;
+    *hyprlock*)
+        title="󰌾  Экран блокировки"; sub="Макет · Enter — применить"; ph="Поиск макета" ;;
+    *gamelauncher*)
+        title="󰊴  Игры"; sub="Enter — запустить"; ph="Поиск игры"
+        extra="window {width: 24em; height: 0; background-image: none;} mainbox {padding: 0;}
+               listview {columns: 1; lines: 8; layout: vertical; flow: vertical;}
+               element {orientation: horizontal; children: [element-icon, element-text];}
+               element-icon {size: 1.6em; border-radius: 0.4em;}
+               element-text {horizontal-align: 0;}" ;;
+    *)
+        title="${prompt:-Меню}" ;;
+esac
+
+# Короткие списки (dmenu): окно по числу пунктов. Высоту окна после показа менять нельзя —
+# Hyprland сжимает картинку XWayland-окна, — поэтому число строк задаём заранее.
+fewer="" input="" cut_rows=0
+if [[ " ${args[*]} " == *" -dmenu "* && ! -t 0 ]]; then
+    # во временный файл, а не в переменную: в пунктах бывают байты \0 (значки \0icon\x1f…)
+    input="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/rofi-yumi.XXXXXX")"
+    cat >"$input"
+    n=$(grep -c '' "$input")
+    L=$(printf '%s\n' "$extra" "${args[@]}" | grep -o 'lines: *[0-9]*' | tail -n1 | grep -o '[0-9]*')
+    C=$(printf '%s\n' "$extra" | grep -o 'columns: *[0-9]*' | tail -n1 | grep -o '[0-9]*')
+    L=${L:-9} C=${C:-1}
+    rows=$(((n + C - 1) / C)); ((rows < 1)) && rows=1
+    if ((rows < L)); then
+        fewer="listview {lines: $rows;}"
+        cut_rows=$((L - rows))
+    fi
 fi
-exec /usr/bin/rofi "$@"
+
+# Положение. rofi через XWayland на мониторе с масштабом ≠ 1 центрирует окно неверно
+# (считает монитор 1920×1080, а координаты окна — в логических px при размере в физических).
+# Поэтому там ставим окно сами: ширина и высота (оценка по числу строк) в физических px,
+# смещение — в логических. W — ширина в em, hr — высота окна в размерах шрифта (замер).
+W=21 hr=42
+case "$caller" in
+    *rofilaunch*)    [[ "$mode" == filebrowser ]] && hr=49 || hr=46
+                     ((wide)) && W=44 hr=34 ;;
+    *emoji-picker* | *glyph-picker*) hr=34 ;;
+    *keybinds_hint*) W=34 hr=48 ;;
+    *calculator*)    W=24 hr=36 ;;
+    *websearch*)     W=24 hr=42 ;;
+    *rofiselect*)    W=44 hr=35 ;;
+    *gamelauncher*)  W=24 hr=40 ;;
+esac
+((cut_rows > 0)) && hr=$(awk -v h="$hr" -v c="$cut_rows" 'BEGIN{printf "%d", h - c * 3.5}')
+if [[ "$caller" == *rofi-panel* ]]; then
+    pos=""   # rofi-panel ставит окно сам (под значком Waybar / у курсора / по центру)
+elif [[ -n "$mon" && "$scale" != 1 && "$scale" != 1.0 ]]; then
+    read -r px py < <(hyprctl -j monitors 2>/dev/null | jq -r --arg m "$mon" '.[] | select(.name == $m) | "\(.width / .scale) \(.height / .scale)"' |
+        awk -v f="$F" -v d="$dpi" -v s="$scale" -v w="$W" -v h="$hr" '{
+            fpx = f * d / 72; x = ($1 - w * fpx * 1.364 / s) / 2; y = ($2 - h * fpx / s) / 2
+            if (x < 0) x = 0; if (y < 48) y = 48; printf "%d %d\n", x, y }')
+    pos="window {location: north west; anchor: north west; x-offset: ${px:-0}px; y-offset: ${py:-0}px;}"
+else
+    pos="window {location: center; anchor: center; x-offset: 0; y-offset: 0;}"
+fi
+
+# Игры: оформление steam_deck из gamelauncher.sh не разбирается rofi 1.7.5
+# (url в одинарных кавычках, высота без единиц) — его -theme-str не передаём.
+if [[ "$caller" == *gamelauncher* ]]; then
+    clean=()
+    for ((i = 0; i < ${#args[@]}; i++)); do
+        [[ "${args[i]}" == -theme-str ]] && { ((i++)); continue; }
+        clean+=("${args[i]}")
+    done
+    args=("${clean[@]}")
+    post+=(-show-icons)
+fi
+
+q() { printf '%s' "${1//\"/\\\"}"; }
+# Строки со значками Nerd Font вне BMP rofi 1.7 разбирает правильно, только если такая
+# строка одна в линии, — поэтому свойства со строками ниже стоят каждое на своей линии.
+final="* {font: \"$font $F\";}
+window {border: ${B}px; border-radius: 1.55em;}
+listview {border-radius: 0;}
+entry {
+  border-radius: 0;
+  placeholder: \"$(q "$ph")\";
+}
+wallbox {border-radius: 0;}
+element {border-radius: 0.85em;}
+textbox-title {
+  font: \"$font ExtraBold $T\";
+  content: \"$(q "$title")\";
+}
+$pos
+textbox-sub {
+  font: \"$font $S\";
+  content: \"$(q "$sub")\";
+}
+$extra
+$fewer"
+
+# Живой акцент yumi-accent (меняется вместе с обоями). Нет файла — остаётся акцент wallbash.
+acc_dir="${XDG_CACHE_HOME:-$HOME/.cache}/yumi-accent"
+accent=()
+if [[ -f "$acc_dir/accent.rasi" ]]; then
+    accent=(-theme-str "@import \"$acc_dir/accent.rasi\"")
+    read -r -a xa <"$acc_dir/accent.txt" 2>/dev/null
+    if [[ "${xa[6]}" =~ ^[0-9A-Fa-f]{6}$ ]]; then
+        a="#${xa[6]}"
+        accent+=(-theme-str "* {yr-sel: ${a}38; yr-sel-br: ${a}99; yr-entry-br: ${a}59;}")
+    fi
+    read -r deep _ <"$acc_dir/bg.txt" 2>/dev/null
+    if [[ "$deep" =~ ^[0-9A-Fa-f]{6}$ ]]; then
+        d="#$deep"
+        accent+=(-theme-str "shade {background-image: linear-gradient(to bottom, ${d}00, ${d}26, ${d}F0);}")
+    fi
+fi
+
+cmd=(/usr/bin/rofi "${pre[@]}" -font "$font $F" "${args[@]}" "${post[@]}" "${accent[@]}" -theme-str "$final")
+if [[ -n "$input" ]]; then
+    exec 0<"$input"
+    rm -f "$input"
+fi
+exec "${cmd[@]}"

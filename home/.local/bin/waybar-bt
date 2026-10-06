@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Пилюля Bluetooth (вместо встроенного bluetooth): выкл / вкл / подключено, в подсказке устройства с батареей.
+# Сигнал RTMIN+17 — обновить сразу.
+export LANG=C.UTF-8 LC_ALL=C.UTF-8
+esc() { local s=${1//&/&amp;}; s=${s//</&lt;}; printf '%s' "${s//\"/\\\"}"; }
+if ! busctl get-property org.bluez /org/bluez/hci0 org.bluez.Adapter1 Powered 2>/dev/null | grep -q true; then
+    printf '{"text":"󰂲","tooltip":"Bluetooth выключен","class":"off"}\n'; exit
+fi
+mapfile -t devs < <(bluetoothctl devices Connected 2>/dev/null | awk '/^Device/{print $2}')
+if [ ${#devs[@]} -eq 0 ]; then
+    printf '{"text":"󰂯","tooltip":"Bluetooth включён · нет подключений","class":"on"}\n'; exit
+fi
+tip="<b>Подключено: ${#devs[@]}</b>"
+for mac in "${devs[@]}"; do
+    info=$(bluetoothctl info "$mac" 2>/dev/null)
+    name=$(awk -F': ' '/^\s*Alias:/{print $2; exit}' <<< "$info")
+    bat=$(grep -oP 'Battery Percentage:.*\(\K[0-9]+' <<< "$info" | head -1)
+    tip+="\\n$(esc "${name:-$mac}")${bat:+ · 󰁹 $bat%}"
+done
+printf '{"text":"󰂱","tooltip":"%s","class":"connected"}\n' "$tip"

@@ -5,7 +5,7 @@
     "height": 10,
     "exclusive": true,
     "passthrough": false,
-    "reload_style_on_change": true,
+    "reload_style_on_change": false,   // стиль применяется перезапуском после смены обоев (утечка памяти при перечитывании)
     "include": [
         "$XDG_CONFIG_HOME/waybar/modules/*json*",
         "$XDG_CONFIG_HOME/waybar/includes/includes.json"
@@ -23,25 +23,42 @@
     },
     "group/pill#left2": {
         "orientation": "inherit",
-        "modules": ["cpu", "memory", "custom/top"]
+        "modules": ["cpu", "custom/top"]
     },
 
     // ===== Центр =====
-    "modules-center": ["custom/player"],
+    "modules-center": ["group/pill#player"],
+    "group/pill#player": {
+        "orientation": "inherit",
+        "modules": ["image#player-cover", "custom/player-text"]
+    },
 
     // ===== Справа =====
-    "modules-right": ["group/pill#mouse", "group/pill#right1", "group/pill#right2", "group/pill#right3", "group/pill#right4"],
+    "modules-right": ["group/pill#tray", "group/pill#right1", "group/pill#right2", "group/pill#right3", "group/pill#right4"],
+    "group/pill#tray": {
+        "orientation": "inherit",
+        "modules": ["custom/tray"]
+    },
+    "custom/tray": {
+        "exec": "@HOME@/.local/bin/waybar-iconwrap @HOME@/.local/bin/yumi-tray bar",
+        "return-type": "json",
+        "restart-interval": 3,
+        "format": "{}",
+        "on-click": "@HOME@/.local/bin/yumi-menu-tray",
+        "on-click-middle": "@HOME@/.local/bin/yumi-tray activate",
+        "on-click-right": "@HOME@/.local/bin/yumi-tray activate"
+    },
     "group/pill#mouse": {
         "orientation": "inherit",
         "modules": ["custom/mouse"]
     },
     "group/pill#right1": {
         "orientation": "inherit",
-        "modules": ["custom/swaync", "custom/updates", "custom/clip"]
+        "modules": ["custom/updates", "custom/swaync", "custom/clip"]
     },
     "group/pill#right2": {
         "orientation": "inherit",
-        "modules": ["custom/lang", "custom/vpn", "idle_inhibitor", "network", "bluetooth", "pulseaudio"]
+        "modules": ["custom/lang", "custom/vpn", "custom/caffeine", "custom/wifi", "custom/bt", "pulseaudio"]
     },
     "group/pill#right3": {
         "orientation": "inherit",
@@ -54,31 +71,42 @@
 
     // ===== Настройки модулей =====
     "custom/archlogo": {
+        "on-click": "@HOME@/.local/bin/yumi-menu-system",
         "format": "󰣇",
         "tooltip": false
     },
     "cpu": {
-        "format": "󰍛 {usage}%",
+        "format": "<span size='130%' rise='-1200' font_family='JetBrainsMono Nerd Font Propo'>󰍛</span> {usage}%",
+        "min-length": 5,                 // restyle: ширина под 2 цифры, не прыгает
         "interval": 5,
-        "on-click": "@HOME@/.local/bin/menu-top"
+        "on-click": "@HOME@/.local/bin/yumi-menu-top"
     },
     "memory": {
-        "format": "󰘚 {used:0.1f}G",
+        "format": "<span size='130%' rise='-1200' font_family='JetBrainsMono Nerd Font Propo'>󰘚</span> {used:0.1f}G",
+        "min-length": 6, "max-length": 12,   // restyle: без «…» на eDP
         "interval": 10,
-        "on-click": "@HOME@/.local/bin/menu-top"
+        "on-click": "@HOME@/.local/bin/yumi-menu-top"
     },
     "custom/top": {
-        "exec": "@HOME@/.local/bin/waybar-top",
+        "exec": "@HOME@/.local/bin/waybar-iconwrap @HOME@/.local/bin/waybar-pillfmt mem",
         "return-type": "json",
         "interval": 10,
         "signal": 12,
         "format": "{}",
-        "on-click": "@HOME@/.local/bin/menu-top"
+        "on-click": "@HOME@/.local/bin/yumi-menu-top"
     },
     "clock": {
-        "format": "{:%H:%M · %d.%m}"
+        "format": "{:%H:%M · %d.%m}",
+        "format-alt": "{:%H:%M · %d.%m}",   // формат зафиксирован: клик больше не переключает вид
+        "on-click": "@HOME@/.local/bin/yumi-menu-calendar",
+        "tooltip-format": "{:%A, %d %B %Y}"
+    },
+    "custom/updates": {                               // yumi: модуль HyDE, но клик — наше системное меню (там «Обновить систему»)
+        "on-click": "@HOME@/.local/bin/yumi-menu-system",
+        "menu": ""
     },
     "custom/swaync": {
+        "menu": "",                                    // yumi: без встроенного меню Waybar по правому клику
         "exec": "@HOME@/.local/bin/cc-bar",
         "exec-if": "pgrep -x swaync",
         "return-type": "json",
@@ -86,74 +114,125 @@
         "on-click": "@HOME@/.local/bin/cc-open"
     },
     "custom/clip": {
-        "format": "󰅌",
+        "format": "<span size='130%' rise='-1200' font_family='JetBrainsMono Nerd Font Propo'>󰅌</span>",
         "tooltip-format": "Буфер обмена",
-        "on-click": "@HOME@/.local/bin/menu-clipboard"
+        "on-click": "@HOME@/.local/bin/yumi-menu-clipboard"
     },
     "custom/lang": {
-        "exec": "@HOME@/.local/bin/waybar-lang",
+        "exec": "@HOME@/.local/bin/waybar-iconwrap @HOME@/.local/bin/waybar-lang",
         "return-type": "json",
         "format": "{}",
-        "on-click": "hyprctl switchxkblayout all next"
+        "on-click": "@HOME@/.local/bin/kb-switch"
+    },
+    "custom/caffeine": {
+        "exec": "@HOME@/.local/bin/waybar-iconwrap @HOME@/.local/bin/waybar-caffeine",
+        "return-type": "json",
+        "interval": 30,
+        "signal": 15,
+        "on-click": "@HOME@/.local/bin/cc caffeine toggle"
+    },
+    "custom/wifi": {
+        "exec": "@HOME@/.local/bin/waybar-iconwrap @HOME@/.local/bin/waybar-wifi",
+        "return-type": "json",
+        "interval": 5,
+        "signal": 16,
+        "on-click": "@HOME@/.local/bin/yumi-menu-wifi"
+    },
+    "custom/bt": {
+        "exec": "@HOME@/.local/bin/waybar-iconwrap @HOME@/.local/bin/waybar-bt",
+        "return-type": "json",
+        "interval": 5,
+        "signal": 17,
+        "on-click": "@HOME@/.local/bin/yumi-menu-bluetooth"
     },
     "network": {
-        "on-click": "@HOME@/.local/bin/menu-network",
+        "on-click": "@HOME@/.local/bin/yumi-menu-wifi",
         "format-alt-click": "click-middle"
     },
     "bluetooth": {
-        "on-click": "@HOME@/.local/bin/menu-bluetooth"
+        "on-click": "@HOME@/.local/bin/yumi-menu-bluetooth"
     },
     "pulseaudio": {
-        "on-click": "@HOME@/.local/bin/menu-sound",
-        "format-bluetooth": "󱡏 {volume}%",
-        "format-bluetooth-muted": "󱡏 󰝟"
+        "on-click-right": "@HOME@/.local/bin/yumi-menu-sound",   // yumi: вместо окна hyprland-dialog
+        "on-click": "@HOME@/.local/bin/yumi-menu-sound",
+        "format": "<span size='130%' rise='-1200' font_family='JetBrainsMono Nerd Font Propo'>{icon}</span> {volume}%",    // restyle
+        "format-muted": "<span size='130%' rise='-1200' font_family='JetBrainsMono Nerd Font Propo'>󰝟</span>",             // restyle: вместо старого «婢»
+        "min-length": 6,                 // restyle
+        "format-bluetooth": "<span size='130%' rise='-1200' font_family='JetBrainsMono Nerd Font Propo'>󱡏</span> {volume}%",
+        "format-bluetooth-muted": "<span size='130%' rise='-1200' font_family='JetBrainsMono Nerd Font Propo'>󱡏 󰝟</span>"
     },
     "battery": {
+        "format": "<span size='130%' rise='-1200' font_family='JetBrainsMono Nerd Font Propo'>{icon}</span> {capacity}%",
+        "format-charging": "<span size='130%' rise='-1200' font_family='JetBrainsMono Nerd Font Propo'>󰂄</span> {capacity}%",
+        "format-plugged": "<span size='130%' rise='-1200' font_family='JetBrainsMono Nerd Font Propo'>󰚥</span> {capacity}%",
         "states": { "good": 80, "warning": 30, "critical": 15 },
-        "on-click": "@HOME@/.local/bin/menu-power-profile",
+        "min-length": 6,                 // restyle
+        "on-click": "@HOME@/.local/bin/yumi-menu-power",
         "format-alt-click": "click-middle"
     },
     "custom/powerprofile": {
-        "exec": "@HOME@/.local/bin/waybar-ppd",
+        "exec": "@HOME@/.local/bin/waybar-iconwrap @HOME@/.local/bin/waybar-ppd",
         "return-type": "json",
         "interval": 2,
         "signal": 8,
         "format": "{}",
-        "on-click": "@HOME@/.local/bin/menu-power-profile"
+        "on-click": "@HOME@/.local/bin/yumi-menu-power"
     },
     "custom/workflow": {
-        "exec": "@HOME@/.local/bin/waybar-workflow",
+        "exec": "@HOME@/.local/bin/waybar-iconwrap @HOME@/.local/bin/waybar-workflow",
         "return-type": "json",
         "interval": 5,
         "signal": 9,
         "format": "{}",
-        "on-click": "@HOME@/.local/bin/menu-workflows"
+        "on-click": "@HOME@/.local/bin/yumi-menu-power"
     },
     "custom/vpn": {
-        "exec": "@HOME@/.local/bin/waybar-vpn",
+        "exec": "@HOME@/.local/bin/waybar-iconwrap @HOME@/.local/bin/waybar-vpn",
         "return-type": "json",
         "interval": 5,
         "signal": 10,
         "format": "{}",
-        "on-click": "@HOME@/.local/bin/menu-network"
+        "on-click": "@HOME@/.local/bin/yumi-menu-vpn"
     },
-    "custom/player": {
-        "exec": "@HOME@/.local/bin/waybar-player",
-        "restart-interval": 3,
+    // Плеер: одна пилюля из двух модулей — круглая обложка + «Название — Артист  1:23/3:39».
+    // Обложку рисует waybar-player-cover (PNG с кругом, кольцо акцента пока играет), её будит сигнал 14
+    // от waybar-player-pill. Ничего не играет — скрыты оба модуля, а у #pill.player нет своих отступов,
+    // поэтому пустая группа нулевой ширины и пузыря не видно.
+    // Клик — окно yumi-player под пилюлей, средняя — пауза, правая — следующий трек, колесо — перемотка
+    "image#player-cover": {
+        "exec": "@HOME@/.local/bin/waybar-player-cover",
+        "signal": 14,
+        "interval": 5,
+        "size": 22,
+        "tooltip": false,
+        "on-click": "@HOME@/.local/bin/yumi-player toggle --bar",
+        "on-click-middle": "playerctl play-pause",
+        "on-click-right": "playerctl next",
+        "on-scroll-up": "playerctl position 5+",
+        "on-scroll-down": "playerctl position 5-"
+    },
+    "custom/player-text": {
+        "exec": "@HOME@/.local/bin/waybar-iconwrap @HOME@/.local/bin/waybar-player-pill",
         "return-type": "json",
+        "restart-interval": 3,
         "format": "{}",
-        "on-click": "@HOME@/.local/bin/menu-player",
-        "on-click-middle": "playerctl play-pause"
+        "on-click": "@HOME@/.local/bin/yumi-player toggle --bar",
+        "on-click-middle": "playerctl play-pause",
+        "on-click-right": "playerctl next",
+        "on-scroll-up": "playerctl position 5+",
+        "on-scroll-down": "playerctl position 5-"
     },
     "custom/mouse": {
-        "exec": "@HOME@/.local/bin/waybar-mouse",
+        "exec": "@HOME@/.local/bin/waybar-iconwrap @HOME@/.local/bin/waybar-mouse",
         "return-type": "json",
         "interval": 60,
         "signal": 13,
         "format": "{}",
-        "on-click": "@HOME@/.local/bin/menu-mouse"
+        "on-click": "@HOME@/.local/bin/yumi-menu-mouse"
     },
     "custom/power": {
-        "on-click": "@HOME@/.local/bin/powermenu"
+        "menu": "",                                    // yumi: у HyDE тут меню-заглушка без файла
+        "tooltip-format": "Питание системы",   // restyle
+        "on-click": "@HOME@/.local/bin/yumi-menu-session"
     }
 }

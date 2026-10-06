@@ -1,0 +1,518 @@
+#!/usr/bin/env python3
+"""yumi-menu-wallpaper — выбор обоев на GTK (каркас yumi-panel, замена rofi `hyde-shell wallpaper -GS`).
+  yumi-menu-wallpaper [--center|--bar]   открыть / закрыть (--center — по центру, для бинда SUPER+SHIFT+W)
+  yumi-menu-wallpaper --close            закрыть открытое меню
+Обои — из папки темы HyDE (~/.config/hyde/themes/<тема>/wallpapers, ~/Pictures/Wallpapers — ссылка на неё).
+Миниатюры — готовые HyDE (~/.cache/hyde/thumbs/<sha1>.thmb); нет миниатюры — уменьшенная копия файла (в памяти).
+Хэши sha1 запоминаются в ~/.cache/yumi-panel/wall-hashes.json (путь+размер+время изменения).
+Применение — та же команда, что у меню HyDE: `hyde-shell wallpaper -G -s ФАЙЛ`
+(ссылки wall.set/thmb/sqre…, кэш, wallbash-цвета, фон hyprlock). «Случайные» — случайный файл тем же путём.
+Клавиши: печать — поиск, стрелки — выбор, Enter — применить, Esc — закрыть.
+
+Отладка:
+  YP_DRYRUN=1          обои не меняются, папка не открывается: команда пишется в stderr, меню имитирует результат
+  YP_WP_SEARCH=текст   сразу ввести текст в поиск (для снимков)
+  YP_WP_HOVER=N        подсветить N-ю плитку как при наведении (для снимков)
+  YP_WP_ACT=apply:N | random | folder    через 1 с «нажать» плитку N / кнопку
+  YP_WP_KEYS="Down,Right,Return"   прогнать клавиши через обработчик (только с YP_DRYRUN=1)
+  YP_WP_DIR=папка      взять обои из другой папки (проверка на большом числе файлов)
+  YP_WP_DEBUG=1        в stderr: время загрузки миниатюр и самая долгая пауза главного цикла (замирание окна)
+Откат: удалить этот файл и ~/.cache/yumi-panel/wall-hashes.json"""
+import hashlib
+import json
+import os
+import random
+import shutil
+import subprocess
+import sys
+import threading
+import warnings
+
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-panel"))
+import yumipanel as yp  # noqa: E402  (сам перезапускает процесс с layer-shell)
+from yumipanel import Gtk, Gdk, GLib, Pango  # noqa: E402
+import gi  # noqa: E402
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import GdkPixbuf  # noqa: E402
+
+DRY = yp.DRY
+HOME = os.path.expanduser("~")
+CACHE = os.path.join(HOME, ".cache/hyde")
+THUMBS = os.path.join(CACHE, "thumbs")
+WALL_SET = os.path.join(CACHE, "wall.set")
+HASH_DB = os.path.join(HOME, ".cache/yumi-panel/wall-hashes.json")
+HYDE_SHELL = shutil.which("hyde-shell") or os.path.join(HOME, ".local/bin/hyde-shell")
+EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp")   # как у HyDE (+webp, если задан в WALLPAPER_FILETYPES)
+
+WIDTH = 720           # шире обычного меню: сетка 4 в ряд (логические px; на DP-1 каркас ×0.8)
+COLS = 4
+GAP = 10
+TILE_W = (WIDTH - 2 * 16 - (COLS - 1) * GAP - 14) // COLS     # тело с отступами 16 + место под полосу прокрутки
+TILE_H = round(TILE_W * 9 / 16)
+GRID_H = 3 * (TILE_H + GAP) + TILE_H // 2                    # видно 3,5 ряда — понятно, что есть ещё
+
+CSS = """
+.yp-wp-tools { margin: 0 0 2px 0; }
+.yp-wp-search { min-height: 22px; }
+.yp-wp-scroll { background: none; }
+.yp-wp-grid { background: none; padding: 2px; }
+.yp-wp-grid flowboxchild { padding: 0; margin: 0; background: none; border-radius: 14px; outline: none; }
+.yp-wp-tile {
+  border-radius: 14px; background: @yp-btn;
+}
+.yp-wp-pic { border-radius: 14px; }
+.yp-wp-veil { border-radius: 14px; background: alpha(@yp-on-acc, 0); box-shadow: inset 0 0 0 2px transparent;
+               transition: background 150ms, box-shadow 150ms; }   /* рамка — поверх картинки */
+.yp-wp-name {
+  font-size: 8.5pt; font-weight: 700; color: @yp-fg; padding: 14px 8px 5px 8px;
+  border-radius: 0 0 14px 14px;
+  background: linear-gradient(to bottom, alpha(@yp-on-acc, 0), alpha(@yp-on-acc, 0.85));
+  opacity: 0; transition: opacity 150ms;
+}
+.yp-wp-check {
+  min-width: 22px; min-height: 22px; margin: 6px; border-radius: 11px;
+  background: @yp-accent; color: @yp-on-acc; font-size: 10pt;
+}
+.yp-wp-wait { color: alpha(@yp-fg2, 0.45); font-size: 16pt; }
+.yp-wp-grid flowboxchild:hover .yp-wp-veil,
+.yp-wp-grid flowboxchild.hover .yp-wp-veil { background: alpha(@yp-fg, 0.06); box-shadow: inset 0 0 0 2px alpha(@yp-fg, 0.6); }
+.yp-wp-grid flowboxchild:hover .yp-wp-name,
+.yp-wp-grid flowboxchild.hover .yp-wp-name,
+.yp-wp-grid flowboxchild:focus .yp-wp-name { opacity: 1; }
+.yp-wp-grid flowboxchild:focus .yp-wp-veil { box-shadow: inset 0 0 0 2px @yp-fg; }
+.yp-wp-grid flowboxchild.current .yp-wp-veil { box-shadow: inset 0 0 0 3px @yp-accent; }
+.yp-wp-grid flowboxchild.current:hover .yp-wp-veil,
+.yp-wp-grid flowboxchild.current.hover .yp-wp-veil,
+.yp-wp-grid flowboxchild.current:focus .yp-wp-veil { box-shadow: inset 0 0 0 3px @yp-accent, inset 0 0 0 5px alpha(@yp-fg, 0.55); }
+.yp-wp-grid flowboxchild.applying .yp-wp-veil { background: alpha(@yp-on-acc, 0.5); }
+.yp-wp-empty { color: alpha(@yp-fg2, 0.7); font-size: 10.5pt; margin: 30px; }
+.yp-wp-btns .yp-action { padding: 8px 14px; }
+"""
+
+
+def theme_dir():
+    """Папка обоев текущей темы HyDE: из ссылки ~/.config/hyde/themes/<тема>/wall.set или по wall.set."""
+    if os.environ.get("YP_WP_DIR"):
+        return os.environ["YP_WP_DIR"]
+    cur = os.path.realpath(WALL_SET)
+    d = os.path.dirname(cur)
+    if os.path.basename(d) == "wallpapers" and os.path.isdir(d):
+        return d
+    try:
+        theme = ""
+        with open(os.path.join(HOME, ".local/state/hyde/staterc")) as f:
+            for line in f:
+                if line.startswith("HYDE_THEME="):
+                    theme = line.split("=", 1)[1].strip().strip('"')
+        d = os.path.join(HOME, ".config/hyde/themes", theme, "wallpapers")
+        if theme and os.path.isdir(d):
+            return d
+    except OSError:
+        pass
+    return os.path.join(HOME, "Pictures/Wallpapers")
+
+
+def list_walls(d):
+    """Как find -H … | sort -k2 у HyDE: все картинки в папке (с подпапками, кроме */logo/*), по пути."""
+    out = []
+    for root, dirs, files in os.walk(os.path.realpath(d)):
+        dirs[:] = [x for x in dirs if x != "logo"]
+        out += [os.path.join(root, f) for f in files if f.lower().endswith(EXTS)]
+    return sorted(out)
+
+
+def nice_name(path):
+    return os.path.splitext(os.path.basename(path))[0]
+
+
+class Hashes:
+    """sha1 файлов обоев (имя миниатюр HyDE), с кэшем по размеру и времени изменения."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.dirty = False
+        try:
+            with open(HASH_DB) as f:
+                self.db = json.load(f)
+        except (OSError, ValueError):
+            self.db = {}
+
+    def get(self, path):
+        try:
+            st = os.stat(path)
+        except OSError:
+            return None
+        key = f"{st.st_size}:{int(st.st_mtime)}"
+        with self.lock:
+            rec = self.db.get(path)
+        if rec and rec[0] == key:
+            return rec[1]
+        h = hashlib.sha1()
+        try:
+            with open(path, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    h.update(chunk)
+        except OSError:
+            return None
+        with self.lock:
+            self.db[path] = [key, h.hexdigest()]
+            self.dirty = True
+        return h.hexdigest()
+
+    def save(self, keep):
+        with self.lock:
+            if not self.dirty:
+                return
+            db = {p: v for p, v in self.db.items() if p in keep}
+        try:
+            os.makedirs(os.path.dirname(HASH_DB), exist_ok=True)
+            tmp = HASH_DB + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(db, f)
+            os.replace(tmp, HASH_DB)
+        except OSError:
+            pass
+
+
+class Tile(Gtk.FlowBoxChild):
+    def __init__(self, path, k):
+        super().__init__()
+        self.path = path
+        self.name = nice_name(path)
+        self.key = os.path.basename(path).casefold()
+        w, h = round(TILE_W * k), round(TILE_H * k)
+        box = Gtk.Overlay(css_classes=["yp-wp-tile"])
+        box.set_overflow(Gtk.Overflow.HIDDEN)
+        sizer = Gtk.Box()
+        sizer.set_size_request(w, h)
+        box.set_child(sizer)
+        self.wait = Gtk.Label(label="󰋩", css_classes=["yp-wp-wait"])
+        box.add_overlay(self.wait)
+        self.pic = Gtk.Picture(content_fit=Gtk.ContentFit.COVER, can_shrink=True, css_classes=["yp-wp-pic"])
+        box.add_overlay(self.pic)
+        box.set_measure_overlay(self.pic, False)
+        box.add_overlay(Gtk.Box(css_classes=["yp-wp-veil"]))
+        self.label = Gtk.Label(label=self.name, valign=Gtk.Align.END, xalign=0, css_classes=["yp-wp-name"],
+                               ellipsize=Pango.EllipsizeMode.MIDDLE, max_width_chars=1)
+        box.add_overlay(self.label)
+        self.check = Gtk.Label(label="󰄬", halign=Gtk.Align.END, valign=Gtk.Align.START,
+                               css_classes=["yp-wp-check"], visible=False)
+        box.add_overlay(self.check)
+        self.spin = Gtk.Spinner(spinning=False, visible=False, halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
+        self.spin.set_size_request(round(28 * k), round(28 * k))
+        box.add_overlay(self.spin)
+        self.set_child(box)
+        self.set_tooltip_text(os.path.basename(path))
+
+    def set_texture(self, tex):
+        self.pic.set_paintable(tex)
+        self.wait.set_visible(False)
+
+    def set_current(self, on):
+        (self.add_css_class if on else self.remove_css_class)("current")
+        self.check.set_visible(on)
+
+    def set_applying(self, on):
+        (self.add_css_class if on else self.remove_css_class)("applying")
+        self.spin.set_visible(on)
+        self.spin.set_spinning(on)
+
+
+class Wallpapers:
+    def __init__(self, panel, body):
+        self.panel, self.body = panel, body
+        self.k = panel.k
+        self.dir = theme_dir()
+        self.current = os.path.realpath(WALL_SET)
+        self.applying = None
+        self.tiles = []
+        self.query = ""
+        self.stop = threading.Event()
+        panel.add_css(CSS)
+        panel.on_key_hook = self.on_key
+
+        # поиск + число обоев
+        self.search = Gtk.SearchEntry(placeholder_text="Поиск по имени", hexpand=True,
+                                      css_classes=["yp-entry", "yp-wp-search"])
+        self.search.connect("search-changed", self.on_search)
+        self.search.connect("activate", lambda *_: self.activate_selected())
+        self.search.set_key_capture_widget(panel)
+        body.append(self.search)
+
+        # сетка миниатюр
+        self.grid = Gtk.FlowBox(css_classes=["yp-wp-grid"], homogeneous=True, valign=Gtk.Align.START,
+                                min_children_per_line=COLS, max_children_per_line=COLS,
+                                column_spacing=round(GAP * self.k), row_spacing=round(GAP * self.k),
+                                selection_mode=Gtk.SelectionMode.SINGLE, activate_on_single_click=True)
+        self.grid.set_filter_func(self.filter)
+        self.grid.connect("child-activated", lambda _g, t: self.apply(t))
+        self.grid.connect("selected-children-changed", self.on_selected)
+        self.scroll = Gtk.ScrolledWindow(css_classes=["yp-wp-scroll"], hscrollbar_policy=Gtk.PolicyType.NEVER,
+                                         child=self.grid)
+        self.scroll.set_size_request(-1, round(GRID_H * self.k))
+        self.empty = Gtk.Label(label="Ничего не найдено", css_classes=["yp-wp-empty"], visible=False)
+        stack = Gtk.Overlay(child=self.scroll)
+        stack.add_overlay(self.empty)
+        body.append(stack)
+
+        # кнопки
+        btns = Gtk.Box(spacing=8, homogeneous=True, css_classes=["yp-wp-btns"])
+        btns.append(yp.action_button("󰒝  Случайные", lambda *_: self.random(), "primary"))
+        btns.append(yp.action_button("󰉋  Открыть папку", lambda *_: self.open_folder(), "plain"))
+        body.append(btns)
+
+        self.fill()
+        if os.environ.get("YP_WP_SEARCH"):
+            self.search.set_text(os.environ["YP_WP_SEARCH"])
+        if os.environ.get("YP_WP_ACT") or os.environ.get("YP_WP_HOVER") or os.environ.get("YP_WP_KEYS"):
+            GLib.timeout_add(1000, self.debug_act)
+
+    # ---------- список ----------
+    def fill(self):
+        paths = list_walls(self.dir)
+        cur_i = 0
+        for i, p in enumerate(paths):
+            t = Tile(p, self.k)
+            motion = Gtk.EventControllerMotion()
+            motion.connect("enter", lambda *_, t=t: self.on_hover(t))
+            motion.connect("leave", lambda *_: self.on_hover(None))
+            t.add_controller(motion)
+            if os.path.realpath(p) == self.current:
+                t.set_current(True)
+                cur_i = i
+            self.grid.append(t)
+            self.tiles.append(t)
+        self.subtitle()
+        if not self.tiles:
+            self.empty.set_label(f"В папке нет обоев\n{self.dir}")
+            self.empty.set_visible(True)
+            return
+        cur = self.tiles[cur_i]
+        self.grid.select_child(cur)
+        GLib.timeout_add(120, lambda: self.scroll_to(cur) or False)
+        # миниатюры — в потоке, начиная с рядов вокруг текущих обоев (их видно первыми)
+        start = max(cur_i - COLS * 2, 0)
+        order = self.tiles[start:] + self.tiles[:start]
+        if os.environ.get("YP_WP_DEBUG"):
+            self.t0, self.gap, self.last = GLib.get_monotonic_time(), 0, GLib.get_monotonic_time()
+            GLib.timeout_add(10, self.probe)
+        threading.Thread(target=self.loader, args=([(t, t.path) for t in order],), daemon=True).start()
+
+    def loader(self, jobs):
+        hashes = Hashes()
+        w = round(TILE_W * self.k * 2)           # запас под HiDPI (eDP-1 ×1.67)
+        h = round(TILE_H * self.k * 2)
+        batch = []
+        for tile, path in jobs:
+            if self.stop.is_set():
+                return
+            pb = None
+            hsh = hashes.get(path)
+            for src in ([os.path.join(THUMBS, f"{hsh}.thmb")] if hsh else []) + [path]:
+                if not os.path.exists(src):
+                    continue
+                try:
+                    pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(src, w, h * 4, True)   # по ширине
+                    break
+                except Exception:
+                    continue
+            if pb is not None:
+                batch.append((tile, pb))
+            if len(batch) >= 8:
+                GLib.idle_add(self.put, batch)
+                batch = []
+        if batch:
+            GLib.idle_add(self.put, batch)
+        if os.environ.get("YP_WP_DEBUG"):
+            GLib.idle_add(lambda: print(f"[wp] {len(jobs)} миниатюр за {(GLib.get_monotonic_time() - self.t0) / 1e6:.2f} с, "
+                                        f"макс. пауза главного цикла {self.gap / 1000:.0f} мс", file=sys.stderr, flush=True) and False)
+        if not os.environ.get("YP_WP_DIR"):          # тестовая папка не портит кэш
+            hashes.save({p for _t, p in jobs})
+
+    def put(self, batch):
+        warnings.filterwarnings("ignore", category=DeprecationWarning)   # new_for_pixbuf — самый простой путь
+        for tile, pb in batch:
+            tile.set_texture(Gdk.Texture.new_for_pixbuf(pb))
+        return False
+
+    def probe(self):
+        now = GLib.get_monotonic_time()
+        self.gap = max(self.gap, now - self.last - 10_000)
+        self.last = now
+        return True
+
+    def scroll_to(self, tile):
+        ok, pt = tile.compute_point(self.grid, gi.repository.Graphene.Point())
+        if ok:
+            adj = self.scroll.get_vadjustment()
+            target = pt.y - (adj.get_page_size() - tile.get_height()) / 2
+            adj.set_value(min(max(target, 0), adj.get_upper() - adj.get_page_size()))
+
+    # ---------- поиск ----------
+    def filter(self, tile):
+        return not self.query or self.query in tile.key
+
+    def on_search(self, entry):
+        self.query = entry.get_text().strip().casefold()
+        self.grid.invalidate_filter()
+        visible = [t for t in self.tiles if self.filter(t)]
+        self.empty.set_visible(bool(self.tiles) and not visible)
+        sel = self.grid.get_selected_children()
+        if visible and (not sel or sel[0] not in visible):
+            self.grid.select_child(visible[0])
+        self.scroll.get_vadjustment().set_value(0)
+        if visible and sel and sel[0] in visible:
+            GLib.timeout_add(60, lambda: self.scroll_to(sel[0]) or False)
+        self.subtitle(len(visible))
+
+    # ---------- подписи ----------
+    def subtitle(self, shown=None):
+        n = len(self.tiles)
+        cur = next((t.name for t in self.tiles if os.path.realpath(t.path) == self.current), "")
+        count = f"{n} обоев" if shown is None or shown == n else f"найдено {shown} из {n}"
+        self.base_sub = f"{count}  ·  󰄬 {cur}" if cur else count
+        self.panel.set_subtitle(self.base_sub, live=True)
+
+    def on_hover(self, tile):
+        self.panel.set_subtitle(f"󰋩  {tile.name}" if tile else self.base_sub, live=True)
+
+    def on_selected(self, _grid):
+        sel = self.grid.get_selected_children()
+        if sel and sel[0].has_focus():
+            self.panel.set_subtitle(f"󰋩  {sel[0].name}", live=True)
+
+    # ---------- клавиши ----------
+    def on_key(self, keyval):
+        name = Gdk.keyval_name(keyval) or ""
+        focus = self.panel.get_focus()
+        in_grid = focus is not None and (focus is self.grid or focus.get_parent() is self.grid)
+        if name in ("Down", "Up", "Left", "Right", "Page_Down", "Page_Up") and not in_grid:
+            if name in ("Left", "Right") and focus is not None and self.search.get_text():
+                return False                    # в поле с текстом стрелки двигают курсор
+            sel = self.grid.get_selected_children()
+            target = sel[0] if sel and self.filter(sel[0]) else next((t for t in self.tiles if self.filter(t)), None)
+            if target:
+                target.grab_focus()
+                self.scroll_to(target)
+            return True
+        if name in ("Return", "KP_Enter") and focus is None:
+            self.activate_selected()
+            return True
+        # внутри сетки — своя навигация (штатная FlowBox в layer-shell окне не срабатывала)
+        if in_grid and isinstance(focus, Tile):
+            step = {"Right": 1, "Left": -1, "Down": COLS, "Up": -COLS}.get(name)
+            if step:
+                vis = [t for t in self.tiles if self.filter(t)]
+                if focus in vis:
+                    i = min(max(vis.index(focus) + step, 0), len(vis) - 1)
+                    vis[i].grab_focus()
+                    self.grid.select_child(vis[i])
+                    self.scroll_to(vis[i])
+                return True
+            if name in ("Return", "KP_Enter"):
+                self.apply(focus)
+                return True
+        return False
+
+    def activate_selected(self):
+        sel = self.grid.get_selected_children()
+        if sel and self.filter(sel[0]):
+            self.apply(sel[0])
+
+    # ---------- действия ----------
+    def apply(self, tile):
+        if self.applying:
+            self.panel.toast("Подождите — обои ещё применяются…", hold=2)
+            return
+        if os.path.realpath(tile.path) == self.current:
+            self.panel.toast(f"Уже стоят: {tile.name}", hold=2)
+            return
+        self.applying = tile
+        self.panel.busy += 1
+        tile.set_applying(True)
+        self.panel.toast(f"Применяю: {tile.name}…", hold=60)
+        cmd = (HYDE_SHELL, "wallpaper", "-G", "-s", tile.path)
+        if DRY:
+            yp.do(*cmd)
+            GLib.timeout_add(900, lambda: self.applied(tile, True, "") or False)
+            return
+
+        def work():
+            ok, out = yp.do(*cmd, timeout=120)
+            GLib.idle_add(lambda: self.applied(tile, ok, out) or False)
+        threading.Thread(target=work, daemon=True).start()
+
+    def applied(self, tile, ok, out):
+        self.applying = None
+        self.panel.busy = max(self.panel.busy - 1, 0)
+        tile.set_applying(False)
+        if ok:
+            self.current = os.path.realpath(tile.path) if DRY else os.path.realpath(WALL_SET)
+            for t in self.tiles:
+                t.set_current(os.path.realpath(t.path) == self.current)
+            self.subtitle()
+            self.panel.toast(("[проверка] " if DRY else "") + f"󰄬 Обои: {tile.name}", hold=3)
+        else:
+            last = (out or "").strip().splitlines()[-1:] or ["ошибка"]
+            self.panel.toast(f"Не удалось: {last[0][:80]}", error=True, hold=6)
+
+    def random(self):
+        pool = [t for t in self.tiles if self.filter(t) and os.path.realpath(t.path) != self.current]
+        if not pool:
+            self.panel.toast("Нет других обоев", hold=2)
+            return
+        t = random.choice(pool)
+        self.grid.select_child(t)
+        self.scroll_to(t)
+        self.apply(t)
+
+    def open_folder(self):
+        cmd = ("xdg-open", self.dir)
+        if DRY:
+            yp.do(*cmd)
+            self.panel.toast("[проверка] открыть папку", hold=2)
+            return
+        yp.spawn(*cmd)
+        self.panel.app.quit()
+
+    def debug_act(self):
+        hov = os.environ.get("YP_WP_HOVER")
+        visible = [t for t in self.tiles if self.filter(t)]
+        if hov and hov.isdigit() and int(hov) < len(visible):
+            visible[int(hov)].add_css_class("hover")
+            self.on_hover(visible[int(hov)])
+        act = os.environ.get("YP_WP_ACT", "") if DRY else ""     # «нажатия» для проверки — только в dry-run
+        if act.startswith("apply:") and act[6:].isdigit() and int(act[6:]) < len(visible):
+            self.apply(visible[int(act[6:])])
+        elif act == "random":
+            self.random()
+        elif act == "folder":
+            self.open_folder()
+        keys = os.environ.get("YP_WP_KEYS", "") if DRY else ""
+        for i, k in enumerate(filter(None, keys.split(","))):
+            GLib.timeout_add(300 * i, lambda k=k: self.fake_key(k) or False)
+        return False
+
+    def fake_key(self, name):
+        kv = Gdk.keyval_from_name(name)
+        if self.panel.on_key(None, kv):
+            return
+        focus = self.panel.get_focus()             # стрелки внутри сетки — штатная навигация FlowBox
+        step = {"Right": 1, "Left": -1, "Down": COLS, "Up": -COLS}.get(name)
+        if step and isinstance(focus, Tile):
+            vis = [t for t in self.tiles if self.filter(t)]
+            i = min(max(vis.index(focus) + step, 0), len(vis) - 1)
+            vis[i].grab_focus()
+            self.grid.select_child(vis[i])
+            self.scroll_to(vis[i])
+        elif name in ("Return", "KP_Enter") and isinstance(focus, Tile):
+            self.apply(focus)
+
+
+if __name__ == "__main__":
+    gi.require_version("Graphene", "1.0")
+    from gi.repository import Graphene  # noqa: F401,E402
+    yp.WIDTH = WIDTH                      # каркас берёт ширину окна и шапки из yp.WIDTH
+    yp.HEADER_H = 132
+    app = yp.PanelApp("org.yumi.panel.wallpaper", "Обои", "󰸉", lambda panel, body: Wallpapers(panel, body))
+    sys.exit(app.run(sys.argv))

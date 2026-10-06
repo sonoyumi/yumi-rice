@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# GTK3-программы читают оформление только при запуске. Фоновые (скрытые) перезапускаем, чтобы их окна
+# открывались уже в цветах новых обоев. Только «невидимые» фоновые — никакие открытые окна не трогаем.
+if pgrep -x solaar >/dev/null && ! hyprctl clients -j 2>/dev/null | grep -q '"class": "solaar"'; then
+    pkill -x solaar; sleep 0.5
+    setsid -f env -u LD_PRELOAD solaar --window=hide >/dev/null 2>&1
+fi
+exit 0

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 # Центр управления:
-#   cc <wifi|bt|vpn|saver|mic> <toggle|state>   — кнопки (wifi/bt/mic: двойной клик открывает меню)
+#   cc <wifi|bt|vpn|saver|mic|caffeine> <toggle|state>   (caffeine — «Не засыпать»: hypridle выключен)   — кнопки (wifi/bt/mic: двойной клик открывает меню)
 #   cc <vol|micvol> <get|ЧИСЛО>                 — ползунки громкости и микрофона
 #   cc view <compact|notifs>                    — вид центра
 #   cc menu <sound>                             — закрыть центр и открыть наше меню
@@ -26,7 +26,7 @@ case "$what" in
         "$bin/cc-open" --watch
         exit 0 ;;
     menu)
-        case "$act" in sound) open_menu menu-sound ;; esac
+        case "$act" in sound) open_menu yumi-menu-sound ;; mouse) open_menu yumi-menu-mouse ;; esac
         exit 0 ;;
 esac
 
@@ -38,6 +38,7 @@ state() {
         saver) busctl get-property org.freedesktop.UPower.PowerProfiles /org/freedesktop/UPower/PowerProfiles \
                    org.freedesktop.UPower.PowerProfiles ActiveProfile 2>/dev/null | grep -q '"power-saver"' ;;
         mic)   ! wpctl get-volume @DEFAULT_AUDIO_SOURCE@ | grep -q MUTED ;;
+        caffeine) ! pgrep -x hypridle >/dev/null ;;     # «Не засыпать» = hypridle остановлен
     esac
 }
 
@@ -53,14 +54,18 @@ do_toggle() {
         vpn)   if state; then expressvpnctl disconnect; else expressvpnctl connect; fi; pkill -RTMIN+10 waybar ;;
         saver) if state; then powerprofilesctl set balanced; else powerprofilesctl set power-saver; fi; pkill -RTMIN+8 waybar ;;
         mic)   wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle ;;
+        caffeine)                                         # без блокировки/сна по таймеру — для работы с телефона
+            if state; then hyprctl dispatch 'hl.dsp.exec_cmd([[hypridle]])'; notify-send -a "Не засыпать" -i preferences-desktop-screensaver "☕ Выключено" "Ноутбук снова блокируется и засыпает по таймеру"
+            else pkill -x hypridle; notify-send -a "Не засыпать" -i preferences-desktop-screensaver "☕ Включено" "Ноутбук не будет блокироваться и засыпать сам"; fi
+            sleep 0.3; pkill -RTMIN+15 -x waybar ;;                   # пилюля ☕ в Waybar — то же состояние
     esac
 } >/dev/null 2>&1
 
 # Двойной клик (в пределах 0.4 с) для wifi/bt/mic — открыть меню вместо переключения
 case "$what" in
-    wifi) menu="menu-network" ;;
-    bt)   menu="menu-bluetooth" ;;
-    mic)  menu="menu-mic" ;;
+    wifi) menu="yumi-menu-wifi" ;;
+    bt)   menu="yumi-menu-bluetooth" ;;
+    mic)  menu="yumi-menu-sound" ;;
     *)    do_toggle; exit 0 ;;
 esac
 

@@ -1,0 +1,466 @@
+#!/usr/bin/env python3
+"""yumi-telegram-theme — тема Telegram Desktop в цветах обоев (живой акцент yumi-accent).
+
+  yumi-telegram-theme            собрать ~/.local/share/yumi-telegram/yumi.tdesktop-theme
+  yumi-telegram-theme --apply    собрать и применить в запущенном Telegram (локальная автоматизация
+                                 tdesktop ≥ 7.2: при первом разе Telegram дважды спросит «Local automation»)
+  yumi-telegram-theme --status   что сейчас применено в Telegram (только если автоматизация уже включена)
+  yumi-telegram-theme --check    таблица контрастов основных пар текст/фон
+  yumi-telegram-theme --notify   (для хука 70-telegram) уведомление с кнопкой «Применить», ждёт нажатия;
+                                 если автоматизация уже разрешена и стоит эта же тема — обновляет сразу
+Опции окружения: YUMI_TG_WALL=0 — без картинки-фона (сплошной цвет); YUMI_TG_DIM=80 — яркость обоев, %.
+Основа — встроенная ночная тема tdesktop v7.2.9 (~/.local/lib/yumi-telegram/base.colors): все её
+голубые тона переводятся в оттенок обоев (OKLCH: светлота сохраняется, меняются тон и насыщенность),
+ссылки/активное — акцент yumi-accent; пары текст/фон доводятся до контраста ≥ 4.5.
+Откат: yumi-telegram-uninstall"""
+import base64
+import hashlib
+import io
+import json
+import math
+import os
+import re
+import socket
+import subprocess
+import sys
+import zipfile
+
+HOME = os.path.expanduser("~")
+BASE = os.path.join(HOME, ".local/lib/yumi-telegram/base.colors")
+OUTDIR = os.path.join(HOME, ".local/share/yumi-telegram")
+OUT = os.path.join(OUTDIR, "yumi.tdesktop-theme")
+AUTO_OK = os.path.join(OUTDIR, ".automation-ok")      # автоматизация в Telegram подтверждена
+ACC_DIR = os.path.join(HOME, ".cache/yumi-accent")
+WALL = os.path.join(HOME, ".cache/hyde/wall.set")
+TG_WORKDIR = os.path.join(HOME, ".local/share/TelegramDesktop")
+
+# ключи с «чужими» осмысленными цветами — не перекрашивать (имена собеседников, графики, премиум…)
+KEEP = re.compile(r"^(historyPeer\d|historyPeerUserpic|settingsIconBg|statisticsChart|premium|credits|"
+                  r"groupCall|photoEditor|botKb(Primary|Danger|Success|Inline)|rank|stickerPanPremium|"
+                  r"mapPoint|outdate|wallet|callIconBgActive|callIconActiveRipple|searchedText)")
+
+
+# ---------- цвет: sRGB ↔ OKLab ----------
+def hex2rgba(h):
+    h = h.lstrip("#")
+    r, g, b = (int(h[i:i + 2], 16) / 255 for i in (0, 2, 4))
+    a = h[6:8] if len(h) == 8 else ""
+    return (r, g, b), a
+
+
+def rgb2hex(rgb, a=""):
+    return "#" + "".join("%02x" % max(0, min(255, round(c * 255))) for c in rgb) + a
+
+
+def _lin(c):
+    return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+
+def _gam(c):
+    return 12.92 * c if c <= 0.0031308 else 1.055 * c ** (1 / 2.4) - 0.055
+
+
+def to_oklch(rgb):
+    r, g, b = (_lin(c) for c in rgb)
+    l = (0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b) ** (1 / 3)
+    m = (0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b) ** (1 / 3)
+    s = (0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b) ** (1 / 3)
+    L = 0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s
+    A = 1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s
+    B = 0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s
+    return L, math.hypot(A, B), math.degrees(math.atan2(B, A)) % 360
+
+
+def _from_oklch_raw(L, C, H):
+    A, B = C * math.cos(math.radians(H)), C * math.sin(math.radians(H))
+    l = (L + 0.3963377774 * A + 0.2158037573 * B) ** 3
+    m = (L - 0.1055613458 * A - 0.0638541728 * B) ** 3
+    s = (L - 0.0894841775 * A - 1.2914855480 * B) ** 3
+    return (4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+            -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+            -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s)
+
+
+def from_oklch(L, C, H):
+    """В гамут sRGB — уменьшая насыщенность, светлота сохраняется."""
+    L = max(0.0, min(1.0, L))
+    for _ in range(40):
+        lin = _from_oklch_raw(L, C, H)
+        if all(-1e-4 <= c <= 1 + 1e-4 for c in lin):
+            break
+        C *= 0.9
+    return tuple(_gam(max(0.0, min(1.0, c))) for c in lin)
+
+
+def lum(rgb):
+    r, g, b = (_lin(c) for c in rgb)
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def contrast(a, b):
+    la, lb = lum(a), lum(b)
+    return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+
+
+# ---------- входные цвета ----------
+def accent_vars():
+    """Из окружения хука yumi-accent или из ~/.cache/yumi-accent."""
+    env = os.environ
+    if env.get("YUMI_ACC") and env.get("YUMI_BG"):
+        return {k: env.get("YUMI_" + k.upper(), "") for k in ("acc", "acc5", "deep", "bg", "btn", "hover")} | \
+            {"mono": env.get("YUMI_MONO", "0") == "1"}
+    xa = open(os.path.join(ACC_DIR, "accent.txt")).read().split()
+    deep, bg, btn, hov = open(os.path.join(ACC_DIR, "bg.txt")).read().split()[:4]
+    mono = len(set(c[0:2] == c[2:4] == c[4:6] for c in xa)) == 1 and xa[6][0:2] == xa[6][2:4] == xa[6][4:6]
+    return {"acc": xa[6], "acc5": xa[4], "deep": deep, "bg": bg, "btn": btn, "hover": hov, "mono": mono}
+
+
+def load_base():
+    pal = {}
+    for line in open(BASE):
+        m = re.match(r"^\s*([A-Za-z0-9_]+)\s*:\s*(#[0-9a-fA-F]{6,8})\s*;", line)
+        if m:
+            pal[m.group(1)] = m.group(2).lower()
+    return pal
+
+
+# опорные цвета ночной темы: фон окна и «голубой текст»
+REF_BG = to_oklch(hex2rgba("#17212b")[0])
+REF_ACC = to_oklch(hex2rgba("#6ab3f3")[0])
+
+
+def build(v):
+    pal = load_base()
+    accL, accC, accH = to_oklch(hex2rgba(v["acc"])[0])
+    bgL, bgC, bgH = to_oklch(hex2rgba(v["bg"])[0])
+    if v["mono"] or accC < 0.012:
+        accC, bgC = 0.0, 0.0
+    hue = accH if accC else bgH
+    k_bg = bgC / REF_BG[1] if REF_BG[1] else 0
+    k_acc = min(accC / REF_ACC[1], 1.15) if REF_ACC[1] else 0
+    out = {}
+    for key, val in pal.items():
+        rgb, a = hex2rgba(val)
+        L, C, H = to_oklch(rgb)
+        if KEEP.match(key) or C < 0.008 or not (205 <= H <= 280):
+            out[key] = val
+            continue
+        # «насколько это акцент»: 0 — сине-серый фон, 1 — ярко-голубой
+        t = max(0.0, min(1.0, (C - REF_BG[1]) / (REF_ACC[1] - REF_BG[1])))
+        k = k_bg + (k_acc - k_bg) * t
+        H2 = hue if (C * k) > 0.002 else H
+        out[key] = rgb2hex(from_oklch(L, C * k, H2), a)
+
+    # явный акцент обоев: ссылки, активный текст, значки отправки, полосы ответов
+    acc = "#" + v["acc"].lower()
+    deep = "#" + v["deep"].lower()
+    for key in ACCENT_TEXT:
+        if key in out:
+            out[key] = acc
+    # «залитые» акцентом поверхности (выбранный чат, кнопки, счётчики): фон — акцент, текст — тёмный фон обоев
+    aL, aC, aH = to_oklch(hex2rgba(acc)[0])
+    for key in ACCENT_FILL:
+        if key in out:
+            out[key] = acc
+    for key, dL in (("activeButtonBgOver", -0.04), ("activeButtonBgRipple", -0.09),
+                    ("dialogsRippleBgActive", -0.08)):
+        if key in out:
+            out[key] = rgb2hex(from_oklch(aL + dL, aC, aH))
+    for key in ON_ACCENT:
+        if key in out:
+            a = hex2rgba(out[key])[1]
+            out[key] = deep + a
+    if "activeButtonSecondaryFg" in out:
+        out["activeButtonSecondaryFg"] = rgb2hex(from_oklch(0.38, aC * 0.6, aH))
+    if "dialogsUnreadBgMutedActive" in out:
+        out["dialogsUnreadBgMutedActive"] = deep + "99"
+    if "dialogsUnreadFgMutedActive" in out:
+        out["dialogsUnreadFgMutedActive"] = acc
+    return enforce(out)
+
+
+ACCENT_TEXT = ("windowActiveTextFg", "historyLinkInFg", "historyLinkOutFg", "activeLineFg", "dialogsTextFgService",
+               "lightButtonFg", "historyOutIconFg", "historyOutIconFgSelected", "historySendIconFg",
+               "historyComposeIconFgOver", "msgInServiceFg", "msgOutServiceFg", "msgFileThumbLinkInFg",
+               "msgFileThumbLinkOutFg", "emojiIconFgActive", "dialogsVerifiedIconBg", "sideBarTextFgActive",
+               "sideBarIconFgActive", "msgOutReplyBarColor", "msgInReplyBarColor")
+ACCENT_FILL = ("windowBgActive", "activeButtonBg", "dialogsBgActive", "dialogsUnreadBg", "sideBarBadgeBg")
+ON_ACCENT = ("windowFgActive", "activeButtonFg", "dialogsNameFgActive", "dialogsTextFgActive", "dialogsDateFgActive",
+             "dialogsUnreadFg", "sideBarBadgeFg", "dialogsSentIconFgActive", "dialogsDraftFgActive",
+             "dialogsTextFgServiceActive", "dialogsMuteIconFgActive", "dialogsPinnedIconFgActive",
+             "dialogsChatIconFgActive", "dialogsVerifiedIconFgActive", "dialogsSendingIconFgActive",
+             "dialogsScamFgActive", "dialogsForwardFgActive" , "dialogsNameFgActive")
+
+# пары (текст, фон, минимум): доводим текст светлее/фон темнее до порога
+PAIRS = [
+    ("windowFg", "windowBg", 7), ("windowSubTextFg", "windowBg", 4.5), ("windowActiveTextFg", "windowBg", 4.5),
+    ("windowFgActive", "windowBgActive", 4.5), ("activeButtonFg", "activeButtonBg", 4.5),
+    ("dialogsNameFg", "dialogsBg", 7), ("dialogsTextFg", "dialogsBg", 4.5), ("dialogsDateFg", "dialogsBg", 4.5),
+    ("dialogsNameFgActive", "dialogsBgActive", 4.5), ("dialogsTextFgActive", "dialogsBgActive", 4.5),
+    ("dialogsNameFgOver", "dialogsBgOver", 7), ("dialogsTextFgOver", "dialogsBgOver", 4.5),
+    ("historyTextInFg", "msgInBg", 7), ("historyTextOutFg", "msgOutBg", 7),
+    ("msgInDateFg", "msgInBg", 4.5), ("msgOutDateFg", "msgOutBg", 4.5),
+    ("historyLinkInFg", "msgInBg", 4.5), ("historyLinkOutFg", "msgOutBg", 4.5),
+    ("msgInServiceFg", "msgInBg", 4.5), ("msgOutServiceFg", "msgOutBg", 4.5),
+    ("historyTextOutFg", "msgOutBgSelected", 4.5),
+    ("historyTextInFg", "msgInBgSelected", 4.5),
+    ("historyComposeAreaFg", "historyComposeAreaBg", 7), ("historyComposeAreaFgService", "historyComposeAreaBg", 4.5),
+    ("menuFg", "menuBg", 7), ("menuFgOver", "menuBgOver", 7), ("menuFg", "menuBgRipple", 4.5),
+    ("titleFgActive", "titleBgActive", 4.5), ("titleFg", "titleBg", 3),
+    ("lightButtonFg", "lightButtonBg", 4.5), ("lightButtonFgOver", "lightButtonBgOver", 4.5),
+    ("boxTitleFg", "boxBg", 7), ("boxTextFg", "boxBg", 7),
+    ("tooltipFg", "tooltipBg", 4.5), ("toastFg", "toastBg", 4.5),
+    ("msgServiceFg", "msgServiceBg", 4.5), ("historyPeerUserpicFg", "historyPeer1UserpicBg", 1),
+    ("placeholderFg", "historyComposeAreaBg", 3), ("searchedBarFg", "searchedBarBg", 4.5),
+    ("dialogsTextFgService", "dialogsBg", 4.5), ("dialogsTextFgServiceOver", "dialogsBgOver", 4.5),
+    ("dialogsUnreadFg", "dialogsUnreadBg", 4.5), ("emojiIconFgActive", "emojiPanBg", 4.5),
+]
+
+
+def enforce(out):
+    for fg, bg, need in PAIRS:
+        if fg not in out or bg not in out:
+            continue
+        frgb, fa = hex2rgba(out[fg])
+        brgb, ba = hex2rgba(out[bg])
+        if fa or ba:                        # полупрозрачные — пропуск
+            continue
+        if contrast(frgb, brgb) >= need:
+            continue
+        fL, fC, fH = to_oklch(frgb)
+        bL, bC, bH = to_oklch(brgb)
+        light_text = fL >= bL
+        for _ in range(60):
+            # двигаем текст от фона; когда некуда — фон от текста
+            if (light_text and fL < 0.985) or (not light_text and fL > 0.03):
+                fL += 0.01 if light_text else -0.01
+            else:
+                bL += -0.01 if light_text else 0.01
+            if contrast(from_oklch(fL, fC, fH), from_oklch(bL, bC, bH)) >= need:
+                break
+        out[fg] = rgb2hex(from_oklch(fL, fC, fH))
+        if (bL, bC, bH) != to_oklch(brgb):
+            out[bg] = rgb2hex(from_oklch(bL, bC, bH))
+    return out
+
+
+def check(out):
+    rows = []
+    for fg, bg, need in PAIRS:
+        if fg in out and bg in out and len(out[fg]) == 7 and len(out[bg]) == 7:
+            c = contrast(hex2rgba(out[fg])[0], hex2rgba(out[bg])[0])
+            rows.append(f"{'OK ' if c >= need else 'LOW'} {c:5.2f} ≥{need:<3} {fg}={out[fg]} на {bg}={out[bg]}")
+    return rows
+
+
+def background(out):
+    """Фон чата: размытые затемнённые обои (jpg) или сплошной цвет (png)."""
+    if os.environ.get("YUMI_TG_WALL", "1") != "0" and os.path.exists(WALL):
+        wall = os.path.realpath(WALL)
+        try:
+            r = subprocess.run(["magick", wall + "[0]", "-resize", "2560x2560>",   # чёткие обои, без размытия
+                                "-modulate", os.environ.get("YUMI_TG_DIM", "80"), "-quality", "90", "jpg:-"],
+                               capture_output=True, timeout=8)
+            if r.returncode == 0 and len(r.stdout) > 1000:
+                return "background.jpg", r.stdout
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    hx = out.get("windowBg", "#17212b")[:7]
+    r = subprocess.run(["magick", "-size", "16x16", "xc:" + hx, "png:-"], capture_output=True)
+    return "background.png", r.stdout
+
+
+def write_theme(out):
+    os.makedirs(OUTDIR, exist_ok=True)
+    text = "// yumi-telegram: тема в цветах обоев (генерируется yumi-telegram-theme, не править)\n" + \
+        "".join(f"{k}: {v};\n" for k, v in out.items())
+    name, img = background(out)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("colors.tdesktop-theme", text)
+        z.writestr(name, img)
+    tmp = OUT + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(buf.getvalue())
+    os.replace(tmp, OUT)                  # атомарно
+
+
+# ---------- связь с запущенным Telegram (локальный сокет, tdesktop ≥ 7.2) ----------
+def tg_socket_name():
+    d = os.path.abspath(TG_WORKDIR).encode()
+    return "\0" + hashlib.md5(d).hexdigest() + "-TelegramDesktop"
+
+
+def tg_running():
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(1)
+        s.connect(tg_socket_name())
+        s.close()
+        return True
+    except OSError:
+        return False
+
+
+def tg_send(records, timeout=4):
+    """Отправить записи «CMD:…;CTRL:…;» и вернуть ответы DATA (JSON)."""
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    s.connect(tg_socket_name())
+    s.sendall("".join(r + ";" for r in records).encode("latin1"))
+    want = sum(1 for r in records if r.startswith("CTRL:"))
+    buf, answers = b"", []
+    try:
+        while len(answers) < want:
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+            while b";" in buf:
+                rec, buf = buf.split(b";", 1)
+                if rec.startswith(b"DATA:"):
+                    answers.append(json.loads(base64.b64decode(rec[5:]) or b"{}"))
+    finally:
+        s.close()
+    return answers
+
+
+def tg_ctrl(cmd, show=False):
+    recs = (["CMD:show"] if show else []) + ["CTRL:" + cmd]
+    ans = tg_send(recs)
+    res = ans[0] if ans else {"ok": False, "error": "нет ответа"}
+    if res.get("ok"):
+        open(AUTO_OK, "w").close()
+    elif "automation is disabled" in str(res.get("error", "")):
+        try:
+            os.remove(AUTO_OK)
+        except OSError:
+            pass
+    return res
+
+
+NOTE_ID = os.path.join(OUTDIR, ".notify-id")
+WAITER = os.path.join(OUTDIR, ".notify.pid")
+ICON = "org.telegram.desktop"
+
+
+def apply_now():
+    return tg_ctrl("theme-apply:" + base64.b64encode(OUT.encode()).decode(), show=True)
+
+
+def notify(title, body, action=None, timeout_ms=0, urgent=False):
+    """Уведомление (заменяет прошлое от yumi-telegram). С action — ждёт нажатия, возвращает имя действия."""
+    cmd = ["notify-send", "-a", "Telegram", "-i", ICON, "-p", "-t", str(timeout_ms)]
+    try:
+        old = open(NOTE_ID).read().strip()
+        if old.isdigit():
+            cmd += ["-r", old]
+    except OSError:
+        pass
+    if urgent:
+        cmd += ["-u", "critical"]          # не исчезает, пока не ответят
+    if action:
+        cmd += ["-A", action]
+    cmd += [title, body]
+    try:
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True)
+    except OSError:
+        return None
+    nid = p.stdout.readline().strip()
+    if nid.isdigit():
+        with open(NOTE_ID, "w") as f:
+            f.write(nid)
+    if not action:
+        p.wait()
+        return None
+    try:
+        out, _ = p.communicate(timeout=1800)       # полчаса на ответ, потом молча выходим
+    except subprocess.TimeoutExpired:
+        p.kill()
+        return None
+    return out.strip() or None
+
+
+def notify_flow():
+    """Фоновый процесс после пересборки: спросить и применить по кнопке."""
+    if not tg_running():
+        return 0
+    # прежний ожидающий процесс больше не нужен
+    try:
+        old = int(open(WAITER).read().strip())
+        if old != os.getpid():
+            os.killpg(old, 15)
+    except (OSError, ValueError):
+        pass
+    with open(WAITER, "w") as f:
+        f.write(str(os.getpgrp()))
+    try:
+        # автоматизация уже разрешена и наша тема уже стоит — просто обновить
+        if os.path.exists(AUTO_OK):
+            cur = tg_ctrl("theme")
+            if cur.get("ok") and cur.get("path") == OUT:
+                res = apply_now()
+                if res.get("ok"):
+                    notify("Тема Telegram обновлена", "Цвета подстроены под новые обои.", timeout_ms=4000)
+                    return 0
+        body = "Цвета под новые обои готовы. «Применить» — Telegram сразу перекрасится " \
+               "(вернуть прежнюю можно в его подсказке «Undo»)."
+        for i in range(4):
+            if notify("Тема Telegram обновлена", body, "apply=Применить", urgent=i > 0) != "apply":
+                return 0
+            res = apply_now()
+            if res.get("ok"):
+                return 0
+            err = str(res.get("error", ""))
+            if "automation is disabled" in err:
+                body = "Telegram спрашивает разрешение: в его окне выберите «Enable» дважды " \
+                       "(Local automation), затем нажмите «Применить» ещё раз."
+            elif "theme editor" in err:
+                body = "В Telegram открыт редактор темы — закройте его и нажмите «Применить»."
+            elif "locked" in err:
+                body = "Telegram заблокирован код-паролем — разблокируйте и нажмите «Применить»."
+            else:
+                body = "Не удалось применить (" + err + "). Попробовать ещё раз?"
+        return 0
+    finally:
+        try:
+            if int(open(WAITER).read().strip()) == os.getpgrp():
+                os.remove(WAITER)
+        except (OSError, ValueError):
+            pass
+
+
+def main():
+    if "-h" in sys.argv or "--help" in sys.argv:
+        print(__doc__)
+        return 0
+    if "--notify" in sys.argv:          # вызывается хуком фоном (setsid), тему уже собрал хук
+        return notify_flow()
+    v = accent_vars()
+    out = build(v)
+    if "--check" in sys.argv:
+        print("\n".join(check(out)))
+        return 0
+    if "--status" in sys.argv:
+        if not tg_running():
+            print("Telegram не запущен")
+            return 1
+        if not os.path.exists(AUTO_OK) and "--force" not in sys.argv:
+            print("автоматизация ещё не подтверждена (запрос покажет диалог в Telegram); --status --force — всё равно спросить")
+            return 1
+        print(json.dumps(tg_ctrl("theme"), ensure_ascii=False))
+        return 0
+    write_theme(out)
+    if "--apply" in sys.argv:
+        if not tg_running():
+            print("Telegram не запущен", file=sys.stderr)
+            return 1
+        res = apply_now()
+        print(json.dumps(res, ensure_ascii=False))
+        return 0 if res.get("ok") else 2
+    print(OUT)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,27 @@
+#!/bin/bash
+# yumi-calendar-uninstall — убрать календарь yumi: выключить таймер напоминаний, удалить скрипты и юниты.
+# Планы пользователя (events.json) НЕ удаляются — только печатается путь.
+set -u
+U="$HOME/.config/systemd/user"
+systemctl --user disable --now yumi-calendar-remind.timer 2>/dev/null
+systemctl --user stop yumi-calendar-remind.service 2>/dev/null
+# ожидатели кнопок уведомлений (временные юниты systemd-run и обычные процессы)
+pkill -f "yumi-calendar-remind --wait-action" 2>/dev/null
+"$HOME/.local/bin/yumi-menu-calendar" --close >/dev/null 2>&1 &
+sleep 0.5
+rm -f "$U/yumi-calendar-remind.timer" "$U/yumi-calendar-remind.service" \
+      "$U/timers.target.wants/yumi-calendar-remind.timer"
+systemctl --user daemon-reload
+rm -f "$HOME/.local/bin/yumi-menu-calendar" "$HOME/.local/bin/yumi-calendar-remind"
+rm -rf "$HOME/.local/lib/yumi-calendar"
+echo "Календарь удалён: таймер выключен, скрипты и юниты убраны."
+echo "Привязку клика по часам в Waybar (yumi-menu-calendar) нужно убрать отдельно."
+D="$HOME/.local/share/yumi-calendar"
+[ -d "$D" ] && echo "Ваши планы сохранены и НЕ удалены: $D/events.json (копия: events.json.bak)"
+rm -f "$0"
+
+# часы в Waybar — снова без календаря
+for f in ~/.config/waybar/layouts/yumi.jsonc ~/.config/waybar/config.jsonc ~/.config/rice-local/home/.config/waybar/layouts/yumi.jsonc; do
+    [ -f "$f" ] && sed -i '/"on-click": "[^\"]*\/.local\/bin\/yumi-menu-calendar",/d' "$f"
+done
+systemctl --user restart hyde-Hyprland-bar.service 2>/dev/null

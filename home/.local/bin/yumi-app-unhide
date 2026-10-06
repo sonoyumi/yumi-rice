@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# yumi-app-unhide — вернуть программы в меню. Без аргументов — список скрытых.
+#   yumi-app-unhide <имя | часть имени> ...    yumi-app-unhide --all
+set -u
+LOCAL=~/.local/share/applications
+BAK=~/.local/share/yumi-app-hide/backup
+hidden() { grep -l '^# yumi-app-hide' "$LOCAL"/*.desktop 2>/dev/null; }
+if [ $# -eq 0 ]; then
+    echo "Скрыто из меню:"; for f in $(hidden); do printf '  %-45s %s\n' "$(basename "$f")" "$(grep -m1 '^Name=' "$f" | cut -d= -f2-)"; done
+    echo "Вернуть: yumi-app-unhide <имя> | --all"; exit 0
+fi
+for f in $(hidden); do
+    b=$(basename "$f"); n=$(grep -m1 '^Name=' "$f" | cut -d= -f2-)
+    hit=0; for q in "$@"; do [[ $q == --all || "${b,,}" == *"${q,,}"* || "${n,,}" == *"${q,,}"* ]] && hit=1; done
+    [ $hit = 1 ] || continue
+    if [ -f "$BAK/$b" ]; then mv "$BAK/$b" "$f"; else rm -f "$f"; fi
+    echo "возвращено: $n ($b)"
+done
+update-desktop-database -q "$LOCAL" 2>/dev/null || true

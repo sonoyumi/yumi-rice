@@ -1,0 +1,166 @@
+/* yumi-panel — общий стиль GTK-меню. Цвета только @yp-* (wallbash, общий файл с плеером).
+   Все px/pt на мониторе DP-1 автоматически ×0.8. */
+
+window.yp-panel { background: transparent; }
+
+.yp-frame {
+  /* плотнее, чем у плеера: под меню много текста и окон */
+  background: alpha(@yp-on-acc, 0.94);
+  border: 2px solid @yp-border;
+  border-radius: 30px;
+  font-family: "JetBrainsMono Nerd Font";
+  color: @yp-fg;
+}
+
+/* ── шапка из обоев ── */
+.yp-head { border-radius: 28px 28px 0 0; }
+.yp-wall { border-radius: 28px 28px 0 0; }
+.yp-head-shade {
+  background: linear-gradient(to bottom, alpha(@yp-on-acc, 0) 30%, alpha(@yp-on-acc, 0.94) 100%);
+}
+.yp-head-text { padding: 0 20px 10px 20px; }
+.yp-head-title { font-size: 17pt; font-weight: 800; text-shadow: 0 1px 4px alpha(black, 0.6); }
+.yp-head-sub   { font-size: 10pt; color: @yp-fg2; text-shadow: 0 1px 3px alpha(black, 0.6); }
+
+/* ── тело ── */
+.yp-body { padding: 12px 16px 16px 16px; }
+
+.yp-section {
+  font-size: 9pt; font-weight: 700; letter-spacing: 1px;
+  color: alpha(@yp-fg2, 0.7);
+  margin: 6px 4px 0 4px;
+}
+
+/* строки-«таблетки» */
+.yp-row {
+  background: @yp-btn;
+  border-radius: 16px;
+  padding: 8px 14px;
+  font-size: 11pt;
+  color: @yp-fg;
+  border: none;
+  box-shadow: none;
+  transition: background 150ms;
+}
+.yp-row:hover { background: @yp-hover; }
+.yp-row.active { background: alpha(@yp-accent, 0.22); box-shadow: inset 0 0 0 1px alpha(@yp-accent, 0.6); }
+.yp-row-icon  { color: @yp-accent; font-size: 13pt; }
+.yp-row-check { color: @yp-accent; font-size: 12pt; }
+
+/* круглые кнопки-значки */
+.yp-icon-btn {
+  min-width: 34px; min-height: 34px;
+  padding: 0;
+  border-radius: 17px;
+  background: @yp-btn;
+  color: @yp-fg;
+  font-size: 13pt;
+  border: none; box-shadow: none;
+  transition: background 150ms;
+}
+.yp-icon-btn:hover { background: @yp-hover; }
+.yp-icon-btn.off { color: #ed8796; }
+
+/* ползунки */
+.yp-slider-row { padding: 2px 4px; }
+.yp-slider trough {
+  min-height: 6px;
+  border-radius: 3px;
+  background: alpha(@yp-fg, 0.18);
+}
+.yp-slider highlight { border-radius: 3px; background: @yp-accent; }
+.yp-slider slider {
+  min-width: 14px; min-height: 14px;
+  margin: -5px;
+  border-radius: 7px;
+  background: @yp-fg;
+  box-shadow: 0 1px 3px alpha(black, 0.4);
+  opacity: 0;
+  transition: opacity 150ms;
+}
+.yp-slider:hover slider { opacity: 1; }
+.yp-slider.off highlight { background: alpha(@yp-fg, 0.35); }
+.yp-pct { font-size: 10pt; color: @yp-fg2; }
+
+/* ── подстраницы ── */
+.yp-back {
+  margin: 12px; min-width: 34px; min-height: 34px; padding: 0;
+  border-radius: 17px; border: none; box-shadow: none;
+  background: alpha(@yp-on-acc, 0.55); color: @yp-fg; font-size: 14pt;
+}
+.yp-back:hover { background: @yp-hover; }
+.yp-head-sub.error { color: #ed8796; }
+
+/* переключатель */
+.yp-toggle-row { padding: 6px 10px 6px 14px; }
+.yp-switch { border-radius: 14px; background: alpha(@yp-fg, 0.18); border: none; min-height: 24px; }
+.yp-switch:checked { background: @yp-accent; }
+.yp-switch slider { border-radius: 12px; min-width: 20px; min-height: 20px; margin: 2px; background: @yp-fg; box-shadow: none; }
+.yp-switch:checked slider { background: @yp-on-acc; }
+
+/* поле пароля */
+.yp-entry {
+  background: @yp-btn; color: @yp-fg;
+  border-radius: 16px; border: 1px solid alpha(@yp-accent, 0.35);
+  padding: 8px 14px; min-height: 22px; font-size: 11pt; box-shadow: none;
+}
+.yp-entry:focus-within { border-color: @yp-accent; }
+
+/* строки статуса */
+.yp-info { padding: 4px 6px; }
+.yp-info-key { color: alpha(@yp-fg2, 0.75); font-size: 10pt; }
+.yp-info-val { color: @yp-fg; font-size: 10pt; }
+.yp-icon-btn.yp-small { min-width: 26px; min-height: 26px; border-radius: 13px; font-size: 10pt; }
+
+/* кнопки действий */
+.yp-action {
+  border-radius: 16px; padding: 8px 14px; font-size: 11pt; font-weight: 700;
+  border: none; box-shadow: none; transition: background 150ms, opacity 150ms;
+}
+.yp-action.primary { background: @yp-accent; color: @yp-on-acc; }
+.yp-action.primary:hover { opacity: 0.88; }
+.yp-action.danger { background: alpha(#ed8796, 0.18); color: #ed8796; }
+.yp-action.danger:hover { background: alpha(#ed8796, 0.3); }
+.yp-action.plain { background: @yp-btn; color: @yp-fg; }
+.yp-action.plain:hover { background: @yp-hover; }
+.yp-action:disabled { opacity: 0.45; }
+
+.yp-spin-row { padding: 6px; }
+spinner { color: @yp-accent; }
+
+/* строка списка с подписью справа (сигнал, батарея) */
+.yp-row-meta { color: alpha(@yp-fg2, 0.75); font-size: 9.5pt; }
+
+/* ── общие элементы (из опыта меню Bluetooth) ── */
+.yp-hint { color: alpha(@yp-fg2, 0.7); font-size: 9.5pt; margin: 0 4px; }
+.yp-confirm { background: alpha(#ed8796, 0.08); border-radius: 16px; padding: 10px; }
+.yp-confirm-q { font-size: 10.5pt; }
+.yp-action.danger-solid { background: #ed8796; color: @yp-on-acc; }
+.yp-action.danger-solid:hover { opacity: 0.88; }
+.yp-code { font-size: 28pt; font-weight: 800; letter-spacing: 6px; color: @yp-accent; margin: 6px; }
+.yp-step { padding: 4px 6px; font-size: 10.5pt; }
+.yp-step.wait { color: alpha(@yp-fg, 0.5); }
+.yp-step.ok label:first-child, .yp-step.ok { color: @yp-fg; }
+.yp-step.err { color: #ed8796; }
+
+/* ── сегменты и отсчёт ── */
+.yp-seg-btn { background: @yp-btn; border-radius: 16px; padding: 10px 6px; border: none; box-shadow: none; color: @yp-fg; transition: background 220ms, box-shadow 220ms; }
+.yp-seg-btn:hover { background: @yp-hover; }
+.yp-seg-btn.active { background: alpha(@yp-accent, 0.25); box-shadow: inset 0 0 0 1px alpha(@yp-accent, 0.7); }
+.yp-seg-btn:disabled { opacity: 0.4; }
+.yp-seg-icon { font-size: 16pt; color: @yp-accent; }
+.yp-seg-text { font-size: 9.5pt; }
+.yp-countdown trough { min-height: 6px; border-radius: 3px; background: alpha(@yp-fg, 0.15); }
+.yp-countdown progress { min-height: 6px; border-radius: 3px; background: #ed8796; }
+.yp-entry text selection { background: alpha(@yp-accent, 0.45); color: @yp-fg; }
+.yp-error { color: #ed8796; }
+scrollbar slider { min-width: 4px; border-radius: 2px; background: alpha(@yp-fg, 0.3); }
+
+/* ── управление с клавиатуры: выделенный стрелками пункт ── */
+.yp-row:focus-visible, .yp-seg-btn:focus-visible, .yp-action:focus-visible,
+.yp-icon-btn:focus-visible, .yp-back:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px @yp-accent;
+}
+.yp-row:focus-visible { background: @yp-hover; }
+.yp-switch:focus-visible { box-shadow: 0 0 0 2px @yp-accent; }

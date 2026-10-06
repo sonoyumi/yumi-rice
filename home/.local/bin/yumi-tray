@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+"""yumi-tray — одноцветный трей для Waybar (значки фоновых программ глифами Nerd Font).
+  yumi-tray daemon            Watcher+Host StatusNotifier (запускает сервис yumi-tray.service)
+  yumi-tray bar               бесконечный JSON для custom/tray (через waybar-iconwrap)
+  yumi-tray activate [N|ИМЯ]  показать окно программы (по умолчанию — требующую внимания или первую)
+  yumi-tray list [--all]      список элементов (проверка)
+Меню со списком — yumi-menu-tray. Проверка без действий: YP_DRYRUN=1. Откат: yumi-tray-uninstall"""
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-tray"))
+import yumitray as yt  # noqa: E402
+
+
+def pick(items, arg):
+    if not items:
+        return None
+    if arg is None:
+        return next((it for it in items if it["status"] == "NeedsAttention"), items[0])
+    if arg.isdigit():
+        i = int(arg) - 1
+        return items[i] if 0 <= i < len(items) else None
+    a = arg.lower()
+    return next((it for it in items if a in it["name"].lower() or a in it["finger"]), None)
+
+
+def main():
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "bar"
+    if cmd == "daemon":
+        yt.run_daemon()
+    elif cmd == "bar":
+        yt.run_bar()
+    elif cmd == "activate":
+        it = pick(yt.load_items(), sys.argv[2] if len(sys.argv) > 2 else None)
+        if not it:
+            sys.exit(1)
+        if it["item_is_menu"] or not yt.activate(it):
+            os.execv(os.path.expanduser("~/.local/bin/yumi-menu-tray"), ["yumi-menu-tray", "--bar"])
+    elif cmd == "list":
+        items = yt.load_items(all_items="--all" in sys.argv)
+        for i, it in enumerate(items, 1):
+            print(f"{i}. {it['glyph']}  {it['name']:<14} status={it['status']:<14} id={it['id']!r} "
+                  f"title={it['title']!r} icon={it['icon']!r} app={it['app']} menu={it['menu']} {it['key']}")
+        print(json.dumps(yt.bar_json(yt.load_items()), ensure_ascii=False))
+    else:
+        print(__doc__)
+        sys.exit(2)
+
+
+if __name__ == "__main__":
+    main()

@@ -70,37 +70,6 @@ hl.config({
 
 })
 
---hl.bind("SUPER + F", hl.dsp.window.fullscreen({ mode = "maximized", action = "toggle" }))
-hl.bind("XF86KbdBrightnessUp",   hl.dsp.exec_cmd("brightnessctl -d kbd_backlight set 10%+"), { locked = true, repeating = true })
-hl.bind("XF86KbdBrightnessDown", hl.dsp.exec_cmd("brightnessctl -d kbd_backlight set 10%-"), { locked = true, repeating = true })
-
-
-
-hl.window_rule({ match = { class = "kitty" },   opacity = "0.85 override 0.70 override" })
-
--- Экран блокировки сразу при входе (автовход SDDM)
-hl.on("hyprland.start", function()
-hl.exec_cmd("hyprlock")
-end)
-
--- Меню выключения
-hl.bind("SUPER + Escape", hl.dsp.exec_cmd("@HOME@/.local/bin/powermenu --center"), {description = "[Session] power menu"})
-
--- Меню rofi держат фокус клавиатуры, пока открыты (Esc работает при любом положении курсора)
-hl.window_rule {
-  name = "rofi_keep_focus",
-  match = {
-    class = "Rofi"
-  },
-  stay_focused = true
-}
-hl.bind("SUPER + N", hl.dsp.exec_cmd("@HOME@/.local/bin/cc-open --bind"), {description = "[Session] control center"})
-
--- Загрузка плагинов Hyprland (hyprexpo) при входе
-hl.on("hyprland.start", function()
-	-- плагины подключаются через hl.plugin.load (ниже)
-end)
-
 -- === Внешняя клавиатура Logitech PRO ===
 -- Win и Alt поменяны местами только на ней: Super у пробела, как Cmd на MacBook.
 -- В системе она видна двумя устройствами, поэтому правило на оба имени
@@ -159,17 +128,50 @@ end)
 -- 	})
 -- end
 --
--- -- Обои на мониторе, подключённом после старта (иначе там чёрный фон)
--- hl.on("monitor.added", function()
--- 	hl.exec_cmd([[sh -c 'sleep 2; awww img --transition-type none "$(readlink -f "$HOME/.cache/hyde/wall.set")"']])
--- end)
---
+-- Обои на мониторе, подключённом после старта, перерисовываются ниже (hl.on("monitor.added")) — для любого железа.
 -- Меню rofi на внешнем мониторе уменьшает обёртка ~/.local/bin/rofi (DPI по имени монитора).
+
+--hl.bind("SUPER + F",hl.dsp.window.fullscreen({ mode = "maximized", action = "toggle" }))
+hl.bind("XF86KbdBrightnessUp",   hl.dsp.exec_cmd("brightnessctl -d kbd_backlight set 10%+"), { locked = true, repeating = true })
+hl.bind("XF86KbdBrightnessDown", hl.dsp.exec_cmd("brightnessctl -d kbd_backlight set 10%-"), { locked = true, repeating = true })
+
+
+
+hl.window_rule({ match = { class = "kitty" },   opacity = "0.85 override 0.70 override" })
+
+-- Экран блокировки сразу при входе (автовход SDDM).
+-- Этот файл выполняется ДВАЖДЫ (точка входа Hyprland + require("hyprland") в конце hyde.lua),
+-- поэтому без флага обработчик регистрировался два раза → два hyprlock при входе. Флаг — один раз.
+if not _G.yumi_lock_on_start then
+	_G.yumi_lock_on_start = true
+	hl.on("hyprland.start", function()
+		hl.exec_cmd("hyprlock")
+	end)
+end
+
+-- Меню выключения
+hl.bind("SUPER + Escape", hl.dsp.exec_cmd("@HOME@/.local/bin/yumi-menu-session --center"), {description = "[Session] power menu"})
+
+-- Меню rofi держат фокус клавиатуры, пока открыты (Esc работает при любом положении курсора)
+hl.window_rule {
+  name = "rofi_keep_focus",
+  match = {
+    class = "Rofi"
+  },
+  stay_focused = true
+}
+hl.bind("SUPER + N", hl.dsp.exec_cmd("@HOME@/.local/bin/cc-open --bind"), {description = "[Session] control center"})
+
+-- Загрузка плагинов Hyprland (hyprexpo) при входе
+hl.on("hyprland.start", function()
+	-- плагины подключаются через hl.plugin.load (ниже)
+end)
 
 -- === Жесты 3 пальцами вверх/вниз (свои для каждого лейаута) ===
 local function overview()
-	hl.exec_cmd("@HOME@/.local/bin/menu-workspaces")
+	hl.exec_cmd("@HOME@/.local/bin/yumi-menu-workspaces --center")
 end
+
 
 -- Здесь настраиваются действия для каждого лейаута
 local gestures3 = {
@@ -187,13 +189,13 @@ end
 hl.gesture({ fingers = 3, direction = "down", action = function() run_gesture("down") end })
 
 -- Плагин обзора рабочих столов (ScrollOverview)
--- hl.plugin.load("/var/cache/hyprpm/yumi044/hyprland-scroll-overview/scrolloverview.so")
+-- hl.plugin.load("/var/cache/hyprpm/<user>/hyprland-scroll-overview/scrolloverview.so")
 
 -- Обзор рабочих столов
-hl.bind("SUPER + grave", hl.dsp.exec_cmd("@HOME@/.local/bin/menu-workspaces"), {description = "[Workspaces] overview"})
+hl.bind("SUPER + grave", hl.dsp.exec_cmd("@HOME@/.local/bin/yumi-menu-system --center"), {description = "[Session] system menu"})
 
 -- Обзор рабочих столов
-hl.bind("SUPER + grave", hl.dsp.exec_cmd("@HOME@/.local/bin/menu-workspaces"), {description = "[Workspaces] overview"})
+hl.bind("SUPER + grave", hl.dsp.exec_cmd("@HOME@/.local/bin/yumi-menu-system --center"), {description = "[Session] system menu"})
 
 -- Рисовать рабочий стол под экраном блокировки: после разблокировки всё уже готово, без серого экрана
 hl.config({ misc = { session_lock_xray = true } })
@@ -201,11 +203,11 @@ hl.config({ misc = { session_lock_xray = true } })
 -- Прозрачность всех окон: 85% в фокусе, 75% без фокуса, полный экран — непрозрачно
 hl.config({ decoration = { active_opacity = 0.85, inactive_opacity = 0.75, fullscreen_opacity = 1 } })
 
--- Меню rofi: 90% в фокусе, 85% без фокуса
+-- Меню rofi: 84% в фокусе, 78% без фокуса (прозрачнее, за ним размытие)
 hl.window_rule {
   name = "rofi_opacity",
   match = { class = "Rofi" },
-  opacity = "0.90 override 0.85 override",
+  opacity = "0.84 override 0.78 override",
   opaque = false
 }
 
@@ -217,8 +219,26 @@ hl.layer_rule({
   ignore_alpha = 0.5,
 })
 
--- Плеер
-hl.bind("SUPER + M", hl.dsp.exec_cmd("@HOME@/.local/bin/menu-player --center"), {description = "[Media] player"})
+-- Плеер yumi-player (GTK4 + layer-shell): SUPER+M — по центру, повторно — закрыть
+hl.bind("SUPER + M", hl.dsp.exec_cmd("@HOME@/.local/bin/yumi-player toggle --center"), {description = "[Media] player"})
+
+-- Размытие под окном плеера (как у центра управления)
+hl.layer_rule({
+  name = "yumi_player_blur",
+  match = { namespace = "^yumi-player$" },
+  blur = true,
+  ignore_alpha = 0.5,
+})
+
+-- Меню yumi-panel (звук, Wi-Fi, Bluetooth, питание…): блюр под полупрозрачным фоном
+hl.layer_rule({
+  name = "yumi_panel_blur",
+  match = { namespace = "^yumi-panel$" },
+  blur = true,
+  ignore_alpha = 0.1,   -- низкий порог: при плавном проявлении меню блюр не включается рывком на середине
+  -- анимация открытия/закрытия — как у плеера; окно меню размер не меняет (см. yumipanel.py),
+  -- поэтому анимация изменения размера слоя (та же layersIn) больше не срабатывает
+})
 
 -- === Мой вид окон: не зависит от темы HyDE (тема меняет только цвета) ===
 local function my_look()
@@ -241,12 +261,17 @@ hl.on("config.reloaded", my_look)
 
 -- Тяжёлые программы: только после разблокировки (не мешают загрузке рабочего стола)
 hl.on("hyprland.start", function()
-	hl.exec_cmd([[sh -c 'sleep 6; while pgrep -x hyprlock >/dev/null; do sleep 1; done; sleep 30; telegram-desktop -startintray &']])
+	hl.exec_cmd([[sh -c 'sleep 6; while pgrep -x hyprlock >/dev/null; do sleep 1; done; sleep 30; Telegram -startintray &']])
 end)
 
 -- Обои при старте: без анимации перехода, пока открыт экран блокировки
 hl.on("hyprland.start", function()
 	hl.exec_cmd([[sh -c 'for i in $(seq 40); do awww query >/dev/null 2>&1 && break; sleep 0.5; done; sleep 2; awww img --transition-type none "$(readlink -f "$HOME/.cache/hyde/wall.set")"']])
+end)
+
+-- Обои на мониторе, подключённом после старта (иначе там чёрный фон)
+hl.on("monitor.added", function()
+	hl.exec_cmd([[sh -c 'sleep 2; awww img --transition-type none "$(readlink -f "$HOME/.cache/hyde/wall.set")"']])
 end)
 
 
@@ -255,3 +280,48 @@ end)
 -- Выбор темы и режима wallbash не нужен — остаются только обои (SUPER+SHIFT+W, SUPER+ALT+←/→)
 hl.unbind("SUPER + SHIFT + T")
 hl.unbind("SUPER + SHIFT + R")
+
+-- === Раскладка: SUPER+K переключает СРАЗУ все клавиатуры (и на экране блокировки) ===
+-- HyDE менял только «текущую» клавиатуру, а у Logitech два устройства — язык иногда не переключался
+hl.unbind("SUPER + K")
+hl.bind("SUPER + K", hl.dsp.exec_cmd("@HOME@/.local/bin/kb-switch"), { description = "[Utilities] toggle keyboard layout", locked = true })
+
+-- === Выбор обоев: SUPER+SHIFT+W — GTK-меню yumi-panel (сетка миниатюр) вместо rofi HyDE ===
+hl.unbind("SUPER + SHIFT + W")
+hl.bind("SUPER + SHIFT + W", hl.dsp.exec_cmd("@HOME@/.local/bin/yumi-menu-wallpaper --center"), { description = "[Theming and Wallpaper] select a global wallpaper" })
+
+-- === Буфер обмена: SUPER+V / SUPER+SHIFT+V — GTK-меню yumi-panel (поиск, миниатюры, закреп) ===
+hl.unbind("SUPER + V")
+hl.unbind("SUPER + SHIFT + V")
+hl.bind("SUPER + V", hl.dsp.exec_cmd("@HOME@/.local/bin/yumi-menu-clipboard --center"), { description = "[Launcher|Rofi menus] clipboard" })
+hl.bind("SUPER + SHIFT + V", hl.dsp.exec_cmd("@HOME@/.local/bin/yumi-menu-clipboard --center"), { description = "[Launcher|Rofi menus] clipboard manager" })
+
+-- Калькулятор rofi не нужен (пакета rofi-calc нет) — сочетание свободно
+hl.unbind("SUPER + SHIFT + K")
+
+-- === Рабочие столы: SUPER+TAB — GTK-меню вместо переключателя окон HyDE (altab у нас не работал) ===
+hl.unbind("SUPER + TAB")
+hl.bind("SUPER + TAB", hl.dsp.exec_cmd("@HOME@/.local/bin/yumi-menu-workspaces --center"), { description = "[Workspaces] overview" })
+-- остатки переключателя окон HyDE (altab): SUPER+SHIFT+TAB и отпускание SUPER — сняты
+hl.unbind("SUPER + SHIFT + TAB")
+hl.unbind("SUPER + SUPER_L")
+hl.unbind("SUPER + SUPER_R")
+
+-- SUPER+/ — режимы работы (workflow) в нашем меню «Питание» вместо старой rofi-панели menu-workflows
+hl.unbind("SUPER + slash")
+hl.bind("SUPER + slash", hl.dsp.exec_cmd("@HOME@/.local/bin/yumi-menu-power --center"), { description = "[Utils] workflows" })
+
+-- SUPER+SHIFT+U (выбор макета hyprlock) при каждом шаге по списку запускает НАСТОЯЩИЙ hyprlock → faillock; снят
+hl.unbind("SUPER + SHIFT + U")
+
+-- === CTRL+ALT+DELETE — наше меню «Питание системы» вместо меню выхода HyDE ===
+hl.unbind("CTRL + ALT + DELETE")
+hl.bind("CTRL + ALT + DELETE", hl.dsp.exec_cmd("@HOME@/.local/bin/yumi-menu-session --center"), { description = "[Window Management] logout menu" })
+
+-- Рамки окон в тоне обоев (yumi-tone, хук 40-hypr-borders): поверх цветов HyDE, и после перезагрузки конфига
+local function yumi_borders()
+	local f = loadfile(os.getenv("HOME") .. "/.cache/yumi-tone/hypr-borders.lua")
+	if f then pcall(f) end
+end
+yumi_borders()
+hl.on("config.reloaded", yumi_borders)

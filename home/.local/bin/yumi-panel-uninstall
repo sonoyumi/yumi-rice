@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Откат GTK-меню yumi-panel: вернуть rofi-меню на пилюли Waybar (точечно) и удалить каркас и меню
+for f in ~/.config/waybar/layouts/yumi.jsonc ~/.config/waybar/config.jsonc ~/.config/rice-local/home/.config/waybar/layouts/yumi.jsonc; do
+    [ -f "$f" ] || continue
+    sed -i 's|@HOME@/.local/bin/yumi-menu-session"|@HOME@/.local/bin/powermenu"|; s|@HOME@/.local/bin/yumi-menu-sound"|@HOME@/.local/bin/menu-sound"|; s|@HOME@/.local/bin/yumi-menu-bluetooth"|@HOME@/.local/bin/menu-bluetooth"|; s|@HOME@/.local/bin/yumi-menu-wifi"|@HOME@/.local/bin/menu-network"|g' "$f"
+done
+# пилюли батареи/профиля → menu-power-profile, workflow → menu-workflows
+for f in ~/.config/waybar/layouts/yumi.jsonc ~/.config/waybar/config.jsonc ~/.config/rice-local/home/.config/waybar/layouts/yumi.jsonc; do
+    [ -f "$f" ] || continue
+    python3 - "$f" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p).read()
+for key, old in (("battery", "menu-power-profile"), ("custom/powerprofile", "menu-power-profile"), ("custom/workflow", "menu-workflows"),
+                 ("custom/clip", "menu-clipboard"), ("custom/vpn", "menu-network"),
+                 ("cpu", "menu-top"), ("memory", "menu-top"), ("custom/top", "menu-top"), ("custom/mouse", "menu-mouse")):
+    k = '"' + key + '": {'
+    if k in s:
+        i = s.index(k); j = s.index("\n    }", i)
+        blk = s[i:j]
+        for new in ("yumi-menu-power", "yumi-menu-clipboard", "yumi-menu-vpn", "yumi-menu-top", "yumi-menu-mouse"):
+            blk = blk.replace("@HOME@/.local/bin/" + new + '"', "@HOME@/.local/bin/" + old + '"')
+        s = s[:i] + blk + s[j:]
+open(p, 'w').write(s)
+PY
+done
+# Hyprland: SUPER+Escape → старое powermenu, убрать блюр меню (точечно, остальные правки не трогаем)
+for h in ~/.config/hypr/hyprland.lua ~/.config/rice-local/home/.config/hypr/hyprland.lua; do
+    [ -f "$h" ] || continue
+    python3 - "$h" <<'PY'
+import sys, re
+p = sys.argv[1]; s = open(p).read()
+s = s.replace('@HOME@/.local/bin/yumi-menu-session --center', '@HOME@/.local/bin/powermenu --center')
+s = s.replace('@HOME@/.local/bin/yumi-menu-workspaces --center")', '@HOME@/.local/bin/menu-workspaces")')
+s = re.sub(r'\n\n-- Меню yumi-panel \(звук.*?\n\}\)', '', s, flags=re.S)
+s = re.sub(r'\n\n-- === Выбор обоев: SUPER\+SHIFT\+W.*?select a global wallpaper" \}\)', '', s, flags=re.S)
+s = re.sub(r'\n\n-- === Буфер обмена: SUPER\+V.*?clipboard manager" \}\)', '', s, flags=re.S)
+s = re.sub(r'\n\n-- === Рабочие столы: SUPER\+TAB.*?logout menu" \}\)', '', s, flags=re.S)
+s = s.replace('@HOME@/.local/bin/yumi-menu-system --center"), {description = "[Session] system menu"})', '@HOME@/.local/bin/menu-workspaces"), {description = "[Workspaces] overview"})')
+open(p, 'w').write(s)
+PY
+done
+for f in ~/.config/waybar/layouts/yumi.jsonc ~/.config/waybar/config.jsonc ~/.config/rice-local/home/.config/waybar/layouts/yumi.jsonc; do
+    [ -f "$f" ] && sed -i '/"on-click": "[^\"]*\/.local\/bin\/yumi-menu-system",/d' "$f"   # значок Arch — снова без меню
+done
+for f in ~/.config/waybar/layouts/yumi.jsonc ~/.config/waybar/config.jsonc ~/.config/rice-local/home/.config/waybar/layouts/yumi.jsonc; do
+    [ -f "$f" ] && sed -i 's/"custom\/caffeine", "custom\/wifi", "custom\/bt"/"idle_inhibitor", "network", "bluetooth"/; s/"custom\/caffeine", "network"/"idle_inhibitor", "network"/; s/"custom\/updates", "custom\/swaync", "custom\/clip"/"custom\/swaync", "custom\/updates", "custom\/clip"/' "$f"   # встроенные ☕/Wi-Fi/BT, прежний порядок
+done
+for c in ~/.config/waybar/user-style.css ~/.config/rice-local/home/.config/waybar/user-style.css; do
+    [ -f "$c" ] && sed -i 's/#custom-caffeine\.activated/#idle_inhibitor.activated/g; s/#custom-bt\.connected/#bluetooth.connected/g' "$c"
+done
+rm -f ~/.local/bin/waybar-caffeine ~/.local/bin/waybar-wifi ~/.local/bin/waybar-bt
+pkill -f '@HOME@/.local/bin/yumi-menu-' 2>/dev/null
+rm -f ~/.local/bin/yumi-menu-sound ~/.local/bin/yumi-menu-bluetooth ~/.local/bin/yumi-menu-wifi ~/.local/bin/yumi-menu-session ~/.local/bin/yumi-menu-power ~/.local/bin/yumi-menu-wallpaper ~/.local/bin/yumi-menu-clipboard ~/.local/bin/yumi-menu-vpn ~/.local/bin/yumi-menu-top ~/.local/bin/yumi-menu-mouse ~/.local/bin/yumi-menu-workspaces ~/.local/bin/yumi-menu-system
+rm -rf ~/.local/lib/yumi-panel ~/.config/yumi-panel
+systemctl --user restart hyde-Hyprland-bar.service
+rm -f ~/.local/bin/yumi-panel-uninstall
+echo "yumi-panel удалён, на пилюлях снова rofi-меню"

@@ -1,80 +1,228 @@
-/* === Бар yumi: прозрачный фон, пилюли на лёгком стекле (цвета из темы) === */
+@import url("file://@HOME@/.config/waybar/yumi-accent.css");
+/* === Бар yumi: прозрачный фон, пилюли на лёгком стекле (цвета из обоев) ===
+   Один стиль с меню yumi-panel, плеером yumi-player и экраном блокировки:
+   акцент wallbash 1xa7, рамка как у меню, «таблетки» с плавной подсветкой.
+   theme.css и wallbash/gtk.css генерирует HyDE — здесь только их переменные. */
+
+/* yb-acc — живой акцент из обоев: ~/.config/waybar/yumi-accent.css (yumi-accent) */
+/* yb-deep, yb-bg, yb-hover — тёмные тона В ЦВЕТЕ обоев: ~/.config/waybar/yumi-accent.css (yumi-accent) */
+@define-color yb-warn #f5a97f;          /* оранжевый — внимание */
+@define-color yb-crit #ed8796;          /* красный — плохо */
+@define-color yb-ok   #a6da95;          /* зелёный — заряжается / хорошо */
+
+/* Шрифт бара не зависит от темы */
+* { font-family: "JetBrainsMono Nerd Font"; }
 
 window#waybar {
   background: transparent;
 }
 
-/* Пилюли: полупрозрачный фон, за ним размытие от Hyprland */
-#pill {
-  background: alpha(@main-bg, 0.45);
+/* ───────── Пилюли ─────────
+   Стекло 0.78→0.62 (в среднем 0.7, за ним размытие Hyprland), тонкая кромка акцентом
+   и блик сверху. Кромка — inset-тенью, а не border: у пустой пилюли плеера нулевая
+   ширина, и рамка оставила бы полоску. */
+window#waybar.top #pill {
+  background-color: transparent;
+  background-image: linear-gradient(to bottom, alpha(@yb-bg, 0.78), alpha(@yb-bg, 0.62));
+  border: none;
+  box-shadow: inset 0 0 0 1px alpha(@yb-acc, 0.18),
+              inset 0 1px 0 0 alpha(@main-fg, 0.08);
+  transition: background-image 200ms ease, box-shadow 200ms ease;
+}
+/* промежутки между пилюлями чуть уже, чем у HyDE (1em): на eDP всё должно влезть */
+window#waybar.top #pill { margin: 0.3em 0.38em; }   /* уже: на eDP-1 (1536) бар должен влезть целиком */
+
+/* Наведение подсвечивает ВСЮ пилюлю по её форме (без «капсулы в капсуле»):
+   стекло светлее, кромка и мягкое свечение акцентом — как строка меню yumi-panel */
+window#waybar.top #pill:hover {
+  /* только лёгкая подсветка: стекло чуть светлее, кромка чуть заметнее — без теней и свечения */
+  background-image: linear-gradient(to bottom, alpha(@yb-hover, 0.55), alpha(@yb-bg, 0.66));
+  box-shadow: inset 0 0 0 1px alpha(@yb-acc, 0.30),
+              inset 0 1px 0 0 alpha(@main-fg, 0.08);
 }
 
-/* Активный рабочий стол слегка выделен */
-#workspaces button.active {
-  background: alpha(@wb-act-bg, 0.35);
-  color: @wb-act-fg;
-  border-radius: 10px;
+/* ───────── Модули внутри пилюли ─────────
+   Без своего фона: состояния — только цветом и свечением текста.
+   Селектор длинный нарочно: иначе его перебивает HyDE (window#waybar.top label.module) */
+window#waybar.top #pill label.module {
+  padding: 0 0.3em;
+  margin: 0 0.04em;
+  background: none;
+  box-shadow: none;
+  transition: color 200ms ease, text-shadow 200ms ease, opacity 200ms ease;
 }
-#workspaces button:hover {
-  background: alpha(@wb-hvr-bg, 0.25);
-  border-radius: 10px;
+window#waybar.top #pill label#custom-archlogo { padding: 0 0.6em; margin: 0; }
+window#waybar.top #pill label#clock           { padding: 0 0.5em; }
+window#waybar.top #pill label#custom-player-text { padding: 0 0.9em 0 0.5em; margin: 0; }
+/* Мышь бывает пустой (мышь выключена / нет данных): отступы у модуля,
+   а не у группы — тогда пустая пилюля нулевой ширины и «пузыря» не видно, как у плеера */
+window#waybar.top #pill.mouse { padding: 0; }
+window#waybar.top #pill label#custom-mouse { padding: 0 1.2em; margin: 0; }
+/* значок под курсором чуть ярче, со свечением */
+window#waybar.top #pill label.module:hover {
+  color: @wb-hvr-fg;
 }
 
-/* Значок Arch */
+/* «Включено» — цвет акцента и свечение, как значки активных строк меню */
+#custom-vpn.connected,
+#custom-caffeine.activated,
+#custom-updates.updates,
+#custom-bt.connected {
+  color: @yb-acc;
+  text-shadow: 0 0 6px alpha(@yb-acc, 0.6);
+}
+
+/* ───────── Значок Arch ───────── */
 #custom-archlogo {
   font-size: 15px;
-  padding: 0 10px;
+  color: @yb-acc;
+  text-shadow: 0 0 6px alpha(@yb-acc, 0.45);
+}
+window#waybar.top #pill label#custom-archlogo:hover {
+  color: @wb-hvr-fg;
 }
 
-/* Батарея: оранжевая при 30%, красная при 15% (если не заряжается) */
-#battery.warning:not(.charging) {
-  color: #f5a97f;
+/* ───────── Рабочие столы ─────────
+   пустые — бледные, занятые — яркие на лёгкой подложке,
+   активный — капсула-градиент акцента со свечением, urgent — красная пульсация */
+#workspaces button {
+  animation: none;
+  min-width: 1.6em;
+  padding: 0 0.35em;
+  margin: 0.35em 0.08em;
+  border: none;
+  background-color: alpha(@main-fg, 0.07);
+  background-image: none;
+  box-shadow: none;
+  text-shadow: none;
+  color: @main-fg;
+  font-weight: bold;
+  transition: background-color 250ms ease, color 250ms ease,
+              box-shadow 250ms ease;   /* без padding: иначе бар пересчитывает размер каждый кадр */
 }
-#battery.critical:not(.charging) {
-  color: #ed8796;
+#workspaces button.empty {
+  background-color: transparent;
+  color: alpha(@main-fg, 0.40);
+  font-weight: normal;
 }
-#battery.charging {
-  color: #a6da95;
+#workspaces button:hover {
+  animation: none;
+  background-color: alpha(@yb-hover, 0.55);
+  background-image: none;
+  color: @wb-hvr-fg;
+  box-shadow: none;
 }
-
-/* Значок режима питания */
-#custom-powerprofile {
-  padding: 0 8px 0 2px;
+#workspaces button.active,
+#workspaces button.active:hover {
+  animation: none;
+  transition: background-color 250ms ease, color 250ms ease, box-shadow 250ms ease;
+  margin: 0.35em 0.2em;
+  padding: 0 1.1em;
+  background-color: @yb-acc;
+  background-image: linear-gradient(to right, @yb-acc, mix(@yb-acc, @wb-act-bg, 0.55));
+  color: @yb-deep;
+  font-weight: bold;
+  box-shadow: 0 0 6px 0 alpha(@yb-acc, 0.55),
+              inset 0 1px 0 0 alpha(white, 0.25);
 }
-#custom-powerprofile.power-saver {
-  color: #a6da95;
+@keyframes yb-urgent {
+  from { background-color: alpha(@yb-crit, 0.15); box-shadow: 0 0 0 0 alpha(@yb-crit, 0); }
+  to   { background-color: alpha(@yb-crit, 0.60); box-shadow: 0 0 6px 0 alpha(@yb-crit, 0.6); }
 }
-#custom-powerprofile.performance {
-  color: #f5a97f;
-}
-
-#custom-workflow { padding: 0 10px 0 4px; }
-
-/* Часы — слева в пилюле с батареей */
-#clock { padding: 0 8px 0 14px; }
-
-#custom-vpn.connected  { color: #a6da95; }
-#custom-vpn.connecting { color: #f5a97f; }
-#custom-player         { padding: 0 8px; }
-#custom-player.paused  { opacity: 0.6; }
-
-/* Плеер — отдельная пилюля ровно по центру бара */
-#custom-player {
-  background: alpha(@main-bg, 0.45);
-  border-radius: 14px;
-  padding: 0 14px;
-  margin: 4px 0;
+#workspaces button.urgent {
+  color: @main-fg;
+  animation: yb-urgent 0.9s ease-in-out infinite alternate;
 }
 
-/* Самое тяжёлое приложение: оранжевое, если занимает больше 2 ГБ */
-#custom-top       { padding: 0 12px 0 4px; }
-#custom-top.heavy { color: #f5a97f; }
+/* ───────── Система: CPU, память, тяжёлое приложение ───────── */
+#custom-top.heavy { color: @yb-warn; }
 
-/* Мышь Logitech: оранжевая при 30%, красная при 15%, зелёная при зарядке */
-#custom-mouse          { padding: 0 12px; }
-#custom-mouse.warning  { color: #f5a97f; }
-#custom-mouse.critical { color: #ed8796; }
-#custom-mouse.charging { color: #a6da95; }
+/* ───────── Плеер ─────────
+   group/pill#player по центру: круглая обложка + «Название — Артист  1:23/3:39» (окно — yumi-player).
+   Отступы — у модулей, не у группы: когда ничего не играет, пустая группа нулевой ширины и пузыря нет */
+window#waybar.top #pill.player { padding: 0; }
+#image.player-cover         { padding: 0 0 0 5px; }
+#image.player-cover.empty   { padding: 0; }   /* без обложки модуль не должен оставлять щель */
+#custom-player-text         { color: @main-fg; }
+#custom-player-text.playing { text-shadow: 0 0 8px alpha(@yb-acc, 0.35); }
+#custom-player-text.paused  { opacity: 0.6; }
+#custom-player-text.paused:hover { opacity: 1; }
 
-/* Шрифт бара не зависит от темы */
-* { font-family: "JetBrainsMono Nerd Font"; }
+/* ───────── Мышь Logitech: оранжевая при 30%, красная при 15%, зелёная при зарядке ───────── */
+#custom-mouse.warning  { color: @yb-warn; }
+#custom-mouse.critical { color: @yb-crit; }
+#custom-mouse.charging { color: @yb-ok; text-shadow: 0 0 6px alpha(@yb-ok, 0.45); }
+
+/* ───────── Уведомления, обновления, буфер ───────── */
+#custom-swaync.notification,
+#custom-swaync.dnd-notification { color: @yb-acc; text-shadow: 0 0 6px alpha(@yb-acc, 0.5); }
+#custom-swaync.dnd-none,
+#custom-swaync.dnd-notification { opacity: 0.6; }
+
+/* ───────── Раскладка, VPN, кофеин, сеть, Bluetooth, звук ───────── */
+#custom-vpn.connecting   { color: @yb-warn; }
+#custom-wifi.disconnected,
+#custom-wifi.off,
+#custom-bt.off { opacity: 0.45; }
+#custom-wifi.weak { color: @yb-warn; }   /* слабый сигнал */
+#pulseaudio.muted        { color: @yb-crit; }
+#pulseaudio.bluetooth    { color: @yb-acc; }
+
+/* ───────── Часы, батарея, режим питания, режим HyDE ───────── */
+window#waybar.top #pill label#clock { font-weight: bold; }
+#battery.warning:not(.charging) { color: @yb-warn; }
+@keyframes yb-crit {
+  from { color: @yb-crit; text-shadow: 0 0 0 alpha(@yb-crit, 0); }
+  to   { color: #ffd9de;  text-shadow: 0 0 8px alpha(@yb-crit, 0.95); }
+}
+#battery.critical:not(.charging):not(.plugged) {
+  color: @yb-crit;
+  animation: yb-crit 1.1s ease-in-out infinite alternate;
+}
+#battery.charging,
+#battery.plugged {
+  color: @yb-ok;
+  text-shadow: 0 0 6px alpha(@yb-ok, 0.45);
+}
+
+#custom-powerprofile.power-saver { color: @yb-ok; }
+#custom-powerprofile.performance { color: @yb-warn; }
+
+
+/* ───────── Питание ─────────
+   Наведение — вся круглая пилюля красноватая, значок по центру красный */
+window#waybar.top #pill.right4:hover {
+  background-image: linear-gradient(to bottom, alpha(@yb-crit, 0.18), alpha(@yb-bg, 0.68));
+  box-shadow: inset 0 0 0 1px alpha(@yb-crit, 0.40),
+              inset 0 1px 0 0 alpha(@main-fg, 0.08);
+}
+window#waybar.top #pill.right4:hover label#custom-power,
+window#waybar.top #pill label#custom-power:hover {
+  color: @yb-crit;
+}
+
+/* ───────── Подсказки — рамка как у меню yumi-panel ───────── */
+tooltip {
+  background: alpha(@yb-deep, 0.94);
+  border: 2px solid @wb-act-bg;
+  border-radius: 16px;
+}
+tooltip label {
+  color: @main-fg;
+  padding: 3px 5px;
+}
+
+/* Значок Wi-Fi («волны») шире своей ячейки шрифта — на 140% край обрезался; чуть больше отступа */
+window#waybar.top #pill label#custom-wifi { padding: 0 0.4em; }
+window#waybar.top #pill label#custom-bt   { padding: 0 0.45em; }
+
+/* Колокольчик центра уведомлений — значок без текста, крупно как остальные значки (130%) */
+window#waybar.top #pill label#custom-swaync {
+  font-family: "JetBrainsMono Nerd Font Propo";
+  font-size: 1.3em;
+}
+
+/* Свой одноцветный трей (yumi-tray): пустой — нулевой ширины, без «пузыря» */
+window#waybar.top #pill.tray { padding: 0; }
+window#waybar.top #pill label#custom-tray { padding: 0 1.0em; margin: 0; }
+#custom-tray.attention { color: @yb-warn; }

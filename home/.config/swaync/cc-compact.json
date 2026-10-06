@@ -11,7 +11,7 @@
   "control-center-margin-right": 10,
   "control-center-margin-left": 0,
   "control-center-width": 360,
-  "control-center-height": 640,
+  "control-center-height": 740,
   "fit-to-screen": false,
   "notification-window-width": 360,
   "notification-icon-size": 40,
@@ -40,19 +40,19 @@
     "slider#mic",
     "backlight",
     "backlight#KB",
-    "mpris",
     "title",
+    "dnd",
     "notifications"
   ],
   "widget-config": {
     "label": {
-      "text": ".",
+      "text": "Центр управления",
       "max-lines": 1
     },
     "title": {
-      "text": "Notifications",
+      "text": "УВЕДОМЛЕНИЯ",
       "clear-all-button": true,
-      "button-text": "󰎟  Clear"
+      "button-text": "󰎟  Очистить"
     },
     "buttons-grid": {
       "buttons-per-row": 4,
@@ -88,18 +88,20 @@
           "update-command": "@HOME@/.local/bin/cc saver state"
         },
         {
-          "label": "󰂛",
+          "label": "󰅶",
           "type": "toggle",
-          "command": "swaync-client -d -sw",
-          "update-command": "swaync-client -D -sw"
+          "command": "@HOME@/.local/bin/cc caffeine toggle",
+          "update-command": "@HOME@/.local/bin/cc caffeine state",
+          "tooltip": "Не засыпать"
         },
         {
           "label": "󰂚",
           "command": "@HOME@/.local/bin/cc view notifs"
         },
         {
-          "label": "󰓃",
-          "command": "@HOME@/.local/bin/cc menu sound"
+          "label": "󰍽",
+          "command": "@HOME@/.local/bin/cc menu mouse",
+          "tooltip": "Мышь: батарея, DPI, частота"
         }
       ]
     },
@@ -122,10 +124,6 @@
       "device": "kbd_backlight",
       "subsystem": "leds"
     },
-    "mpris": {
-      "image-size": 56,
-      "image-radius": 14
-    },
     "slider#vol": {
       "label": "󰕾",
       "min": 0,
@@ -135,8 +133,12 @@
       "min_limit": 0,
       "max_limit": 100,
       "value_scale": 0
+    },
+    "dnd": {
+      "text": "󰂛   Не беспокоить"
     }
   },
   "control-center-positionX": "right",
-  "control-center-positionY": "top"
+  "control-center-positionY": "top",
+  "text-empty": "Нет уведомлений"
 }

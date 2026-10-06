@@ -1,0 +1,620 @@
+#!/usr/bin/env python3
+"""yumi-menu-vpn — меню VPN на GTK (каркас yumi-panel): ExpressVPN + Tailscale.
+  yumi-menu-vpn [--bar|--center]   открыть / закрыть
+  yumi-menu-vpn --close            закрыть
+
+ExpressVPN (expressvpnctl): переключатель, текущая локация, выбор локации с поиском, «Подключиться» со спиннером.
+Tailscale: состояние, свой адрес (копирование), устройства сети (tailscale status --json) с задержкой
+(tailscale ping) и подстраницей устройства. Чтение статуса — по-настоящему; всё меняющее — через yp.do().
+
+Переменные для проверки:
+  YP_DRYRUN=1         подключение/отключение VPN и Tailscale не выполняются (команда — в stderr), результат имитируется
+  YP_FAKE_NET=1       выдуманные состояние и устройства (для снимков; включает и YP_DRYRUN)
+  YP_FAKE_VPN=on      (с YP_FAKE_NET) ExpressVPN «подключён»
+  YP_OPEN=regions | device:<имя> | ts-off   сразу открыть подстраницу / подтверждение
+  YP_TEST=connect     нажать «Подключиться» (только в проверке)
+Откат: удалить этот файл"""
+import os
+import re
+import sys
+import json
+import shutil
+import threading
+from datetime import datetime, timezone
+
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-panel"))
+import yumipanel as yp  # noqa: E402  (сам перезапускает процесс с layer-shell)
+from yumipanel import Gtk, Gdk, GLib, Pango  # noqa: E402
+
+FAKE = bool(os.environ.get("YP_FAKE_NET"))
+DRY = yp.DRY or FAKE
+yp.DRY = DRY
+DEFAULT_REGION = "usa-new-york"          # как VPN_REGION в zsh-функции vpn
+
+CSS = """
+.yv-card { background: @yp-btn; border-radius: 16px; padding: 10px 14px; }
+.yv-card-title { font-size: 12pt; font-weight: 700; }
+.yv-card-sub { font-size: 9.5pt; color: alpha(@yp-fg2, 0.8); }
+.yv-dot { font-size: 10pt; }
+.yv-dot.on { color: #a6da95; }
+.yv-dot.mid { color: #f5a97f; }
+.yv-dot.off { color: alpha(@yp-fg2, 0.45); }
+.yv-dot.err { color: #ed8796; }
+.yv-chevron { color: alpha(@yp-fg2, 0.6); font-size: 12pt; }
+.yv-list scrollbar { background: transparent; border: none; }
+.yv-dim { color: alpha(@yp-fg2, 0.6); font-size: 10pt; padding: 6px; }
+.yv-peer.offline { opacity: 0.6; }
+.yv-ok { color: #a6da95; }
+.yv-warn { color: #f5a97f; }
+.yv-bad { color: #ed8796; }
+.yv-dry { color: @yp-accent; font-size: 8.5pt; font-weight: 700; letter-spacing: 1px; padding: 0 6px; }
+.yv-big { font-size: 13pt; font-weight: 700; padding: 2px 4px 0 4px; }
+.yv-small { font-size: 9.5pt; color: alpha(@yp-fg2, 0.75); padding: 0 4px 4px 4px; }
+"""
+
+COUNTRIES = {
+    "usa": "США", "uk": "Великобритания", "italy": "Италия", "france": "Франция", "germany": "Германия",
+    "switzerland": "Швейцария", "spain": "Испания", "netherlands": "Нидерланды", "canada": "Канада",
+    "japan": "Япония", "australia": "Австралия", "singapore": "Сингапур", "hong-kong": "Гонконг",
+    "south-korea": "Южная Корея", "brazil": "Бразилия", "india": "Индия", "sweden": "Швеция",
+    "taiwan": "Тайвань", "austria": "Австрия", "belgium": "Бельгия", "poland": "Польша", "norway": "Норвегия",
+    "finland": "Финляндия", "denmark": "Дания", "ireland": "Ирландия", "portugal": "Португалия",
+    "greece": "Греция", "turkey": "Турция", "ukraine": "Украина", "czech-republic": "Чехия",
+    "romania": "Румыния", "hungary": "Венгрия", "bulgaria": "Болгария", "serbia": "Сербия",
+    "croatia": "Хорватия", "slovenia": "Словения", "slovakia": "Словакия", "estonia": "Эстония",
+    "latvia": "Латвия", "lithuania": "Литва", "moldova": "Молдова", "georgia": "Грузия", "armenia": "Армения",
+    "kazakhstan": "Казахстан", "uzbekistan": "Узбекистан", "belarus": "Беларусь", "israel": "Израиль",
+    "united-arab-emirates": "ОАЭ", "mexico": "Мексика", "argentina": "Аргентина", "chile": "Чили",
+    "new-zealand": "Новая Зеландия", "south-africa": "ЮАР", "iceland": "Исландия", "luxembourg": "Люксембург",
+    "malta": "Мальта", "cyprus": "Кипр", "monaco": "Монако", "andorra": "Андорра", "liechtenstein": "Лихтенштейн",
+    "albania": "Албания", "montenegro": "Черногория", "north-macedonia": "Северная Македония",
+    "bosnia-and-herzegovina": "Босния и Герцеговина", "egypt": "Египет", "morocco": "Марокко",
+    "algeria": "Алжир", "kenya": "Кения", "nigeria": "Нигерия", "ghana": "Гана", "lebanon": "Ливан",
+    "thailand": "Таиланд", "vietnam": "Вьетнам", "philippines": "Филиппины", "indonesia": "Индонезия",
+    "malaysia": "Малайзия", "china": "Китай", "mongolia": "Монголия", "azerbaijan": "Азербайджан",
+    "saudi-arabia": "Саудовская Аравия", "qatar": "Катар", "pakistan": "Пакистан", "colombia": "Колумбия",
+    "peru": "Перу", "ecuador": "Эквадор", "uruguay": "Уругвай", "bolivia": "Боливия", "venezuela": "Венесуэла",
+    "cuba": "Куба", "panama": "Панама", "costa-rica": "Коста-Рика", "jamaica": "Ямайка",
+    "puerto-rico": "Пуэрто-Рико", "bahamas": "Багамы", "greenland": "Гренландия", "isle-of-man": "Остров Мэн",
+    "jersey": "Джерси", "gaming-europe": "Европа (игры)", "macau": "Макао", "sri-lanka": "Шри-Ланка",
+    "bangladesh": "Бангладеш", "nepal": "Непал", "cambodia": "Камбоджа", "laos": "Лаос", "myanmar": "Мьянма",
+    "bhutan": "Бутан", "brunei": "Бруней", "guam": "Гуам", "guatemala": "Гватемала", "honduras": "Гондурас",
+    "bermuda": "Бермуды", "cayman-islands": "Каймановы острова", "dominican-republic": "Доминикана",
+    "trinidad-and-tobago": "Тринидад и Тобаго",
+}
+STATE_RU = {"Connected": "Подключено", "Disconnected": "Отключено", "Connecting": "Подключаюсь…",
+            "Reconnecting": "Переподключаюсь…", "Interrupted": "Прервано", "Disconnecting": "Отключаюсь…",
+            "DisconnectingToReconnect": "Переподключаюсь…"}
+OS_ICON = {"linux": "󰌽", "macos": "󰀵", "ios": "󰀷", "android": "󰀲", "windows": "󰖳"}
+
+
+def region_parts(code):
+    """'usa-new-york' → ('США', 'New York')."""
+    if code == "smart":
+        return "Умный выбор", ""
+    for key in sorted(COUNTRIES, key=len, reverse=True):
+        if code == key or code.startswith(key + "-"):
+            rest = code[len(key) + 1:]
+            city = " ".join(w.capitalize() for w in rest.split("-")).replace("(via", "(Via") if rest else ""
+            return COUNTRIES[key], city.replace("(Via Uk)", "(через UK)").replace("(Via Singapore)", "(через Сингапур)")
+    return code.replace("-", " ").title(), ""
+
+
+def region_name(code):
+    c, city = region_parts(code)
+    return f"{c} · {city}" if city else c
+
+
+# ---------- чтение состояния ----------
+def evpn(*args):
+    return yp.run("expressvpnctl", "-t", "2", *args, timeout=3).strip()
+
+
+REGIONS = []
+FAKE_STATE = {"state": "Connected" if os.environ.get("YP_FAKE_VPN") == "on" else "Disconnected",
+              "region": "smart", "smart": "italy-milan", "vpnip": "10.84.0.17"}
+
+
+def vpn_snapshot():
+    if FAKE:
+        regions = ["smart", "italy-milan", "italy-naples", "germany-frankfurt-1", "germany-berlin", "france-paris-1",
+                   "switzerland", "netherlands-amsterdam", "uk-london", "usa-new-york", "usa-los-angeles-1",
+                   "japan-tokyo", "singapore-cbd", "canada-toronto"]
+        return dict(FAKE_STATE, ok=True, regions=regions)
+    if not shutil.which("expressvpnctl"):
+        return {"ok": False}
+    st = evpn("get", "connectionstate")
+    region = evpn("get", "region")
+    d = {"ok": bool(st), "state": st or "Unknown", "region": region, "smart": "", "vpnip": ""}
+    if region == "smart":
+        d["smart"] = evpn("get", "smart")
+    if st == "Connected":
+        ip = evpn("get", "vpnip")
+        d["vpnip"] = ip if re.match(r"^[\d.:a-f]+$", ip or "") else ""
+    global REGIONS
+    if not REGIONS:                       # список локаций читается один раз
+        REGIONS = [r for r in evpn("get", "regions").splitlines() if r.strip()]
+    d["regions"] = REGIONS
+    return d
+
+
+FAKE_TS = {
+    "BackendState": "Running",
+    "Self": {"HostName": "laptop", "DNSName": "laptop.example.ts.net.", "OS": "linux", "Online": True,
+             "TailscaleIPs": ["100.64.0.10", "fd7a:115c:a1e0::a"]},
+    "MagicDNSSuffix": "example.ts.net",
+    "CurrentTailnet": {"Name": "demo"},
+    "Peer": {
+        "a": {"HostName": "localhost", "DNSName": "phone.example.ts.net.", "OS": "iOS", "Online": True,
+              "TailscaleIPs": ["100.64.0.21", "fd7a:115c:a1e0::21"], "Relay": "fra", "CurAddr": "",
+              "RxBytes": 1162412, "TxBytes": 1165364, "LastSeen": "0001-01-01T00:00:00Z", "_ping": "38 мс · через DERP (fra)"},
+        "b": {"HostName": "desktop", "DNSName": "desktop.example.ts.net.", "OS": "windows", "Online": True,
+              "TailscaleIPs": ["100.64.0.22"], "Relay": "ams", "CurAddr": "192.168.1.20:41641",
+              "RxBytes": 52_400_000, "TxBytes": 8_100_000, "LastSeen": "0001-01-01T00:00:00Z", "_ping": "4 мс · напрямую"},
+        "c": {"HostName": "tablet", "DNSName": "tablet.example.ts.net.", "OS": "android", "Online": False,
+              "TailscaleIPs": ["100.64.0.23"], "Relay": "fra", "CurAddr": "", "RxBytes": 0, "TxBytes": 0,
+              "LastSeen": "2026-10-05T18:20:00Z"},
+    },
+}
+
+
+def ts_snapshot():
+    if FAKE:
+        return FAKE_TS
+    if not shutil.which("tailscale"):
+        return None
+    try:
+        return json.loads(yp.run("tailscale", "status", "--json", timeout=4) or "null")
+    except ValueError:
+        return None
+
+
+def ts_ping(ip):
+    """'pong from x (ip) via DERP(fra) in 45ms' → '45 мс · через DERP (fra)'. Только чтение."""
+    out = yp.run("tailscale", "ping", "-c", "1", "--timeout", "3s", ip, timeout=5)
+    m = re.search(r"via (.+?) in ([\d.]+)ms", out)
+    if not m:
+        return "нет ответа" if out else "—"
+    via = m.group(1)
+    via = f"через DERP ({via[5:-1]})" if via.startswith("DERP(") else "напрямую"
+    return f"{round(float(m.group(2)))} мс · {via}"
+
+
+def peer_name(p):
+    dns = (p.get("DNSName") or "").split(".")[0]
+    return dns or p.get("HostName") or "?"
+
+
+def human_bytes(n):
+    for unit in ("Б", "КБ", "МБ", "ГБ"):
+        if n < 1024 or unit == "ГБ":
+            return f"{n:.0f} {unit}" if unit == "Б" else f"{n:.1f} {unit}".replace(".", ",")
+        n /= 1024
+    return str(n)
+
+
+def ago(iso):
+    try:
+        t = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return ""
+    if t.year < 2000:
+        return ""
+    s = (datetime.now(timezone.utc) - t).total_seconds()
+    if s < 3600:
+        return f"{max(int(s // 60), 1)} мин назад"
+    if s < 86400:
+        return f"{int(s // 3600)} ч назад"
+    return f"{int(s // 86400)} д назад"
+
+
+class Vpn:
+    def __init__(self, panel, body):
+        self.panel = panel
+        panel.add_css(CSS)
+        self.vpn = {}
+        self.ts = None
+        self.pings = {}            # ip → текст задержки
+        self.selected = None       # выбранная локация (до подключения)
+        self.connecting = False
+        self.ts_switch_block = False
+        self.vpn_switch_block = False
+
+        # ── ExpressVPN ──
+        body.append(yp.section("EXPRESSVPN"))
+        row, self.vpn_sw = yp.toggle_row("󰖂", "ExpressVPN", False, self.on_vpn_toggle)
+        body.append(row)
+        self.vpn_card = Gtk.Box(spacing=12, css_classes=["yv-card"])
+        self.vpn_dot = Gtk.Label(label="●", css_classes=["yv-dot", "off"])
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True)
+        self.vpn_title = Gtk.Label(xalign=0, css_classes=["yv-card-title"], ellipsize=Pango.EllipsizeMode.END)
+        self.vpn_sub = Gtk.Label(xalign=0, css_classes=["yv-card-sub"], ellipsize=Pango.EllipsizeMode.END)
+        col.append(self.vpn_title)
+        col.append(self.vpn_sub)
+        self.vpn_card.append(self.vpn_dot)
+        self.vpn_card.append(col)
+        body.append(self.vpn_card)
+        self.loc_btn = yp.row_button("󰍎", "Локация", self.open_regions, meta="›")
+        self.loc_label = self.loc_btn.get_child().get_first_child().get_next_sibling()
+        body.append(self.loc_btn)
+        self.spin = yp.revealer(yp.spinner_row("Подключаюсь…"))
+        body.append(self.spin)
+        self.connect_btn = yp.action_button("󰌘  Подключиться", lambda *_: self.connect(), "primary")
+        body.append(self.connect_btn)
+
+        # ── Tailscale ──
+        body.append(yp.section("TAILSCALE"))
+        row, self.ts_sw = yp.toggle_row("󰛳", "Tailscale", False, self.on_ts_toggle)
+        body.append(row)
+        self.ts_confirm = yp.revealer(yp.confirm_box(
+            "Отключить Tailscale? SSH-доступ к ноутбуку через Tailscale пропадёт.", self.ts_down, "Отключить",
+            self.ts_cancel))
+        body.append(self.ts_confirm)
+        self.ts_info = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        body.append(self.ts_info)
+        self.peers = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, propagate_natural_height=True,
+                                    max_content_height=round(260 * panel.k), css_classes=["yv-list"])
+        scroll.set_child(self.peers)
+        body.append(scroll)
+        if DRY:
+            body.append(Gtk.Label(label="ПРОВЕРКА: ИЗМЕНЕНИЯ НЕ ВЫПОЛНЯЮТСЯ", xalign=0, css_classes=["yv-dry"]))
+
+        self.panel.set_subtitle("Читаю состояние…")
+        self.refresh(first=True)
+        GLib.timeout_add_seconds(4, self.tick)
+
+    # ---------- обновление ----------
+    def tick(self):
+        if not self.connecting:
+            self.refresh()
+        return True
+
+    def refresh(self, first=False):
+        def work():
+            v, t = vpn_snapshot(), ts_snapshot()
+            GLib.idle_add(self.apply, v, t, first)
+        threading.Thread(target=work, daemon=True).start()
+
+    def apply(self, v, t, first=False):
+        self.vpn, self.ts = v, t
+        self.apply_vpn()
+        self.apply_ts()
+        if first:
+            self.ping_all()
+            self.auto_test()
+        return False
+
+    def apply_vpn(self):
+        v = self.vpn
+        if self.connecting:
+            return
+        if not v.get("ok"):
+            self.vpn_title.set_label("ExpressVPN недоступен")
+            self.vpn_sub.set_label("нет expressvpnctl или служба не запущена")
+            self.set_dot(self.vpn_dot, "err")
+            self.connect_btn.set_sensitive(False)
+            return
+        st = v["state"]
+        on = st == "Connected"
+        busy = st in ("Connecting", "Reconnecting", "DisconnectingToReconnect", "Disconnecting")
+        self.vpn_switch_block = True
+        self.vpn_sw.set_active(on or (busy and st != "Disconnecting"))
+        self.vpn_switch_block = False
+        region = v.get("region") or ""
+        where = region_name(v["smart"]) if region == "smart" and v.get("smart") else region_name(region)
+        self.vpn_title.set_label(STATE_RU.get(st, st))
+        if on:
+            self.vpn_sub.set_label(f"{where}" + (f" · IP {v['vpnip']}" if v.get("vpnip") else ""))
+        else:
+            self.vpn_sub.set_label("Трафик идёт напрямую")
+        self.set_dot(self.vpn_dot, "on" if on else "mid" if busy else "off")
+        sel = self.selected or region or DEFAULT_REGION
+        label = region_name(sel)
+        if sel == "smart" and v.get("smart"):
+            label += f" ({region_name(v['smart'])})"
+        self.loc_label.set_label(label)
+        if not self.connecting:
+            if on and (self.selected in (None, region)):
+                self.connect_btn.set_label("󰌙  Отключиться")
+                self.connect_btn.remove_css_class("primary")
+                self.connect_btn.add_css_class("plain")
+            else:
+                self.connect_btn.set_label("󰌘  Подключиться" if not on else "󰑐  Переключиться сюда")
+                self.connect_btn.remove_css_class("plain")
+                self.connect_btn.add_css_class("primary")
+        self.connect_btn.set_sensitive(not self.connecting)
+        self.update_subtitle()
+
+    def apply_ts(self):
+        while (c := self.ts_info.get_first_child()):
+            self.ts_info.remove(c)
+        while (c := self.peers.get_first_child()):
+            self.peers.remove(c)
+        t = self.ts
+        running = bool(t) and t.get("BackendState") == "Running"
+        if not self.ts_confirm.get_reveal_child():      # пока висит подтверждение — переключатель не трогать
+            self.ts_switch_block = True
+            self.ts_sw.set_active(running)
+            self.ts_switch_block = False
+        if not t:
+            self.ts_info.append(Gtk.Label(label="Tailscale не установлен или не отвечает", xalign=0,
+                                          css_classes=["yv-dim"]))
+            self.update_subtitle()
+            return
+        if not running:
+            self.ts_info.append(Gtk.Label(label=f"Состояние: {t.get('BackendState', '?')}", xalign=0,
+                                          css_classes=["yv-dim"]))
+            self.update_subtitle()
+            return
+        me = t.get("Self") or {}
+        ips = me.get("TailscaleIPs") or []
+        v4 = next((i for i in ips if ":" not in i), "")
+        self.ts_info.append(yp.info_row("Мой адрес", v4, copy=True))
+        self.ts_info.append(yp.info_row("Имя", (me.get("DNSName") or "").rstrip("."), copy=True))
+        peers = sorted((t.get("Peer") or {}).values(), key=lambda p: (not p.get("Online"), peer_name(p).lower()))
+        online = sum(1 for p in peers if p.get("Online"))
+        self.peers.append(yp.section(f"УСТРОЙСТВА · {online} из {len(peers)} в сети"))
+        if not peers:
+            self.peers.append(Gtk.Label(label="Других устройств нет", xalign=0, css_classes=["yv-dim"]))
+        for p in peers:
+            ip = next((i for i in p.get("TailscaleIPs") or [] if ":" not in i), "")
+            if p.get("Online"):
+                meta = self.pings.get(ip, p.get("_ping", "в сети")).split(" · ")[0]
+            else:
+                meta = ago(p.get("LastSeen", "")) or "не в сети"
+            icon = OS_ICON.get((p.get("OS") or "").lower(), "󰟀")
+            b = yp.row_button(icon, peer_name(p), lambda *_, pp=p: self.open_device(pp), meta=meta)
+            b.add_css_class("yv-peer")
+            if not p.get("Online"):
+                b.add_css_class("offline")
+            self.peers.append(b)
+        self.update_subtitle()
+
+    def update_subtitle(self):
+        parts = []
+        st = self.vpn.get("state")
+        if self.vpn.get("ok"):
+            parts.append("VPN: " + ("вкл" if st == "Connected" else "выкл" if st == "Disconnected" else "…"))
+        if self.ts is not None:
+            parts.append("Tailscale: " + ("в сети" if self.ts.get("BackendState") == "Running" else "выкл"))
+        self.panel.set_subtitle(" · ".join(parts), live=True)
+
+    def set_dot(self, dot, cls):
+        for c in ("on", "mid", "off", "err"):
+            dot.remove_css_class(c)
+        dot.add_css_class(cls)
+
+    def ping_all(self):
+        if FAKE or not self.ts:
+            return
+        for p in (self.ts.get("Peer") or {}).values():
+            ip = next((i for i in p.get("TailscaleIPs") or [] if ":" not in i), "")
+            if ip and p.get("Online"):
+                threading.Thread(target=lambda i=ip: (self.pings.__setitem__(i, ts_ping(i)),
+                                                      GLib.idle_add(self.apply_ts)), daemon=True).start()
+
+    # ---------- ExpressVPN: действия ----------
+    def on_vpn_toggle(self, state):
+        if self.vpn_switch_block or self.connecting:
+            return
+        on = self.vpn.get("state") == "Connected"
+        if state and not on:
+            self.connect()
+        elif not state and on:
+            self.disconnect()
+
+    def connect(self):
+        if self.connecting:
+            return
+        if self.vpn.get("state") == "Connected" and self.selected in (None, self.vpn.get("region")):
+            self.disconnect()
+            return
+        region = self.selected or self.vpn.get("region") or DEFAULT_REGION
+        self.connecting = True
+        self.panel.busy += 1
+        self.spin.set_reveal_child(True)
+        self.connect_btn.set_sensitive(False)
+        self.panel.toast(f"Подключаюсь: {region_name(region)}…", hold=30)
+        self.set_dot(self.vpn_dot, "mid")
+        self.vpn_title.set_label("Подключаюсь…")
+        self.vpn_sub.set_label(region_name(region))
+        self.vpn_switch_block = True
+        self.vpn_sw.set_active(True)
+        self.vpn_switch_block = False
+
+        def work():
+            ok, out = yp.do("expressvpnctl", "connect", region, timeout=30)
+            state = ""
+            if DRY:
+                import time
+                time.sleep(2)
+                FAKE_STATE.update(state="Connected", region=region)
+                state = "Connected"
+            elif ok:
+                import time
+                for _ in range(25):
+                    state = evpn("get", "connectionstate")
+                    if state == "Connected":
+                        break
+                    time.sleep(1)
+            GLib.idle_add(self.connect_done, region, state == "Connected", out)
+        threading.Thread(target=work, daemon=True).start()
+
+    def connect_done(self, region, ok, out):
+        self.connecting = False
+        self.panel.busy -= 1
+        self.spin.set_reveal_child(False)
+        if ok:
+            self.selected = None
+            self.panel.toast(f"VPN подключён: {region_name(region)}" + (" (проверка)" if DRY else ""), hold=4)
+        else:
+            msg = "Не удалось подключиться"
+            if "GUI" in (out or "") or "background" in (out or ""):
+                msg += ": запустите ExpressVPN или включите фоновый режим"
+            self.panel.toast(msg, error=True, hold=6)
+        if DRY:
+            self.apply(vpn_snapshot() if FAKE else dict(self.vpn, state="Connected", region=region), self.ts)
+        else:
+            self.refresh()
+        return False
+
+    def disconnect(self):
+        ok, out = yp.do("expressvpnctl", "disconnect")
+        if DRY:
+            FAKE_STATE.update(state="Disconnected")
+            self.panel.toast("VPN отключён (проверка)", hold=4)
+            self.apply(vpn_snapshot() if FAKE else dict(self.vpn, state="Disconnected"), self.ts)
+        else:
+            self.panel.toast("VPN отключён" if ok else f"Ошибка: {out[:60]}", error=not ok, hold=4)
+            self.refresh()
+
+    def open_regions(self, *_):
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        search = Gtk.SearchEntry(placeholder_text="Страна или город…", css_classes=["yp-entry"])
+        page.append(search)
+        lst = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, propagate_natural_height=True,
+                                    max_content_height=round(420 * self.panel.k), css_classes=["yv-list"])
+        scroll.set_child(lst)
+        page.append(scroll)
+        regions = self.vpn.get("regions") or []
+        cur = self.selected or self.vpn.get("region")
+
+        def fill(*_):
+            while (c := lst.get_first_child()):
+                lst.remove(c)
+            q = search.get_text().strip().lower()
+            last_country = None
+            n = 0
+            for code in regions:
+                country, city = region_parts(code)
+                hay = f"{code} {country} {city}".lower()
+                if q and q not in hay:
+                    continue
+                if code != "smart" and country != last_country:
+                    lst.append(yp.section(country.upper()))
+                    last_country = country
+                text = city or (country if code != "smart" else "Умный выбор — самая быстрая")
+                icon = "󰓅" if code == "smart" else "󰍎"
+                lst.append(yp.row_button(icon, text, lambda *_, c=code: self.pick_region(c), active=(code == cur)))
+                n += 1
+            if not n:
+                lst.append(Gtk.Label(label="Ничего не найдено", xalign=0, css_classes=["yv-dim"]))
+
+        search.connect("search-changed", fill)
+        search.connect("activate", lambda *_: self.pick_first(lst))
+        fill()
+        self.panel.push("Локация VPN", page, f"Локаций: {len(regions)}")
+        GLib.timeout_add(80, lambda: search.grab_focus() and False)
+
+    def pick_first(self, lst):
+        c = lst.get_first_child()
+        while c is not None and not isinstance(c, Gtk.Button):
+            c = c.get_next_sibling()
+        if c:
+            c.emit("clicked")
+
+    def pick_region(self, code):
+        self.selected = code
+        self.panel.pop()
+        self.apply_vpn()
+        self.panel.toast(f"Выбрано: {region_name(code)} — нажмите «Подключиться»", hold=4)
+
+    # ---------- Tailscale ----------
+    def on_ts_toggle(self, state):
+        if self.ts_switch_block:
+            return
+        running = bool(self.ts) and self.ts.get("BackendState") == "Running"
+        if not state and running:
+            self.ts_confirm.set_reveal_child(True)       # SSH идёт через Tailscale — только с подтверждением
+        elif state and not running:
+            yp.do("tailscale", "up")
+            self.panel.toast("Tailscale включается…" + (" (проверка)" if DRY else ""), hold=4)
+            if not DRY:
+                GLib.timeout_add_seconds(2, lambda: self.refresh() or False)
+
+    def ts_cancel(self):
+        self.ts_confirm.set_reveal_child(False)
+        self.ts_switch_block = True
+        self.ts_sw.set_active(True)
+        self.ts_switch_block = False
+
+    def ts_down(self):
+        self.ts_confirm.set_reveal_child(False)
+        yp.do("tailscale", "down")
+        if DRY:
+            self.panel.toast("Tailscale отключён (проверка)", hold=4)
+            self.ts_cancel()
+        else:
+            GLib.timeout_add_seconds(1, lambda: self.refresh() or False)
+
+    def open_device(self, p):
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        name = peer_name(p)
+        ips = p.get("TailscaleIPs") or []
+        v4 = next((i for i in ips if ":" not in i), "")
+        v6 = next((i for i in ips if ":" in i), "")
+        online = p.get("Online")
+        page.append(Gtk.Label(label=f"{OS_ICON.get((p.get('OS') or '').lower(), '󰟀')}  {name}", xalign=0,
+                              css_classes=["yv-big"]))
+        st = Gtk.Label(label="● в сети" if online else "● не в сети" + (f" · {ago(p.get('LastSeen', ''))}" if ago(p.get('LastSeen', '')) else ""),
+                       xalign=0, css_classes=["yv-small", "yv-ok" if online else "yv-bad"])
+        page.append(st)
+        page.append(yp.info_row("Система", p.get("OS") or "—"))
+        page.append(yp.info_row("IPv4", v4, copy=True))
+        if v6:
+            page.append(yp.info_row("IPv6", v6, copy=True))
+        dns = (p.get("DNSName") or "").rstrip(".")
+        page.append(yp.info_row("Имя", dns, copy=True))
+        if online:
+            link = f"напрямую · {p['CurAddr']}" if p.get("CurAddr") else f"через DERP ({p.get('Relay') or '?'})"
+            page.append(yp.info_row("Связь", link))
+            ping = yp.info_row("Задержка", self.pings.get(v4, p.get("_ping", "…")).split(" · ")[0])
+            page.append(ping)
+        page.append(yp.info_row("Трафик", f"↓ {human_bytes(p.get('RxBytes') or 0)} · ↑ {human_bytes(p.get('TxBytes') or 0)}"))
+        if p.get("ExitNodeOption"):
+            page.append(yp.info_row("Выходной узел", "доступен"))
+        btns = Gtk.Box(spacing=8, homogeneous=True, margin_top=6)
+        if online and v4:
+            def reping(*_):
+                ping.value.set_label("…")
+                if FAKE:
+                    GLib.timeout_add(600, lambda: ping.value.set_label(p.get("_ping", "—").split(" · ")[0]) or False)
+                    return
+
+                def work():
+                    r = ts_ping(v4)
+                    self.pings[v4] = r
+                    GLib.idle_add(lambda: ping.value.set_label(r.split(" · ")[0]) or False)
+                threading.Thread(target=work, daemon=True).start()
+            btns.append(yp.action_button("󰓅  Пинг", reping, "plain"))
+        if dns:
+            def copy_ssh(*_):
+                Gdk.Display.get_default().get_clipboard().set(f"ssh {dns}")
+                self.panel.toast("Скопировано: ssh " + dns.split(".")[0], hold=3)
+            btns.append(yp.action_button("󰣀  SSH", copy_ssh, "plain"))
+        page.append(btns)
+        self.panel.push("Устройство", page, dns)
+
+    # ---------- проверка ----------
+    def auto_test(self):
+        what = os.environ.get("YP_OPEN", "")
+        if what == "regions":
+            self.open_regions()
+        elif what.startswith("device:") and self.ts:
+            for p in (self.ts.get("Peer") or {}).values():
+                if peer_name(p) == what[7:]:
+                    self.open_device(p)
+        elif what == "ts-off" and DRY:
+            self.ts_sw.set_active(False)
+        if os.environ.get("YP_TEST") == "connect" and DRY:
+            if os.environ.get("YP_SELECT"):
+                self.selected = os.environ["YP_SELECT"]
+                self.apply_vpn()
+            self.connect()
+
+
+if __name__ == "__main__":
+    app = yp.PanelApp("org.yumi.panel.vpn", "VPN", "󰖂", lambda panel, body: Vpn(panel, body))
+    sys.exit(app.run(sys.argv))

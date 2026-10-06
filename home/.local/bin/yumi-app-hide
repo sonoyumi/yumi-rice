@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# yumi-app-hide — спрятать программы из меню приложений (сама программа не удаляется).
+#   yumi-app-hide <файл.desktop | часть имени> ...
+# Кладёт копию ярлыка с NoDisplay=true в ~/.local/share/applications (метка «# yumi-app-hide»).
+# Вернуть: yumi-app-unhide <имя>  (или просто удалить файл из ~/.local/share/applications)
+set -u
+LOCAL=~/.local/share/applications
+BAK=~/.local/share/yumi-app-hide/backup
+DIRS=(/usr/share/applications /var/lib/flatpak/exports/share/applications ~/.local/share/flatpak/exports/share/applications)
+mkdir -p "$LOCAL" "$BAK"
+[ $# -eq 0 ] && { sed -n '2,5p' "$0" | sed 's/^# \?//'; exit 1; }
+find_src() {   # точное имя файла или поиск по Name=/имени файла
+    local q=$1 d f
+    for d in "${DIRS[@]}"; do [ -f "$d/$q" ] && { echo "$d/$q"; return; }; [ -f "$d/$q.desktop" ] && { echo "$d/$q.desktop"; return; }; done
+    for d in "${DIRS[@]}"; do for f in "$d"/*.desktop; do [ -f "$f" ] || continue
+        if [[ "${f,,}" == *"${q,,}"* ]] || grep -qiF "Name=$q" "$f"; then echo "$f"; return; fi; done; done
+}
+for q in "$@"; do
+    src=$(find_src "$q")
+    name=$(basename "${src:-$q}"); [[ $name == *.desktop ]] || name="$name.desktop"
+    dst=$LOCAL/$name
+    if [ -f "$dst" ] && ! grep -q '^# yumi-app-hide' "$dst"; then
+        # свой ярлык пользователя: бэкап и пометка NoDisplay внутри
+        cp -n "$dst" "$BAK/$name"
+        grep -q '^NoDisplay=' "$dst" && sed -i 's/^NoDisplay=.*/NoDisplay=true/' "$dst" || sed -i '0,/^\[Desktop Entry\]/s//[Desktop Entry]\nNoDisplay=true/' "$dst"
+        sed -i '1i # yumi-app-hide (оригинал в ~/.local/share/yumi-app-hide/backup)' "$dst"
+        echo "скрыто (свой ярлык): $name"; continue
+    fi
+    [ -n "$src" ] || { echo "не найдено: $q" >&2; continue; }
+    { echo "# yumi-app-hide: копия $src"
+      awk '/^\[/{sec=$0} {if(sec=="[Desktop Entry]" && /^(NoDisplay|Hidden)=/) next; print} /^\[Desktop Entry\]$/{print "NoDisplay=true"}' "$src"
+    } > "$dst.tmp" && mv "$dst.tmp" "$dst"
+    echo "скрыто: $name"
+done
+update-desktop-database -q "$LOCAL" 2>/dev/null || true

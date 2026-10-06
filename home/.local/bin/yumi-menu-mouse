@@ -1,0 +1,380 @@
+#!/usr/bin/env python3
+"""yumi-menu-mouse — меню «Мышь» на GTK (каркас yumi-panel) вместо rofi menu-mouse.
+  yumi-menu-mouse [--bar|--center]   открыть / закрыть
+  yumi-menu-mouse --close            закрыть открытое меню
+Logitech PRO X 2 через Solaar: заряд (мгновенно из /sys/class/power_supply/hidpp_battery_*, кеш пилюли
+~/.cache/waybar-mouse.json — запасной), DPI (плитки 400/800/1600/3200 + точный ползунок 100–6400),
+частота опроса (500–4000 Гц), встроенный профиль мыши (onboard_profiles), «Открыть Solaar».
+Текущие настройки читаются `solaar config` в потоке (~1,5 с). Изменения — `solaar config …`, как в старом меню,
+затем сигнал пилюле Waybar (RTMIN+13).
+
+Отладка:
+  YP_DRYRUN=1   настройки мыши не меняются — команды solaar пишутся в stderr
+  YP_MOUSE_ACT=dpi:1600 | rate:2000 | onboard:off | slider:1200   через 2,5 с «нажать» элемент (только с YP_DRYRUN=1)
+Откат: удалить этот файл (старое меню ~/.local/bin/menu-mouse не тронуто)."""
+import glob
+import json
+import os
+import re
+import sys
+import threading
+
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-panel"))
+import yumipanel as yp  # noqa: E402  (сам перезапускает процесс с layer-shell)
+from yumipanel import Gtk, GLib  # noqa: E402
+
+DEVICE = "PRO X 2"
+CACHE = os.path.expanduser("~/.cache/waybar-mouse.json")
+DPIS = [400, 800, 1600, 3200]
+DPI_MIN, DPI_MAX, DPI_STEP = 100, 6400, 50
+RATES = [(500, "2ms"), (1000, "1ms"), (2000, "500us"), (4000, "250us")]   # Гц → значение Solaar
+CHARGING = {"charging", "full"}
+# каркас подгружает libgtk4-layer-shell через LD_PRELOAD — Solaar (GTK3) с ним падает: запускать без него
+SOLAAR = ("env", "-u", "LD_PRELOAD", "solaar")
+RED, ORANGE, GREEN = "#ed8796", "#f5a97f", "#a6da95"
+ICONS_BAT = "󰁺󰁻󰁼󰁽󰁾󰁿󰂀󰂁󰂂󰁹"
+ICONS_CHG = "󰢜󰂆󰂇󰂈󰢝󰂉󰢞󰂊󰂋󰂅"
+
+CSS = f"""
+.yp-ms-card {{ background: alpha(@yp-btn, 0.55); border-radius: 20px; padding: 12px 14px; }}
+.yp-ms-pct {{ font-size: 26pt; font-weight: 800; color: @yp-accent; }}
+.yp-ms-sign {{ font-size: 14pt; font-weight: 700; color: alpha(@yp-fg2, 0.8); }}
+.yp-ms-bicon {{ font-size: 20pt; color: @yp-accent; }}
+.yp-ms-state {{ font-size: 11pt; font-weight: 700; }}
+.yp-ms-sub {{ font-size: 9.5pt; color: alpha(@yp-fg2, 0.8); }}
+.yp-ms-bar trough {{ min-height: 10px; border-radius: 5px; background: alpha(@yp-fg, 0.13); }}
+.yp-ms-bar progress {{ min-height: 10px; border-radius: 5px; background: @yp-accent; }}
+.yp-ms-card.charging .yp-ms-pct, .yp-ms-card.charging .yp-ms-bicon {{ color: {GREEN}; }}
+.yp-ms-card.charging .yp-ms-bar progress {{ background: {GREEN}; }}
+.yp-ms-card.low .yp-ms-pct, .yp-ms-card.low .yp-ms-bicon {{ color: {ORANGE}; }}
+.yp-ms-card.low .yp-ms-bar progress {{ background: {ORANGE}; }}
+.yp-ms-card.critical .yp-ms-pct, .yp-ms-card.critical .yp-ms-bicon {{ color: {RED}; }}
+.yp-ms-card.critical .yp-ms-bar progress {{ background: {RED}; }}
+.yp-ms-card.offline .yp-ms-pct, .yp-ms-card.offline .yp-ms-bicon {{ color: alpha(@yp-fg2, 0.5); }}
+.yp-ms-dpi {{ font-size: 10pt; font-weight: 700; color: @yp-fg; min-width: 56px; }}
+.yp-ms-dpi-icon {{ font-size: 13pt; color: @yp-accent; padding: 0 4px; }}
+.yp-ms-seg .yp-seg-icon {{ font-size: 12pt; font-weight: 800; }}
+"""
+
+
+# ---------- данные ----------
+def sys_battery():
+    """Батарея мыши из ядра (драйвер hid-logitech-hidpp): {'pct', 'state', 'model'} или None."""
+    for d in glob.glob("/sys/class/power_supply/hidpp_battery_*"):
+        def rd(n, d=d):
+            try:
+                with open(os.path.join(d, n)) as f:
+                    return f.read().strip()
+            except OSError:
+                return ""
+        if DEVICE.lower() not in rd("model_name").lower():
+            continue
+        if rd("online") == "0" or not rd("capacity"):
+            return None
+        return {"pct": int(rd("capacity")), "state": rd("status").lower(), "model": rd("model_name"),
+                "maker": rd("manufacturer")}
+    return None
+
+
+def cache():
+    try:
+        with open(CACHE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def hz(rate):
+    m = re.match(r"(\d+)(ms|us)", rate or "")
+    if not m or int(m[1]) == 0:
+        return None
+    return round(1000 / int(m[1])) if m[2] == "ms" else round(1_000_000 / int(m[1]))
+
+
+def solaar_settings():
+    """`solaar config DEVICE` → {'dpi', 'rate_hz', 'onboard', 'onboard_choices'} (поля, что удалось прочитать)."""
+    out = yp.run(*SOLAAR, "config", DEVICE, timeout=20)
+    d = {}
+    m = re.search(r"^dpi_extended = \{X:(\d+)", out, re.M)
+    if m:
+        d["dpi"] = int(m[1])
+    m = re.search(r"^report_rate_extended = (\S+)", out, re.M)
+    if m:
+        d["rate_hz"] = hz(m[1])
+    m = re.search(r"^onboard_profiles = (.+)$", out, re.M)
+    if m:
+        d["onboard"] = m[1].strip()
+    m = re.search(r"possible values: one of \[ ([^\]]*Profile[^\]]*) \]", out)
+    if m:
+        d["onboard_choices"] = [s.strip() for s in m[1].split(",")]
+    return d
+
+
+def dpi_to_pos(dpi):
+    return (dpi - DPI_MIN) / (DPI_MAX - DPI_MIN) * 100
+
+
+def pos_to_dpi(v):
+    return int(round((DPI_MIN + v / 100 * (DPI_MAX - DPI_MIN)) / DPI_STEP) * DPI_STEP)
+
+
+def lbl(text="", classes=(), xalign=0.0, **kw):
+    return Gtk.Label(label=text, xalign=xalign, css_classes=list(classes), **kw)
+
+
+class Mouse:
+    def __init__(self, panel, body):
+        self.panel = panel
+        self.st = {}                  # настройки из Solaar
+        self.pending = 0              # >0 — идёт запись настройки
+        self.writing = set()          # какие поля сейчас пишутся (dpi, rate_hz, onboard)
+        self.slider_timer = 0
+        self.slider_block = 0
+        self.lock_ui = False          # программная установка Segmented/переключателя
+        panel.add_css(CSS)
+
+        # ---- карточка заряда ----
+        self.card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, css_classes=["yp-ms-card"])
+        top = Gtk.Box(spacing=12)
+        self.bicon = lbl("󰍽", ["yp-ms-bicon"], valign=Gtk.Align.CENTER)
+        top.append(self.bicon)
+        pct = Gtk.Box(valign=Gtk.Align.CENTER)
+        self.pct = lbl("…", ["yp-ms-pct"])
+        pct.append(self.pct)
+        pct.append(lbl("%", ["yp-ms-sign"], valign=Gtk.Align.END, margin_bottom=5))
+        top.append(pct)
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER, hexpand=True)
+        self.state = lbl("", ["yp-ms-state"], 1.0)
+        self.sub = lbl("", ["yp-ms-sub"], 1.0)
+        col.append(self.state)
+        col.append(self.sub)
+        top.append(col)
+        self.card.append(top)
+        self.bar = Gtk.ProgressBar(css_classes=["yp-ms-bar"])
+        self.card.append(self.bar)
+        body.append(self.card)
+
+        # ---- DPI ----
+        body.append(yp.section("ЧУВСТВИТЕЛЬНОСТЬ · DPI"))
+        self.dpi_seg = yp.Segmented([(d, str(d), "DPI", True) for d in DPIS], None, self.pick_dpi)
+        self.dpi_seg.add_css_class("yp-ms-seg")
+        body.append(self.dpi_seg)
+        icon = lbl("󰆤", ["yp-ms-dpi-icon"], tooltip_text="Точное значение")
+        row, self.dpi_scale, self.dpi_lbl = yp.slider_row(icon, self.slide_dpi)
+        self.dpi_lbl.add_css_class("yp-ms-dpi")
+        self.dpi_lbl.set_width_chars(6)
+        self.dpi_scale.set_increments(100 / ((DPI_MAX - DPI_MIN) / DPI_STEP), 100 / ((DPI_MAX - DPI_MIN) / 400))
+        for d in DPIS:
+            self.dpi_scale.add_mark(dpi_to_pos(d), Gtk.PositionType.BOTTOM, None)
+        body.append(row)
+
+        # ---- частота ----
+        body.append(yp.section("ЧАСТОТА ОПРОСА"))
+        self.rate_seg = yp.Segmented([(h, str(h) if h < 1000 else f"{h // 1000}K", "Гц", True) for h, _ in RATES],
+                                     None, self.pick_rate)
+        self.rate_seg.add_css_class("yp-ms-seg")
+        body.append(self.rate_seg)
+        body.append(yp.hint("Чем выше частота, тем плавнее курсор и тем быстрее садится батарея."))
+
+        # ---- профиль ----
+        body.append(yp.section("ПРОФИЛЬ"))
+        prow, self.onboard_sw = yp.toggle_row("󰓹", "Профиль в памяти мыши", False, self.toggle_onboard)
+        self.onboard_sw.set_sensitive(False)
+        body.append(prow)
+        self.loading = yp.spinner_row("Читаю настройки из Solaar…")
+        body.append(self.loading)
+        self.onboard_hint = yp.hint("Пока профиль включён, DPI и частоту задаёт он — изменения отсюда "
+                                    "могут не подействовать.")
+        self.onboard_hint.set_visible(False)
+        body.append(self.onboard_hint)
+
+        body.append(yp.row_button("󰒓", "Открыть Solaar", self.open_solaar))
+
+        # первичное заполнение из кеша пилюли — мгновенно; потом Solaar
+        c = cache()
+        if c.get("dpi"):
+            self.st["dpi"] = c["dpi"]
+        if hz(c.get("rate")):
+            self.st["rate_hz"] = hz(c.get("rate"))
+        self.apply_settings(loading=True)
+        self.refresh_battery()
+        GLib.timeout_add_seconds(10, self.refresh_battery)
+        threading.Thread(target=self.read_solaar, daemon=True).start()
+
+        act = os.environ.get("YP_MOUSE_ACT", "")
+        if act and yp.DRY:
+            what, _, arg = act.partition(":")
+            fn = {"dpi": lambda: (self.dpi_seg.set_active(int(arg)), self.pick_dpi(int(arg))),
+                  "rate": lambda: (self.rate_seg.set_active(int(arg)), self.pick_rate(int(arg))),
+                  "onboard": lambda: self.onboard_sw.set_active(arg == "on"),
+                  "slider": lambda: (self.dpi_scale.set_value(dpi_to_pos(int(arg))),
+                                     self.slide_dpi(dpi_to_pos(int(arg))))}.get(what)
+            if fn:
+                GLib.timeout_add(2500, lambda: fn() and False)
+
+    # ---------- заряд ----------
+    def refresh_battery(self):
+        b = sys_battery()
+        c = cache()
+        if b is None and c.get("battery") is not None:      # драйвер не отдал — кеш пилюли
+            b = {"pct": c["battery"], "state": "charging" if c.get("charging") else "discharging",
+                 "model": DEVICE, "maker": "Logitech", "cached": True}
+        for cl in ("charging", "low", "critical", "offline"):
+            self.card.remove_css_class(cl)
+        if b is None:
+            self.card.add_css_class("offline")
+            self.pct.set_label("—")
+            self.bicon.set_label("󰍾")
+            self.state.set_label("не на связи")
+            self.sub.set_label("мышь выключена или нет приёмника")
+            self.bar.set_fraction(0)
+            self.panel.set_subtitle(f"{DEVICE} · не на связи", live=True)
+            return True
+        p = b["pct"]
+        chg = b["state"] in CHARGING
+        i = min(max(p - 1, 0) // 10, 9)
+        self.bicon.set_label((ICONS_CHG if chg else ICONS_BAT)[i])
+        self.pct.set_label(str(p))
+        self.bar.set_fraction(p / 100)
+        self.state.set_label({"charging": "заряжается", "full": "заряжена"}.get(b["state"], "от батареи"))
+        self.sub.set_label(f"{b.get('maker') or 'Logitech'} {b.get('model') or DEVICE}" +
+                           (" · из кеша" if b.get("cached") else ""))
+        self.card.add_css_class("charging" if chg else "critical" if p <= 15 else "low" if p <= 30 else "normal")
+        self.update_subtitle(b)
+        return True
+
+    def update_subtitle(self, b=None):
+        b = b or getattr(self, "last_bat", None)
+        self.last_bat = b
+        parts = [DEVICE]
+        if b:
+            parts.append(f"{b['pct']}%" + (" 󱐋" if b["state"] in CHARGING else ""))
+        if self.st.get("dpi"):
+            parts.append(f"{self.st['dpi']} DPI")
+        if self.st.get("rate_hz"):
+            parts.append(f"{self.st['rate_hz']} Гц")
+        self.panel.set_subtitle(" · ".join(parts), live=True)
+
+    # ---------- настройки ----------
+    def read_solaar(self, tries=2):
+        """Solaar иногда отвечает 10+ с или зависает (USB занят OpenRGB) — вторая попытка."""
+        d = {}
+        for _ in range(tries):
+            d = solaar_settings()
+            if d:
+                break
+        GLib.idle_add(self.got_solaar, d)
+
+    def got_solaar(self, d):
+        self.loading.set_visible(False)
+        if not d:
+            self.panel.toast("Solaar не ответил — показаны данные пилюли", error=True, hold=4)
+            return False
+        # пока пишем настройку — её не затирать (старое значение из Solaar), остальное принять
+        self.st.update({k: v for k, v in d.items() if k not in self.writing})
+        self.apply_settings()
+        return False
+
+    def apply_settings(self, loading=False):
+        self.lock_ui = True
+        dpi, rate = self.st.get("dpi"), self.st.get("rate_hz")
+        self.dpi_seg.set_active(dpi)
+        if dpi and GLib.get_monotonic_time() > self.slider_block:
+            self.dpi_scale.set_value(dpi_to_pos(dpi))
+        self.dpi_lbl.set_label(str(dpi) if dpi else "…")
+        self.rate_seg.set_active(rate)
+        ob = self.st.get("onboard")
+        if ob is not None:
+            self.onboard_sw.set_sensitive(True)
+            self.onboard_sw.set_active(ob.lower() != "disabled")
+            self.onboard_hint.set_visible(ob.lower() != "disabled")
+        self.lock_ui = False
+        self.update_subtitle()
+
+    def write(self, label, key, *settings, on_ok=None):
+        """settings — списки аргументов для `solaar config DEVICE …`; выполняются по очереди в потоке.
+        key — поле self.st, которое меняется."""
+        self.pending += 1
+        self.writing.add(key)
+        self.panel.busy += 1
+        self.panel.toast(f"{label}…", hold=10)
+
+        def work():
+            ok, msg = True, ""
+            for args in settings:
+                ok, msg = yp.do(*SOLAAR, "config", DEVICE, *map(str, args), timeout=25)
+                if not ok:
+                    break
+            if ok:
+                yp.do("pkill", "-RTMIN+13", "-x", "waybar")    # пилюля перечитает мышь
+            GLib.idle_add(done, ok, msg)
+
+        def done(ok, msg):
+            self.pending -= 1
+            self.panel.busy -= 1
+            self.writing.discard(key)
+            if ok:
+                if on_ok:
+                    on_ok()
+                self.apply_settings()
+                self.panel.toast(f"{label} — готово" + (" (dry-run)" if yp.DRY else ""), hold=3)
+            else:
+                last = (msg.strip().splitlines() or ["ошибка"])[-1]
+                self.panel.toast(f"Не удалось: {last[:60]}", error=True, hold=5)
+                threading.Thread(target=self.read_solaar, daemon=True).start()
+            return False
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def set_dpi(self, d):
+        if d == self.st.get("dpi"):
+            return
+        self.write(f"DPI {d}", "dpi", ("dpi_extended", "X", d), ("dpi_extended", "Y", d),
+                   on_ok=lambda: self.st.update(dpi=d))
+
+    def pick_dpi(self, d):
+        if not self.lock_ui:
+            self.slider_block = 0
+            self.dpi_scale.set_value(dpi_to_pos(d))
+            self.dpi_lbl.set_label(str(d))
+            self.set_dpi(d)
+
+    def slide_dpi(self, v):
+        d = pos_to_dpi(v)
+        self.slider_block = GLib.get_monotonic_time() + 1_500_000
+        self.dpi_lbl.set_label(str(d))
+        self.dpi_seg.set_active(d)
+        if self.slider_timer:
+            GLib.source_remove(self.slider_timer)
+        self.slider_timer = GLib.timeout_add(500, self.slide_done, d)   # писать, когда ползунок отпустили
+
+    def slide_done(self, d):
+        self.slider_timer = 0
+        self.set_dpi(d)
+        return False
+
+    def pick_rate(self, h):
+        if self.lock_ui or h == self.st.get("rate_hz"):
+            return
+        val = dict(RATES)[h]
+        self.write(f"Частота {h} Гц", "rate_hz", ("report_rate_extended", val), on_ok=lambda: self.st.update(rate_hz=h))
+
+    def toggle_onboard(self, on):
+        if self.lock_ui:
+            return
+        cur = self.st.get("onboard", "")
+        if on == (cur.lower() != "disabled"):
+            return
+        choices = [c for c in self.st.get("onboard_choices", []) if c.lower() != "disabled"] or ["Profile 1"]
+        val = choices[0] if on else "Disabled"
+        self.write("Профиль " + ("включён" if on else "выключен"), "onboard", ("onboard_profiles", val),
+                   on_ok=lambda: self.st.update(onboard=val))
+
+    def open_solaar(self, *_):
+        yp.spawn(*SOLAAR, "--window=show")
+        self.panel.app.quit()
+
+
+if __name__ == "__main__":
+    app = yp.PanelApp("org.yumi.panel.mouse", "Мышь", "󰍽", lambda panel, body: Mouse(panel, body))
+    sys.exit(app.run(sys.argv))

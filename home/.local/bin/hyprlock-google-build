@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""hyprlock-google-build — собрать yumi-google.conf из шаблона yumi-google.base.tmpl.
+Каждый элемент копируется на каждый монитор со своим масштабом (размеры, позиции, шрифты).
+Мониторы и масштабы — в MONITORS. Откат: hyprlock-google-uninstall"""
+import os, re, json, subprocess
+
+D = os.path.expanduser('~/.config/hypr/hyprlock')
+BASE, OUT = f'{D}/yumi-google.base.tmpl', f'{D}/yumi-google.conf'
+MONITORS = [('eDP-1', 1.0), ('DP-1', 0.8)]   # встроенный экран MacBook, MSI
+SIZES = {'eDP-1': (1536, 960), 'DP-1': (1920, 1080)}   # логические px, если монитор сейчас не подключён
+DPR = {'eDP-1': 1.6666666, 'DP-1': 1.0}                # дробный масштаб монитора
+try:
+    for m in json.loads(subprocess.run(['hyprctl', 'monitors', '-j'], capture_output=True, text=True).stdout):
+        SIZES[m['name']] = (round(m['width'] / m['scale']), round(m['height'] / m['scale']))
+        DPR[m['name']] = m['scale']
+except Exception:
+    pass
+# hyprlock 0.9.6 всё (size, position, rounding, border, font_size) читает в ФИЗИЧЕСКИХ px буфера:
+# на eDP-1 буфер 2560×1600. Поэтому считаем в логических px и в конце умножаем на DPR монитора.
+# dots_size — доля высоты поля, его не трогаем.
+# Свои ключи шаблона (в готовый конфиг не попадают):
+#   pin = left|right        — position.x это левый/правый КРАЙ текста от центра экрана
+#   box = H, V, x, y, w, h  — поставить элемент в центр рамки w×h, отступ x,y от края H (left|right|center)
+#                             и V (top|bottom|center); для shape это ещё и размер
+
+src = open(BASE).read()
+blocks = list(re.finditer(r'^(\w[\w-]*)\s*\{\n(.*?)^\}\n', src, re.M | re.S))
+head = src[:blocks[0].start()]
+single = ('general', 'animations', 'background')
+
+def scale_block(body, k, W, H, d=1.0):
+    def num(v): return str(int(round(float(v) * k * d)))
+    def phys(v): return round(v * d)
+    kv = dict(re.findall(r'^[ \t]*(\w+)[ \t]*=[ \t]*(.*)$', body, re.M))
+    over = {}
+    if 'box' in kv:
+        h, v, x, y, w, hh = [t.strip() for t in kv['box'].split(',')]
+        x, y, w, hh = (float(t) * k for t in (x, y, w, hh))
+        cx = {'left': -W / 2 + x + w / 2, 'right': W / 2 - x - w / 2}.get(h, x)
+        cy = {'top': H / 2 - y - hh / 2, 'bottom': -H / 2 + y + hh / 2}.get(v, y)
+        over = {'halign': 'center', 'valign': 'center', 'position': f'{phys(cx)}, {phys(cy)}'}
+        if 'size' in kv and ',' in kv['size']:
+            over['size'] = f'{phys(w)}, {phys(hh)}'
+    elif 'pin' in kv:
+        x, y = (float(t) * k for t in kv['position'].split(','))
+        x = W / 2 + x if kv['pin'] == 'left' else x - W / 2
+        over = {'halign': kv['pin'], 'position': f'{phys(x)}, {phys(y)}'}
+    out = []
+    for line in body.splitlines():
+        m0 = re.match(r'^\s*(\w+)\s*=', line)
+        if m0 and m0.group(1) in ('box', 'pin'):
+            continue
+        if m0 and m0.group(1) in over:
+            out.append(f'    {m0.group(1)} = {over[m0.group(1)]}')
+            continue
+        m = re.match(r'^(\s*)(\w+)(\s*=\s*)(.*)$', line)
+        if m:
+            ind, key, eq, val = m.groups()
+            if key == 'monitor':
+                continue
+            if key in ('size', 'position') and re.fullmatch(r'-?[\d.]+\s*(,\s*-?[\d.]+)?', val):
+                val = ', '.join(num(v) for v in val.split(','))
+            elif key == 'font_size' and re.fullmatch(r'[\d.]+', val):
+                val = str(int(round(float(val) * k * d)))      # шрифт тоже в физ. px (pt при 96 dpi)
+            elif key in ('border_size', 'outline_thickness', 'shadow_size') and re.fullmatch(r'[\d.]+', val):
+                val = '0' if float(val) == 0 else str(max(1, int(round(float(val) * k * d))))   # 0 = без рамки
+            elif key == 'rounding' and re.fullmatch(r'\d+', val):
+                val = num(val)
+            line = f'{ind}{key}{eq}{val}'
+        out.append(line)
+    return '\n'.join(out)
+
+parts = [head.rstrip() + '\n\n# (собрано hyprlock-google-build из yumi-google.base.tmpl — правь шаблон, не этот файл)\n']
+for b in blocks:
+    if b.group(1) in single:
+        parts.append(b.group(0))
+for name, k in MONITORS:
+    parts.append(f'\n# ════════ {name} · масштаб {k} ════════\n')
+    for b in blocks:
+        if b.group(1) in single:
+            continue
+        # комментарий-заголовок перед блоком (если был) не переносим — только сам блок
+        W, H = SIZES.get(name, (1920, 1080))
+        parts.append(f'{b.group(1)} {{\n    monitor = {name}\n{scale_block(b.group(2), k, W, H, DPR.get(name, 1.0))}\n}}\n\n')
+open(OUT, 'w').write(''.join(parts))
+print(f'hyprlock: собран {OUT} ({", ".join(f"{n} ×{k}" for n, k in MONITORS)})')

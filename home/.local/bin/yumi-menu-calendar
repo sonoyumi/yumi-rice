@@ -1,0 +1,643 @@
+#!/usr/bin/env python3
+"""yumi-menu-calendar — календарь с планами на GTK (каркас yumi-panel), открывается кликом по часам в Waybar.
+  yumi-menu-calendar [--bar|--center]   открыть / закрыть
+  yumi-menu-calendar --close            закрыть открытое меню
+Главная: месяц сеткой (Пн…Вс), сегодня — акцентом, дни с планами — точкой; ниже — планы выбранного
+дня и ближайшие 7 дней. Клик по дню — выбрать, повторный клик (или Enter) — страница дня.
+Клавиши: стрелки — дни, PageUp/PageDown — месяцы, Home или T — сегодня, Enter — открыть день,
+N — новый план на выбранный день, Esc — назад/закрыть. В записи Ctrl+Enter — сохранить.
+Планы — ~/.local/share/yumi-calendar/events.json (формат — в ~/.local/lib/yumi-calendar/calstore.py),
+напоминания шлёт yumi-calendar-remind (таймер systemd --user).
+
+Отладка:
+  YP_CAL_FILE=путь        другой файл событий (проверки, не трогает настоящие планы)
+  YP_CAL_NOW=2026-10-06T06:00   подменить «сейчас»
+  YP_CAL_PAGE=day | add | edit  сразу открыть страницу дня / новой записи / первой записи дня
+  YP_CAL_AUTOSAVE="текст"       (с add/edit) вписать текст и сохранить; YP_CAL_CONFIRM=1 — показать «Удалить?»
+  YP_CAL_KEYS=Right,Down,Page_Down   «нажать» клавиши на главной (проверка без клавиатуры)
+  YP_CAL_DEBUG=1                ширины элементов открытой страницы — в stderr
+Откат: yumi-calendar-uninstall"""
+import os
+import sys
+from datetime import date, datetime, timedelta
+
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-panel"))
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-calendar"))
+import yumipanel as yp  # noqa: E402  (сам перезапускает процесс с layer-shell)
+from yumipanel import Gtk, Gdk, Gio, GLib, Pango  # noqa: E402
+import calstore as cs  # noqa: E402
+
+MONTHS = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь",
+          "Октябрь", "Ноябрь", "Декабрь"]
+MONTHS_GEN = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября",
+              "октября", "ноября", "декабря"]
+WEEKDAYS = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
+WD_SHORT = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+REMIND = [("none", "󰂛", "нет"), ("0", "󰂚", "в момент"), ("10", "󰔛", "10 мин"),
+          ("60", "󰥔", "1 час"), ("1440", "󰃭", "1 день")]
+REMIND_TEXT = {0: "в момент", 10: "за 10 мин", 60: "за 1 ч", 1440: "за 1 день"}
+MAX_DAY_ROWS, MAX_UPCOMING = 3, 4
+
+CSS = """
+.yp-cal-card { background: alpha(@yp-btn, 0.55); border-radius: 20px; padding: 6px 8px 8px 8px; }
+.yp-cal-month { font-size: 12pt; font-weight: 800; }
+.yp-cal-nav { min-width: 30px; min-height: 30px; border-radius: 15px; font-size: 12pt; }
+.yp-cal-today-btn { background: @yp-btn; border: none; box-shadow: none; border-radius: 14px;
+                    padding: 3px 10px; min-height: 0; font-size: 9.5pt; color: @yp-fg; }
+.yp-cal-today-btn:hover { background: @yp-hover; }
+.yp-cal-wd { font-size: 8.5pt; font-weight: 700; color: alpha(@yp-fg2, 0.7); padding: 4px 0 2px 0; }
+.yp-cal-wd.weekend { color: alpha(@yp-fg2, 0.45); }
+
+.yp-cal-day { background: none; border: none; box-shadow: none; border-radius: 12px;
+              padding: 3px 0 2px 0; min-height: 0; min-width: 0; color: @yp-fg; transition: background 120ms; }
+.yp-cal-day:hover { background: @yp-hover; }
+.yp-cal-num { font-size: 10.5pt; }
+.yp-cal-day.weekend .yp-cal-num { color: alpha(@yp-fg2, 0.6); }
+.yp-cal-day.other { opacity: 0.32; }
+.yp-cal-day.selected { background: alpha(@yp-accent, 0.22); box-shadow: inset 0 0 0 1px alpha(@yp-accent, 0.55); }
+.yp-cal-day.today .yp-cal-num { color: @yp-accent; font-weight: 800; }
+.yp-cal-day.today { box-shadow: inset 0 0 0 1px alpha(@yp-accent, 0.7); }
+.yp-cal-day.today.selected { background: @yp-accent; box-shadow: none; }
+.yp-cal-day.today.selected .yp-cal-num { color: @yp-on-acc; }
+.yp-cal-dot { min-width: 5px; min-height: 5px; border-radius: 3px; background: transparent; }
+.yp-cal-dot.on { background: @yp-accent; }
+.yp-cal-dot.done { background: alpha(@yp-fg2, 0.35); }
+.yp-cal-day.today.selected .yp-cal-dot.on { background: @yp-on-acc; }
+
+.yp-cal-sec-row { margin-top: 2px; }
+.yp-cal-ev { padding: 6px 12px; font-size: 10.5pt; }
+.yp-cal-time { color: @yp-accent; font-weight: 700; font-size: 9.5pt; }
+.yp-cal-time.allday { color: alpha(@yp-fg2, 0.75); font-weight: 400; }
+.yp-cal-when { color: alpha(@yp-fg2, 0.7); font-size: 9pt; }
+.yp-cal-bell { color: alpha(@yp-fg2, 0.8); font-size: 10pt; }
+.yp-cal-ev.done .yp-cal-text { color: alpha(@yp-fg, 0.45); text-decoration: line-through; }
+.yp-cal-more { font-size: 9pt; color: alpha(@yp-fg2, 0.6); margin: 0 6px; }
+.yp-cal-check { min-width: 30px; min-height: 30px; border-radius: 15px; font-size: 13pt; color: @yp-accent; }
+.yp-cal-check.done { color: #a6da95; }
+
+/* запись */
+.yp-cal-textview { background: transparent; color: @yp-fg; font-size: 11pt; }
+.yp-cal-textview text { background: transparent; color: @yp-fg; }
+.yp-cal-textbox { background: @yp-btn; border-radius: 16px; border: 1px solid alpha(@yp-accent, 0.35); padding: 8px 12px; }
+.yp-cal-textbox:focus-within { border-color: @yp-accent; }
+.yp-cal-ph { color: alpha(@yp-fg2, 0.5); font-size: 11pt; }
+.yp-cal-spin { background: @yp-btn; border-radius: 17px; padding: 3px; }
+.yp-cal-spin .yp-icon-btn { background: none; color: @yp-fg2; }
+.yp-cal-spin .yp-icon-btn:hover { background: @yp-hover; color: @yp-fg; }
+.yp-cal-spin-entry { background: none; border: none; box-shadow: none; outline: none; color: @yp-fg;
+                     font-size: 14pt; font-weight: 800; min-height: 0; padding: 0 4px; min-width: 0; }
+.yp-cal-spin-entry text selection { background: alpha(@yp-accent, 0.45); }
+.yp-cal-spin:disabled { opacity: 0.35; }
+.yp-cal-colon { font-size: 14pt; font-weight: 800; color: @yp-fg2; }
+.yp-cal-chip { background: @yp-btn; border: none; box-shadow: none; border-radius: 14px; padding: 5px 4px;
+               min-height: 0; font-size: 9.5pt; color: @yp-fg; transition: background 150ms; }
+.yp-cal-chip:hover { background: @yp-hover; }
+.yp-cal-chip.active { background: alpha(@yp-accent, 0.25); box-shadow: inset 0 0 0 1px alpha(@yp-accent, 0.7); }
+.yp-cal-date { font-size: 10.5pt; font-weight: 700; }
+.yp-cal-rem .yp-seg-btn { padding: 7px 2px; border-radius: 14px; }
+.yp-cal-rem .yp-seg-icon { font-size: 13pt; }
+.yp-cal-rem .yp-seg-text { font-size: 8.5pt; }
+.yp-cal-rem { margin: 0; }
+"""
+
+
+def plural(n, one, few, many):
+    n10, n100 = n % 10, n % 100
+    w = one if n10 == 1 and n100 != 11 else few if 2 <= n10 <= 4 and not 12 <= n100 <= 14 else many
+    return f"{n} {w}"
+
+
+def long_date(d, year=True):
+    s = f"{WEEKDAYS[d.weekday()]}, {d.day} {MONTHS_GEN[d.month - 1]}"
+    return s + (f" {d.year}" if year else "")
+
+
+def short_day(d, today):
+    rel = {0: "Сегодня", 1: "Завтра"}.get((d - today).days)
+    return rel or f"{WD_SHORT[d.weekday()]} {d.day}"
+
+
+def first_line(ev):
+    return ((ev.get("text") or "").strip().splitlines() or [""])[0]
+
+
+def add_months(d, n):
+    m = d.month - 1 + n
+    return date(d.year + m // 12, m % 12 + 1, 1)
+
+
+class Calendar:
+    def __init__(self, panel, body):
+        self.panel = panel
+        panel.add_css(CSS)
+        self.today = cs.now().date()
+        self.sel = self.today
+        self.view = self.today.replace(day=1)
+        self.events = cs.load()
+        self.day_page = None          # (дата, коробка списка) открытой страницы дня
+        self.reload_timer = 0
+
+        # шапка месяца: ‹ Октябрь 2026 [Сегодня] ›
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, css_classes=["yp-cal-card"])
+        nav = Gtk.Box(spacing=6)
+        nav.append(yp.icon_button("󰅁", "Предыдущий месяц (PageUp)", lambda *_: self.shift_month(-1),
+                                  ("yp-cal-nav",)))
+        self.month_l = Gtk.Label(hexpand=True, css_classes=["yp-cal-month"])
+        nav.append(self.month_l)
+        tb = Gtk.Button(label="󰃶 Сегодня", tooltip_text="К сегодняшнему дню (Home)", css_classes=["yp-cal-today-btn"],
+                        valign=Gtk.Align.CENTER)
+        tb.connect("clicked", lambda *_: self.select(self.today))
+        nav.append(tb)
+        nav.append(yp.icon_button("󰅂", "Следующий месяц (PageDown)", lambda *_: self.shift_month(1),
+                                  ("yp-cal-nav",)))
+        card.append(nav)
+
+        grid = Gtk.Grid(column_homogeneous=True, row_spacing=1, column_spacing=2)
+        for i, wd in enumerate(WD_SHORT):
+            grid.attach(Gtk.Label(label=wd, css_classes=["yp-cal-wd"] + (["weekend"] if i >= 5 else [])), i, 0, 1, 1)
+        self.cells = []
+        for n in range(42):
+            num = Gtk.Label(css_classes=["yp-cal-num"])
+            dot = Gtk.Box(css_classes=["yp-cal-dot"], halign=Gtk.Align.CENTER)
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1, halign=Gtk.Align.CENTER)
+            box.append(num)
+            box.append(dot)
+            b = Gtk.Button(child=box, focusable=False, css_classes=["yp-cal-day"])
+            b.connect("clicked", lambda *_, i=n: self.on_cell(i))
+            grid.attach(b, n % 7, n // 7 + 1, 1, 1)
+            self.cells.append((b, num, dot))
+        card.append(grid)
+        body.append(card)
+
+        # планы выбранного дня
+        row = Gtk.Box(spacing=6, css_classes=["yp-cal-sec-row"])
+        self.sel_l = yp.section("")
+        self.sel_l.set_hexpand(True)
+        row.append(self.sel_l)
+        row.append(yp.icon_button("󰐕", "Новый план (N)", lambda *_: self.edit(None, self.sel), ("yp-small",)))
+        row.append(yp.icon_button("󰁔", "Открыть день (Enter)", lambda *_: self.open_day(self.sel), ("yp-small",)))
+        body.append(row)
+        self.sel_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        body.append(self.sel_box)
+
+        body.append(yp.section("БЛИЖАЙШИЕ 7 ДНЕЙ"))
+        self.up_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        body.append(self.up_box)
+
+        for w in self.walk(body):                 # клик мышью не оставляет фокус (Enter = «открыть день»)
+            if isinstance(w, Gtk.Button):
+                w.set_focus_on_click(False)
+        panel.on_key_hook = self.on_key
+        self.refresh()
+        self.tick()
+        GLib.timeout_add_seconds(15, self.tick)
+        self.watch_file()
+
+        for i, k in enumerate(filter(None, os.environ.get("YP_CAL_KEYS", "").split(","))):   # проверка клавиш
+            GLib.timeout_add(300 + 150 * i, lambda k=k: self.on_key(Gdk.keyval_from_name(k)) and False)
+        page = os.environ.get("YP_CAL_PAGE")
+        if page:
+            GLib.timeout_add(400, lambda: self.debug_page(page) or False)
+
+    def debug_page(self, page):
+        if os.environ.get("YP_CAL_DEBUG"):
+            def dump():
+                pg = self.panel.stack.get_visible_child().get_first_child()
+                c = pg.get_first_child()
+                while c:
+                    print("W", type(c).__name__, c.get_css_classes(), c.measure(Gtk.Orientation.HORIZONTAL, -1)[:2],
+                          file=sys.stderr)
+                    c = c.get_next_sibling()
+            GLib.timeout_add(1500, lambda: dump() or False)
+        if page == "add":
+            self.edit(None, self.sel)
+        elif page in ("day", "edit"):
+            self.open_day(self.sel)
+            evs = self.day_events(self.sel)
+            if page == "edit" and evs:
+                GLib.timeout_add(400, lambda: self.edit(evs[0]) or False)
+
+    # ---------- данные ----------
+    def day_events(self, d):
+        k = d.isoformat()
+        return [e for e in self.events if e["date"] == k]
+
+    def watch_file(self):
+        d = os.path.dirname(cs.PATH)
+        os.makedirs(d, exist_ok=True)
+        self.mon = Gio.File.new_for_path(d).monitor_directory(Gio.FileMonitorFlags.WATCH_MOVES, None)
+        base = os.path.basename(cs.PATH)
+
+        def changed(_m, f, o, _e):
+            if base in {x.get_basename() for x in (f, o) if x}:
+                if self.reload_timer:
+                    GLib.source_remove(self.reload_timer)
+                self.reload_timer = GLib.timeout_add(250, self.reload)
+        self.mon.connect("changed", changed)
+
+    def reload(self):
+        self.reload_timer = 0
+        self.events = cs.load()
+        self.refresh()
+        return False
+
+    def tick(self):
+        now = cs.now()
+        if now.date() != self.today:            # перешли через полночь
+            if self.sel == self.today:
+                self.sel = now.date()
+                self.view = self.sel.replace(day=1)
+            self.today = now.date()
+            self.refresh()
+        if not self.panel.pages:
+            self.panel.set_subtitle(f"{long_date(now.date())} · {now:%H:%M}", live=True)
+        return True
+
+    # ---------- главная ----------
+    def refresh(self):
+        self.month_l.set_label(f"{MONTHS[self.view.month - 1]} {self.view.year}")
+        start = self.view - timedelta(days=self.view.weekday())
+        by_day = {}
+        for e in self.events:
+            by_day.setdefault(e["date"], []).append(e)
+        for n, (b, num, dot) in enumerate(self.cells):
+            d = start + timedelta(days=n)
+            b.day = d
+            num.set_label(str(d.day))
+            evs = by_day.get(d.isoformat(), [])
+            for cls, on in (("other", d.month != self.view.month), ("weekend", d.weekday() >= 5),
+                            ("today", d == self.today), ("selected", d == self.sel)):
+                (b.add_css_class if on else b.remove_css_class)(cls)
+            for cls, on in (("on", bool(evs)), ("done", bool(evs) and all(e.get("done") for e in evs))):
+                (dot.add_css_class if on else dot.remove_css_class)(cls)
+            tip = "\n".join(f"{e.get('time') or 'весь день'} — {first_line(e)}" for e in evs[:6])
+            b.set_tooltip_text(tip or None)
+            b.set_visible(n < 35 or (start + timedelta(days=35)).month == self.view.month)
+
+        # выбранный день
+        self.sel_l.set_label(("СЕГОДНЯ · " if self.sel == self.today else "")
+                             + long_date(self.sel, year=self.sel.year != self.today.year).upper())
+        self.clear(self.sel_box)
+        evs = self.day_events(self.sel)
+        for e in evs[:MAX_DAY_ROWS]:
+            self.sel_box.append(self.ev_row(e))
+        if len(evs) > MAX_DAY_ROWS:
+            more = Gtk.Button(label=f"ещё {len(evs) - MAX_DAY_ROWS} — открыть день", css_classes=["yp-cal-today-btn"],
+                              halign=Gtk.Align.START)
+            more.connect("clicked", lambda *_: self.open_day(self.sel))
+            self.sel_box.append(more)
+        if not evs:
+            self.sel_box.append(yp.hint("Планов нет. 󰐕 — добавить, Enter — открыть день."))
+
+        # ближайшие 7 дней (без выбранного дня — он уже выше)
+        self.clear(self.up_box)
+        lo, hi = self.today.isoformat(), (self.today + timedelta(days=6)).isoformat()
+        up = [e for e in self.events if lo <= e["date"] <= hi and not e.get("done") and e["date"] != self.sel.isoformat()]
+        for e in up[:MAX_UPCOMING]:
+            self.up_box.append(self.ev_row(e, with_day=True))
+        if len(up) > MAX_UPCOMING:
+            self.up_box.append(Gtk.Label(label=f"…и ещё {plural(len(up) - MAX_UPCOMING, 'план', 'плана', 'планов')}",
+                                         xalign=0, css_classes=["yp-cal-more"]))
+        if not up:
+            self.up_box.append(yp.hint("Больше ничего не запланировано."))
+
+        if self.day_page:
+            self.fill_day(*self.day_page)
+
+    @classmethod
+    def walk(cls, w):
+        c = w.get_first_child()
+        while c:
+            yield c
+            yield from cls.walk(c)
+            c = c.get_next_sibling()
+
+    @staticmethod
+    def clear(box):
+        while (c := box.get_first_child()):
+            box.remove(c)
+
+    def ev_row(self, e, with_day=False):
+        box = Gtk.Box(spacing=10)
+        t = e.get("time")
+        if with_day:
+            d = date.fromisoformat(e["date"])
+            box.append(Gtk.Label(label=short_day(d, self.today), width_chars=7, xalign=0, css_classes=["yp-cal-when"]))
+        box.append(Gtk.Label(label=t or "весь день", width_chars=9 if not t else 5, xalign=0,
+                             css_classes=["yp-cal-time"] + ([] if t else ["allday"])))
+        box.append(Gtk.Label(label=first_line(e), xalign=0, hexpand=True, ellipsize=Pango.EllipsizeMode.END,
+                             max_width_chars=1, css_classes=["yp-cal-text"]))
+        if e.get("remind") is not None:
+            box.append(Gtk.Label(label="󰂚", css_classes=["yp-cal-bell"],
+                                 tooltip_text="Напомнить " + REMIND_TEXT.get(e["remind"], "")))
+        b = Gtk.Button(child=box, focus_on_click=False,
+                       css_classes=["yp-row", "yp-cal-ev"] + (["done"] if e.get("done") else []))
+        b.connect("clicked", lambda *_: self.edit(e))
+        return b
+
+    def on_cell(self, i):
+        d = self.cells[i][0].day
+        if d == self.sel:
+            self.open_day(d)
+        else:
+            self.select(d)
+
+    def select(self, d):
+        self.sel = d
+        self.view = d.replace(day=1)
+        self.refresh()
+
+    def shift_month(self, n):
+        self.view = add_months(self.view, n)
+        if (self.sel.year, self.sel.month) != (self.view.year, self.view.month):
+            last = (add_months(self.view, 1) - timedelta(days=1)).day
+            self.sel = self.view.replace(day=min(self.sel.day, last))
+        self.refresh()
+
+    def on_key(self, keyval):
+        name = Gdk.keyval_name(keyval) or ""
+        if self.panel.pages:
+            return False                       # на подстраницах — обычное поведение каркаса
+        focus = self.panel.get_focus()
+        step = {"Left": -1, "Right": 1, "Up": -7, "Down": 7}.get(name)
+        if step:
+            self.select(self.sel + timedelta(days=step))
+            return True
+        if name in ("Page_Up", "Page_Down"):
+            self.shift_month(-1 if name == "Page_Up" else 1)
+            return True
+        if name in ("Return", "KP_Enter") and focus is None:
+            self.open_day(self.sel)
+            return True
+        ch = yp.hotkey_char(keyval)
+        if name == "Home" or ch == "t":
+            self.select(self.today)
+            return True
+        if ch == "n":
+            self.edit(None, self.sel)
+            return True
+        return False
+
+    # ---------- страница дня ----------
+    def open_day(self, d):
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        lst = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        sc = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, propagate_natural_height=True,
+                                max_content_height=round(420 * self.panel.k))
+        sc.set_child(lst)
+        page.append(sc)
+        page.append(yp.action_button("󰐕  Добавить", lambda *_: self.edit(None, d)))
+        self.day_page = (d, lst)
+        self.fill_day(d, lst)
+        self.panel.push(f"󰃭  {d.day} {MONTHS_GEN[d.month - 1]}", page, self.day_sub(d),
+                        on_leave=lambda: setattr(self, "day_page", None))
+
+    def day_sub(self, d):
+        n = len(self.day_events(d))
+        rel = {0: "сегодня", 1: "завтра", -1: "вчера"}.get((d - self.today).days)
+        head = WEEKDAYS[d.weekday()] + (f" ({rel})" if rel else "") + (f" · {d.year}" if d.year != self.today.year else "")
+        return head + " · " + (plural(n, "план", "плана", "планов") if n else "планов нет")
+
+    def fill_day(self, d, lst):
+        self.clear(lst)
+        evs = self.day_events(d)
+        for e in evs:
+            row = Gtk.Box(spacing=6)
+            chk = yp.icon_button("󰄵" if e.get("done") else "󰄱", "Выполнено" if not e.get("done") else "Не выполнено",
+                                 lambda *_, e=e: self.toggle_done(e), ("yp-cal-check",) + (("done",) if e.get("done") else ()))
+            chk.set_valign(Gtk.Align.CENTER)
+            row.append(chk)
+            box = Gtk.Box(spacing=10)
+            t = e.get("time")
+            box.append(Gtk.Label(label=t or "весь\nдень", width_chars=5, xalign=0, valign=Gtk.Align.START,
+                                 css_classes=["yp-cal-time"] + ([] if t else ["allday"])))
+            txt = (e.get("text") or "").strip()
+            box.append(Gtk.Label(label=txt, xalign=0, hexpand=True, wrap=True, max_width_chars=1, lines=3,
+                                 wrap_mode=Pango.WrapMode.WORD_CHAR, ellipsize=Pango.EllipsizeMode.END,
+                                 css_classes=["yp-cal-text"]))
+            if e.get("remind") is not None:
+                box.append(Gtk.Label(label="󰂚", valign=Gtk.Align.START, css_classes=["yp-cal-bell"],
+                                     tooltip_text="Напомнить " + REMIND_TEXT.get(e["remind"], "")))
+            b = Gtk.Button(child=box, hexpand=True, css_classes=["yp-row", "yp-cal-ev"] + (["done"] if e.get("done") else []))
+            b.connect("clicked", lambda *_, e=e: self.edit(e))
+            row.append(b)
+            lst.append(row)
+        if not evs:
+            lst.append(yp.hint("На этот день планов нет."))
+        if self.panel.pages and self.day_page and self.day_page[0] == d and len(self.panel.pages) == 1:
+            self.panel.set_subtitle(self.day_sub(d))
+
+    def toggle_done(self, e):
+        def apply(evs):
+            for x in evs:
+                if x["id"] == e["id"]:
+                    x["done"] = not x.get("done")
+                    x["updated"] = cs.key(cs.now())
+        cs.modify(apply)
+        self.reload()
+
+    # ---------- запись: новая / правка ----------
+    def edit(self, ev, d=None):
+        ev = dict(ev) if ev else None
+        st = {"date": date.fromisoformat(ev["date"]) if ev else d,
+              "allday": bool(ev) and not ev.get("time"),
+              "remind": ev.get("remind") if ev else 10,
+              "done": bool(ev and ev.get("done"))}
+        if ev and ev.get("time"):
+            hh, mm = (int(x) for x in ev["time"].split(":"))
+        else:
+            now = cs.now()
+            hh, mm = ((now.hour + 1) % 24, 0) if st["date"] == self.today else (9, 0)
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+
+        # дата: ‹ Вторник, 6 октября 2026 ›
+        drow = Gtk.Box(spacing=6)
+        date_l = Gtk.Label(hexpand=True, css_classes=["yp-cal-date"])
+
+        def set_date(delta):
+            st["date"] += timedelta(days=delta)
+            date_l.set_label(long_date(st["date"]))
+        drow.append(yp.icon_button("󰅁", "День назад", lambda *_: set_date(-1), ("yp-small",)))
+        drow.append(date_l)
+        drow.append(yp.icon_button("󰅂", "День вперёд", lambda *_: set_date(1), ("yp-small",)))
+        set_date(0)
+        page.append(drow)
+
+        # текст
+        tv = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR, accepts_tab=False, css_classes=["yp-cal-textview"])
+        tv.get_buffer().set_text((ev or {}).get("text", ""))
+        ph = Gtk.Label(label="Что запланировано…", xalign=0, valign=Gtk.Align.START, can_target=False,
+                       css_classes=["yp-cal-ph"])
+        buf = tv.get_buffer()
+        buf.connect("changed", lambda b: ph.set_visible(b.get_char_count() == 0))
+        ph.set_visible(buf.get_char_count() == 0)
+        ov = Gtk.Overlay(css_classes=["yp-cal-textbox"])
+        sc = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, propagate_natural_height=True,
+                                min_content_height=round(48 * self.panel.k), max_content_height=round(140 * self.panel.k))
+        sc.set_child(tv)
+        ov.set_child(sc)
+        ov.add_overlay(ph)
+        page.append(ov)
+
+        # время
+        page.append(yp.section("ВРЕМЯ"))
+        trow = Gtk.Box(spacing=8, halign=Gtk.Align.CENTER)
+
+        def spin(hi, val, step, tip):
+            """Поле «− 09 +»: кнопки, колесо мыши, стрелки вверх/вниз, ввод цифр."""
+            box = Gtk.Box(spacing=2, css_classes=["yp-cal-spin"])
+            e = Gtk.Entry(width_chars=2, max_width_chars=2, max_length=2, xalign=0.5, tooltip_text=tip,
+                          input_purpose=Gtk.InputPurpose.DIGITS, css_classes=["yp-cal-spin-entry"])
+            box.val = val
+
+            def setv(v):
+                box.val = v % (hi + 1)
+                e.set_text(f"{box.val:02d}")
+
+            def typed(*_):
+                t = e.get_text()
+                if t.isdigit() and int(t) <= hi:
+                    box.val = int(t)
+            e.connect("changed", typed)
+            e.connect("activate", lambda *_: setv(box.val))
+            fc = Gtk.EventControllerFocus()
+            fc.connect("leave", lambda *_: setv(box.val))
+            e.add_controller(fc)
+            sc = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.VERTICAL)
+            sc.connect("scroll", lambda _c, _dx, dy: (setv(box.val + (step if dy < 0 else -step)), True)[1])
+            box.add_controller(sc)
+            kc = Gtk.EventControllerKey()
+            kc.connect("key-pressed", lambda _c, kv, *_: (
+                Gdk.keyval_name(kv) in ("Up", "Down") and (setv(box.val + (step if Gdk.keyval_name(kv) == "Up" else -step)), True)[1])
+                or False)
+            e.add_controller(kc)
+            box.append(yp.icon_button("󰍴", "Меньше", lambda *_: setv(box.val - step), ("yp-small",)))
+            box.append(e)
+            box.append(yp.icon_button("󰐕", "Больше", lambda *_: setv(box.val + step), ("yp-small",)))
+            box.set_value = setv
+            box.get_value = lambda: box.val
+            setv(val)
+            return box
+        sh, sm = spin(23, hh, 1, "Часы"), spin(59, mm, 5, "Минуты")
+        trow.append(sh)
+        trow.append(Gtk.Label(label=":", css_classes=["yp-cal-colon"]))
+        trow.append(sm)
+        page.append(trow)
+        chips = Gtk.Box(spacing=6)
+        allday_b = Gtk.Button(child=Gtk.Label(label="󰃭 Весь день", ellipsize=Pango.EllipsizeMode.END, max_width_chars=1),
+                              css_classes=["yp-cal-chip"])
+        chips.append(allday_b)
+
+        def set_allday(on):
+            st["allday"] = on
+            (allday_b.add_css_class if on else allday_b.remove_css_class)("active")
+            sh.set_sensitive(not on)
+            sm.set_sensitive(not on)
+        allday_b.set_hexpand(True)
+        allday_b.get_child().set_width_chars(10)
+        allday_b.connect("clicked", lambda *_: set_allday(not st["allday"]))
+        for h in (9, 13, 19):
+            c = Gtk.Button(child=Gtk.Label(label=f"{h:02d}:00", ellipsize=Pango.EllipsizeMode.END, max_width_chars=1),
+                           css_classes=["yp-cal-chip"], hexpand=True)
+            c.connect("clicked", lambda *_, h=h: (sh.set_value(h), sm.set_value(0), set_allday(False)))
+            chips.append(c)
+        set_allday(st["allday"])
+        page.append(chips)
+
+        # напоминание
+        page.append(yp.section("НАПОМНИТЬ"))
+        cur = "none" if st["remind"] is None else str(st["remind"])
+        if cur not in {k for k, *_ in REMIND}:
+            cur = "10"
+        seg = yp.Segmented([(k, i, t, True) for k, i, t in REMIND], cur,
+                           lambda k: st.__setitem__("remind", None if k == "none" else int(k)))
+        seg.add_css_class("yp-cal-rem")
+        for b in seg.btns.values():          # натуральная ширина подписей не должна раздувать окно
+            lbl = b.get_child().get_last_child()
+            lbl.set_max_width_chars(1)
+        page.append(seg)
+
+        if ev:
+            done_row, _sw = yp.toggle_row("󰄬", "Выполнено", st["done"], lambda on: st.__setitem__("done", on))
+            page.append(done_row)
+
+        # сохранить / удалить
+        bstack = Gtk.Stack(transition_type=Gtk.StackTransitionType.NONE, transition_duration=0,
+                           vhomogeneous=False, interpolate_size=True)
+        btns = Gtk.Box(spacing=8, homogeneous=True)
+
+        def save(*_):
+            text = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False).strip()
+            if not text:
+                self.panel.toast("Напишите, что запланировано", error=True, hold=3)
+                tv.grab_focus()
+                return
+            stamp = cs.key(cs.now())
+            new = dict(ev or {"id": cs.new_id(st["date"].isoformat()), "created": stamp})
+            new.update(date=st["date"].isoformat(), text=text, remind=st["remind"], done=st["done"], updated=stamp,
+                       time=None if st["allday"] else f"{int(sh.get_value()):02d}:{int(sm.get_value()):02d}")
+            new.pop("snooze", None) if (ev and (ev.get("time"), ev["date"]) != (new["time"], new["date"])) else None
+            cs.mark_past_as_sent(new)
+
+            def apply(evs):
+                for i, x in enumerate(evs):
+                    if x["id"] == new["id"]:
+                        evs[i] = new
+                        return
+                evs.append(new)
+            try:
+                cs.modify(apply)
+            except OSError as ex:
+                self.panel.toast(f"Не сохранилось: {ex}", error=True, hold=4)
+                return
+            self.after_change(new["date"])
+            self.panel.toast("󰄬 Сохранено", hold=2)
+
+        def delete():
+            try:
+                cs.modify(lambda evs: evs.__setitem__(slice(None), [x for x in evs if x["id"] != ev["id"]]))
+            except OSError as ex:
+                self.panel.toast(f"Не удалилось: {ex}", error=True, hold=4)
+                return
+            self.after_change(ev["date"])
+            self.panel.toast("󰆴 Удалено", hold=2)
+
+        if ev:
+            btns.append(yp.action_button("󰆴  Удалить", lambda *_: bstack.set_visible_child_name("confirm"), "danger"))
+        btns.append(yp.action_button("󰄬  Сохранить", save))
+        bstack.add_named(btns, "btns")
+        if ev:
+            bstack.add_named(yp.confirm_box(f"Удалить «{first_line(ev)[:40]}»?", delete,
+                                            on_no=lambda: bstack.set_visible_child_name("btns")), "confirm")
+        page.append(bstack)
+        page.append(yp.hint("Ctrl+Enter — сохранить, Esc — назад без сохранения."))
+
+        keys = Gtk.EventControllerKey()
+        keys.connect("key-pressed", lambda _c, kv, _code, mods: (
+            Gdk.keyval_name(kv) in ("Return", "KP_Enter") and mods & Gdk.ModifierType.CONTROL_MASK and (save(), True)[1])
+            or False)
+        tv.add_controller(keys)
+
+        self.panel.push("󰏫  Изменить план" if ev else "󰐕  Новый план", page,
+                        long_date(st["date"]) if ev else "Запись на " + long_date(st["date"], year=False).lower())
+        GLib.idle_add(lambda: tv.grab_focus() and False)
+        if os.environ.get("YP_CAL_AUTOSAVE") is not None:       # проверка: вписать текст и «нажать» Сохранить
+            GLib.timeout_add(800, lambda: (buf.set_text(os.environ["YP_CAL_AUTOSAVE"]), save(), False)[2])
+        if os.environ.get("YP_CAL_CONFIRM") and ev:              # проверка: показать подтверждение удаления
+            GLib.timeout_add(600, lambda: bstack.set_visible_child_name("confirm") or False)
+
+    def after_change(self, day):
+        """После сохранения/удаления: вернуться на страницу дня (или главную) и обновить всё."""
+        self.events = cs.load()
+        self.panel.pop()
+        d = date.fromisoformat(day)
+        if self.day_page and self.day_page[0] != d:
+            self.panel.pop()
+        self.sel, self.view = d, d.replace(day=1)
+        self.refresh()
+        self.panel.set_focus(None)
+
+
+if __name__ == "__main__":
+    app = yp.PanelApp("org.yumi.panel.calendar", "Календарь", "󰃭", lambda panel, body: Calendar(panel, body))
+    sys.exit(app.run(sys.argv))

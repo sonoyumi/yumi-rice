@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""yumi-calendar-remind — напоминания календаря (запускается таймером yumi-calendar-remind.timer раз в минуту).
+
+Каждый запуск: читает events.json, для каждого невыполненного плана с напоминанием считает момент
+(время плана минус «за N мин»; «весь день» — от 09:00). Если момент наступил, а уведомления о нём ещё
+не было — notify-send (app «Календарь»; «в момент» — критический уровень) и пометка "notified".
+После сна/выключения догоняет пропущенное, но только за последние 12 ч (старое помечается молча).
+Кнопки уведомления: «Отложить на 10 мин» (повторит через 10 мин), «Открыть» (меню календаря).
+
+  yumi-calendar-remind            проверить и отправить (так зовёт таймер)
+  yumi-calendar-remind --list     показать ближайшие напоминания, ничего не отправляя
+Переменные: YP_DRYRUN=1 — не слать, а печатать в stderr (отметки "notified" всё равно ставятся),
+            YP_CAL_FILE — другой файл событий (проверки), YP_CAL_NOW — подменить «сейчас»,
+            YP_CAL_NOACTIONS=1 — без кнопок (не ждать ответа уведомления).
+Откат: yumi-calendar-uninstall"""
+import os
+import shutil
+import subprocess
+import sys
+from datetime import date, datetime, timedelta
+
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-calendar"))
+import calstore as cs  # noqa: E402
+
+CATCHUP = timedelta(hours=12)
+SNOOZE = timedelta(minutes=10)
+ICON = "org.gnome.Calendar"
+APP = "Календарь"
+SELF = os.path.abspath(__file__)
+
+
+def when_text(ev, now):
+    d = date.fromisoformat(ev["date"])
+    days = (d - now.date()).days
+    day = {0: "Сегодня", 1: "Завтра", -1: "Вчера"}.get(days, d.strftime("%d.%m.%Y"))
+    t = f"в {ev['time']}" if ev.get("time") else "весь день"
+    s = f"{day}, {t}"
+    base = cs.base_dt(ev)
+    if ev.get("time") and base > now:
+        mins = int((base - now).total_seconds() // 60)
+        s += " · через " + (f"{mins // 60} ч {mins % 60:02d} мин" if mins >= 60 else f"{mins} мин")
+    return s
+
+
+def notify(ev, now, late=False, snoozed=False):
+    lines = (ev.get("text") or "").strip().splitlines() or ["План"]
+    summary = "󰃭 " + lines[0][:80]
+    body = when_text(ev, now)
+    if snoozed:
+        body += " · (отложено)"
+    elif late:
+        body += " · (пропущено, пока ноутбук спал)"
+    if len(lines) > 1:
+        body += "\n" + "\n".join(lines[1:])[:300]
+    urgency = "critical" if ev.get("remind") == 0 else "normal"
+    cmd = ["notify-send", "-a", APP, "-i", ICON, "-u", urgency, summary, body]
+    if os.environ.get("YP_DRYRUN"):
+        print("[dry-run]", urgency, "|", summary, "|", body.replace("\n", " / "), file=sys.stderr)
+        return
+    if os.environ.get("YP_CAL_NOACTIONS"):
+        subprocess.run(cmd, timeout=10)
+        return
+    # кнопки: ждать ответа в отдельном процессе (таймерный запуск не должен висеть)
+    waiter = [SELF, "--wait-action", ev["id"], urgency, summary, body]
+    env = dict(os.environ)
+    if shutil.which("systemd-run") and os.environ.get("INVOCATION_ID"):
+        extra = [f"--setenv=YP_CAL_FILE={cs.PATH}"]
+        subprocess.run(["systemd-run", "--user", "--collect", "--quiet", "-p", "RuntimeMaxSec=12h",
+                        *extra, "--", *waiter], timeout=10)
+    else:
+        subprocess.Popen(waiter, start_new_session=True, env=env,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def wait_action(ev_id, urgency, summary, body):
+    try:
+        r = subprocess.run(["notify-send", "-a", APP, "-i", ICON, "-u", urgency,
+                            "-A", "snooze=󰒲 Отложить на 10 мин", "-A", "open=󰃭 Открыть",
+                            summary, body], capture_output=True, text=True, timeout=12 * 3600)
+        act = r.stdout.strip()
+    except Exception:
+        return
+    if act == "snooze":
+        until = cs.key(cs.now() + SNOOZE)
+
+        def apply(evs):
+            for e in evs:
+                if e["id"] == ev_id:
+                    e["snooze"] = until
+        cs.modify(apply)
+    elif act == "open":
+        # через Hyprland: процесс-ожидатель живёт во временном юните systemd и его потомки погибнут вместе с ним
+        menu = os.path.expanduser("~/.local/bin/yumi-menu-calendar")
+        r = subprocess.run(["hyprctl", "dispatch", f"hl.dsp.exec_cmd([[{menu} --center]])"],
+                           capture_output=True, text=True, timeout=5)
+        if r.returncode != 0 or "error" in (r.stdout + r.stderr).lower():
+            subprocess.run(["systemd-run", "--user", "--collect", "--quiet", menu, "--center"], timeout=5)
+
+
+def check():
+    if not os.path.exists(cs.PATH):
+        return
+    evs = cs.load()
+    if not any(e.get("remind") is not None or e.get("snooze") for e in evs):
+        return
+    now = cs.now()
+    todo = []          # (id, kind, fire)
+
+    for e in evs:
+        if e.get("done"):
+            continue
+        sn = e.get("snooze")
+        if sn and datetime.fromisoformat(sn) <= now:
+            todo.append((e["id"], "snooze", datetime.fromisoformat(sn)))
+            continue
+        f = cs.fire_dt(e)
+        if f is None or f > now or e.get("notified") == cs.key(f):
+            continue
+        todo.append((e["id"], "send" if now - f <= CATCHUP else "stale", f))
+    if not todo:
+        return
+
+    sent = []
+
+    def apply(evs2):
+        by = {e["id"]: e for e in evs2}
+        for ev_id, kind, f in todo:
+            e = by.get(ev_id)
+            if not e:
+                continue
+            if kind == "snooze":
+                if e.pop("snooze", None) and now - f <= CATCHUP:
+                    sent.append((dict(e), False, True))
+            else:
+                if e.get("notified") == cs.key(f):
+                    continue                     # уже отметил другой запуск
+                e["notified"] = cs.key(f)
+                if kind == "send":
+                    sent.append((dict(e), now - f > timedelta(minutes=3), False))
+    cs.modify(apply)
+    for e, late, snoozed in sent:
+        try:
+            notify(e, now, late, snoozed)
+        except Exception as ex:
+            print("notify:", ex, file=sys.stderr)
+
+
+def list_upcoming():
+    now = cs.now()
+    rows = []
+    for e in cs.load():
+        f = cs.fire_dt(e)
+        if f and not e.get("done"):
+            st = ("отправлено" if e.get("notified") == cs.key(f) else "ждёт" if f > now
+                  else "к отправке" if now - f <= CATCHUP else "устарело")
+            rows.append((f, st, e))
+    for f, st, e in sorted(rows, key=lambda r: r[0]):
+        print(f"{cs.key(f)}  {st:<11} {e['date']} {e.get('time') or 'весь день':<9} {e['text'].splitlines()[0][:50]}")
+    print("файл:", cs.PATH)
+
+
+if __name__ == "__main__":
+    a = sys.argv[1:]
+    if a[:1] == ["--wait-action"] and len(a) >= 5:
+        wait_action(*a[1:5])
+    elif a[:1] == ["--list"]:
+        list_upcoming()
+    else:
+        check()

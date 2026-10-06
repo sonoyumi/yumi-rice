@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Цвет фона kitty (тема HyDE) → центр управления (swaync) и все меню rofi
+# Текст меню — тоже из kitty: на светлых обоях фон светлый, и белый текст из theme.rasi не читается
 conf="$HOME/.config/kitty/theme.conf"
 bg="$(awk '/^background /{print $2; exit}' "$conf")"
+fg="$(awk '/^foreground /{print $2; exit}' "$conf")"
 [ -z "$bg" ] && exit 0
+[ -z "$fg" ] && fg="#FCFCFC"
 
 # swaync
 printf '@define-color kitty_bg %s;\n' "$bg" > "$HOME/.config/swaync/kitty-colors.css"
@@ -11,7 +14,7 @@ swaync-client -rs >/dev/null 2>&1
 # rofi: полупрозрачное только окно (90%), всё внутри прозрачное
 cat > "$HOME/.config/rofi/themes/style_10.rasi" << RASI
 @import "$HOME/.local/share/rofi/themes/style_10.rasi"
-* { main-bg: ${bg}E6; }
+* { main-bg: ${bg}E6; main-fg: ${fg}FF; select-bg: ${fg}33; select-fg: ${fg}FF; }
 window { transparency: "real"; background-color: ${bg}E6; }
 mainbox, inputbar, listview, listbox, element, textbox, message, entry, prompt,
 imagebox, wallbox, dummy, mode-switcher, button, case-indicator, num-filtered-rows,

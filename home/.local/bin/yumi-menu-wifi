@@ -1,0 +1,1403 @@
+#!/usr/bin/env python3
+"""yumi-menu-wifi — меню Wi-Fi на GTK (каркас yumi-panel, замена rofi menu-network / networkmanager_dmenu).
+  yumi-menu-wifi [--bar|--center]   открыть / закрыть
+  yumi-menu-wifi --close            закрыть открытое меню
+
+Список сетей — из кэша NetworkManager (--rescan no, мгновенно), сканирование — явно и в фоне.
+Всё обновляется само (nmcli monitor). Медленные вызовы nmcli — в потоках, окно не замирает.
+
+Переменные для проверки:
+  YP_DRYRUN=1        действия, меняющие сеть (подключение, отключение, «забыть», радио), не выполняются:
+                     команда пишется в stderr, меню показывает имитацию результата
+  YP_DRYRUN_FAIL=1   (с YP_DRYRUN) имитировать ошибку «неверный пароль»
+  YP_FAKE_NETS=a,b   (только с YP_DRYRUN) подмешать в список выдуманные новые защищённые сети
+  YP_OPEN=status | password:<SSID>   сразу открыть подстраницу (для снимков)
+  YP_TEST=connect:<SSID> | ask:down | ask:forget (с YP_OPEN=status) | radio-off   (только с YP_DRYRUN)
+                     нажать строку сети / кнопку; YP_TEST_CONFIRM=1 — ещё и подтвердить
+  YP_FAKE_NETS=open:<имя> — выдуманная открытая сеть
+  YP_TEST_SUBMIT=<пароль>  (с YP_DRYRUN и YP_OPEN=password:…) ввести пароль и нажать «Подключиться»
+  YP_OPEN=saved | profile:<имя профиля или uuid>   «Сохранённые сети» / страница профиля
+  YP_FAKE_PROFILES=N (только с YP_DRYRUN) добавить N выдуманных профилей (проверка поиска)
+  YP_TEST=prof:auto-off | prof:prio-high | prof:metered | prof:ip-manual | prof:ip-auto | prof:mac-random |
+          prof:forget | prof:bad-ip   (с YP_OPEN=profile:…, только с YP_DRYRUN) — нажать настройку профиля
+Откат: yumi-panel-uninstall (или просто удалить этот файл)"""
+import os
+import sys
+import re
+import shutil
+import signal
+import ctypes
+import threading
+import subprocess
+import time
+import json
+import ipaddress
+
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-panel"))
+import yumipanel as yp  # noqa: E402  (сам перезапускает процесс с layer-shell)
+from yumipanel import Gtk, Gdk, GLib, Pango  # noqa: E402
+from gi.repository import Graphene  # noqa: E402
+
+DRYRUN = os.environ.get("YP_DRYRUN") == "1"
+DRYRUN_FAIL = DRYRUN and os.environ.get("YP_DRYRUN_FAIL") == "1"
+FAKE_NETS = [s for s in os.environ.get("YP_FAKE_NETS", "").split(",") if s] if DRYRUN else []
+
+SIGNAL_ICONS = ("\uf1eb",) * 5   # как в Waybar: один значок «волны», уровень — процентом и цветом (weak)
+ICON_WIFI, ICON_OFF, ICON_NONE = "\uf1eb", "󰤭", "󰤮"   # шапка и переключатель — тот же значок, что в Waybar
+ICON_LOCK, ICON_SAVED, ICON_REFRESH, ICON_GEAR, ICON_EYE = "󰌾", "󰆓", "󰑐", "󰒓", "󰈈"
+
+# свои классы поверх style.css (цвета только @yp-*); px масштабируются так же, как у каркаса
+EXTRA_CSS = """
+.yw-card { padding: 10px 14px; }
+.yw-card-name { font-size: 12pt; font-weight: 700; }
+.yw-card-sub  { font-size: 9.5pt; color: alpha(@yp-fg2, 0.8); }
+.yw-chevron   { color: alpha(@yp-fg2, 0.6); font-size: 12pt; }
+.yw-row-badge { color: alpha(@yp-fg2, 0.6); font-size: 10pt; }
+.yw-row.weak .yp-row-icon { color: alpha(@yp-accent, 0.55); }
+.yw-dim { color: alpha(@yp-fg2, 0.6); font-size: 10pt; padding: 8px 6px; }
+.yw-head-row { margin-top: 6px; }
+.yw-head-row .yp-section { margin-top: 0; }
+.yw-refresh {
+  min-height: 26px; padding: 0 12px; border-radius: 13px;
+  font-size: 9.5pt; background: @yp-btn; color: @yp-fg; border: none; box-shadow: none;
+}
+.yw-refresh:hover { background: @yp-hover; }
+.yw-refresh spinner { min-width: 12px; min-height: 12px; }
+.yw-list scrollbar { background: transparent; border: none; }
+.yw-list scrollbar slider { min-width: 4px; border-radius: 2px; background: alpha(@yp-fg2, 0.35); }
+.yw-netname { font-size: 13pt; font-weight: 700; padding: 2px 4px 0 4px; }
+.yw-netsub  { font-size: 9.5pt; color: alpha(@yp-fg2, 0.75); padding: 0 4px 4px 4px; }
+.yw-error   { color: #ed8796; font-size: 10pt; padding: 0 6px; }
+.yw-note    { color: alpha(@yp-fg2, 0.7); font-size: 9pt; padding: 0 6px; }
+.yw-confirm { background: alpha(#ed8796, 0.10); border-radius: 16px; padding: 10px 12px; }
+.yw-confirm-text { font-size: 10pt; }
+.yw-sep { min-height: 1px; background: alpha(@yp-fg2, 0.12); margin: 4px 6px; }
+.yp-entry text selection { background: alpha(@yp-accent, 0.35); color: @yp-fg; }
+.yw-link {
+  background: none; border: none; box-shadow: none; padding: 2px 8px; min-height: 0;
+  color: alpha(@yp-fg2, 0.6); font-size: 9.5pt;
+}
+.yw-link:hover { color: @yp-fg; }
+.yw-prof-sub { font-size: 9pt; color: alpha(@yp-fg2, 0.7); }
+.yw-field-key { color: alpha(@yp-fg2, 0.75); font-size: 9.5pt; padding: 0 6px; }
+.yw-search { margin-bottom: 2px; }
+.yp-entry.yw-entry-bad, .yp-entry.yw-entry-bad:focus-within { border-color: #ed8796; }
+.yw-ok { color: #a6da95; font-size: 9.5pt; padding: 0 6px; }
+.yw-dry { color: @yp-accent; font-size: 8.5pt; font-weight: 700; letter-spacing: 1px; padding: 0 6px; }
+"""
+
+
+# ---------- nmcli: разбор и чтение ----------
+def split_terse(line):
+    """Разбор строки `nmcli -t`: поля через «:», внутри полей «\\:» и «\\\\» — экранированные."""
+    out, cur, esc = [], [], False
+    for ch in line:
+        if esc:
+            cur.append(ch)
+            esc = False
+        elif ch == "\\":
+            esc = True
+        elif ch == ":":
+            out.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+    out.append("".join(cur))
+    return out
+
+
+def nm(*args, timeout=5):
+    return yp.run("nmcli", *args, timeout=timeout)
+
+
+def signal_icon(sig):
+    return SIGNAL_ICONS[min(max(int(sig), 0), 99) // 20]
+
+
+def band_of(freq):
+    try:
+        f = int(str(freq).split()[0])
+    except (ValueError, IndexError):
+        return "", 0
+    return ("2.4 ГГц" if f < 3000 else "5 ГГц" if f < 5925 else "6 ГГц"), f
+
+
+def security_text(sec):
+    sec = (sec or "").strip()
+    if not sec or sec == "--":
+        return "Открытая"
+    return sec.replace(" ", " / ")
+
+
+def wifi_device():
+    for line in nm("-t", "-f", "DEVICE,TYPE", "dev").splitlines():
+        f = split_terse(line)
+        if len(f) >= 2 and f[1] == "wifi":
+            return f[0]
+    return "wlan0"
+
+
+PROFILE_SSID = {}        # кэш uuid → ssid (профили меняются редко)
+
+
+def saved_profiles():
+    """ssid → (имя профиля, uuid) самого свежего сохранённого профиля Wi-Fi."""
+    best = {}
+    for line in nm("-t", "-f", "NAME,UUID,TYPE,TIMESTAMP", "connection", "show").splitlines():
+        f = split_terse(line)
+        if len(f) < 4 or f[2] != "802-11-wireless":
+            continue
+        name, uuid, ts = f[0], f[1], int(f[3] or 0)
+        if uuid not in PROFILE_SSID:
+            PROFILE_SSID[uuid] = nm("-g", "802-11-wireless.ssid", "connection", "show", "uuid", uuid).strip()
+        ssid = PROFILE_SSID[uuid] or name
+        if ssid not in best or ts > best[ssid][2]:
+            best[ssid] = (name, uuid, ts)
+    return {s: (n, u) for s, (n, u, _t) in best.items()}
+
+
+def snapshot(dev):
+    """Всё состояние одним заходом (в потоке). Без сканирования."""
+    radio = nm("radio", "wifi").strip() == "enabled"
+    saved = saved_profiles()
+    list_profiles()                                 # для счётчика «Сохранённые сети»
+    active = None                                   # (имя, uuid) активного профиля Wi-Fi
+    for line in nm("-t", "-f", "NAME,UUID,TYPE,DEVICE", "connection", "show", "--active").splitlines():
+        f = split_terse(line)
+        if len(f) >= 4 and f[2] == "802-11-wireless" and f[3] == dev:
+            active = (f[0], f[1])
+    nets, hidden, cur = {}, 0, None
+    if radio:
+        out = nm("-t", "-f", "IN-USE,SSID,SIGNAL,SECURITY,CHAN,FREQ,RATE,BSSID", "dev", "wifi", "list",
+                 "--rescan", "no", "ifname", dev)
+        for line in out.splitlines():
+            f = split_terse(line)
+            if len(f) < 8:
+                continue
+            inuse, ssid, sig, sec, chan, freq, rate, bssid = f[:8]
+            ap = {"ssid": ssid, "signal": int(sig or 0), "security": sec if sec != "--" else "",
+                  "chan": chan, "freq": freq, "rate": rate, "bssid": bssid, "inuse": inuse.strip() == "*"}
+            if not ssid:
+                hidden += 1
+                continue
+            if ap["inuse"]:
+                cur = ap
+            old = nets.get(ssid)        # дубли SSID (несколько точек/диапазонов): текущая или лучший сигнал
+            if old is None or (ap["inuse"] and not old["inuse"]) or \
+                    (not old["inuse"] and ap["signal"] > old["signal"]):
+                nets[ssid] = ap
+        for i, name in enumerate(FAKE_NETS):
+            sec = "WPA2"
+            if name.startswith("open:"):
+                name, sec = name[5:], ""
+            nets.setdefault(name, {"ssid": name, "signal": 70 - i * 15, "security": sec, "chan": "36",
+                                   "freq": "5180 MHz", "rate": "540 Mbit/s", "bssid": "", "inuse": False})
+    if active and cur is None:                      # точки нет в кэше — хотя бы имя
+        ssid = next((s for s, (_n, u) in saved.items() if u == active[1]), active[0])
+        cur = {"ssid": ssid, "signal": 0, "security": "", "chan": "", "freq": "", "rate": "", "bssid": "",
+               "inuse": True}
+    if not active:
+        cur = None
+    for ap in nets.values():
+        ap["saved"] = saved.get(ap["ssid"])
+    order = sorted(nets.values(), key=lambda a: (not a["inuse"], -a["signal"], a["ssid"].lower()))
+    return {"radio": radio, "active": active, "cur": cur, "nets": order, "hidden": hidden, "saved": saved}
+
+
+def device_details(dev):
+    info = {}
+    for line in nm("-t", "-f", "GENERAL.HWADDR,IP4.ADDRESS,IP4.GATEWAY,IP4.DNS", "dev", "show", dev).splitlines():
+        k, _, v = line.partition(":")
+        key = k.split("[")[0]
+        info.setdefault(key, []).append(v.replace("\\:", ":"))
+    ts = {"state": False, "ip": ""}
+    if shutil.which("tailscale"):
+        try:
+            st = json.loads(yp.run("tailscale", "status", "--json", timeout=3) or "{}")
+            ts["state"] = st.get("BackendState") == "Running"
+        except ValueError:
+            pass
+        ts["ip"] = yp.run("tailscale", "ip", "-4", timeout=3).strip().splitlines()[0:1]
+        ts["ip"] = ts["ip"][0] if ts["ip"] else ""
+    return {
+        "mac": (info.get("GENERAL.HWADDR") or [""])[0],
+        "ip4": ", ".join(info.get("IP4.ADDRESS", [])),
+        "gw": (info.get("IP4.GATEWAY") or [""])[0],
+        "dns": ", ".join(info.get("IP4.DNS", [])),
+        "ts": ts,
+    }
+
+
+def change(cmd, fake_ok=True, fake_err=""):
+    """Команда, меняющая сеть. В режиме YP_DRYRUN=1 — только печать в stderr и имитация результата.
+    Возвращает (успех, текст ошибки)."""
+    if DRYRUN:
+        shown = ["•••" if i and cmd[i - 1] == "password" else c for i, c in enumerate(cmd)]   # пароль не светить
+        print("[dry-run] " + " ".join(repr(c) if (" " in c or not c) else c for c in shown), file=sys.stderr, flush=True)
+        time.sleep(1.2)
+        if DRYRUN_FAIL and not fake_err:
+            return False, "Error: Connection activation failed: Secrets were required, but not provided."
+        return fake_ok, fake_err
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        return p.returncode == 0, (p.stderr or p.stdout).strip()
+    except Exception as e:      # таймаут и прочее
+        return False, str(e)
+
+
+def human_error(err):
+    e = err.lower()
+    if "secrets were required" in e or "802-11-wireless-security.psk" in e or "no secrets" in e:
+        return "Неверный пароль"
+    if "no network with ssid" in e:
+        return "Сеть не найдена — обновите список"
+    if "timeout" in e or "timed out" in e:
+        return "Сеть не ответила вовремя"
+    m = re.search(r"Error:\s*(.+)", err)
+    return (m.group(1) if m else err or "Не удалось").strip()[:90]
+
+
+def text_label(text, classes):
+    """Подпись, переносимая по ширине меню и не раздувающая окно (естественная ширина — мала)."""
+    return Gtk.Label(label=text, xalign=0, wrap=True, max_width_chars=12, hexpand=True,
+                     wrap_mode=Pango.WrapMode.WORD_CHAR, css_classes=list(classes))
+
+
+def die_with_parent():
+    try:
+        ctypes.CDLL("libc.so.6").prctl(1, signal.SIGTERM)       # PR_SET_PDEATHSIG
+    except Exception:
+        pass
+
+
+# ---------- меню ----------
+class Wifi:
+    def __init__(self, panel, body):
+        self.panel = panel
+        self.dev = "wlan0"
+        self.data = None
+        self.sig = None                  # отпечаток последнего показанного состояния
+        self.refresh_timer = 0
+        self.refreshing = False
+        self.again = False
+        self.scanning = False
+        self.busy = None                 # SSID, к которой идёт подключение
+        self.toast_until = 0
+        self.sim_radio = None            # dry-run: имитация положения радио
+        self.status = None               # открытая страница «Статус»: {...виджеты}
+        self.monitor_proc = None
+        self.radio_guard = False
+        self.status_test = None
+        self.saved_page = None
+        self.prof = None
+
+        css = EXTRA_CSS
+        if panel.k != 1.0:
+            css = re.sub(r"(\d+(?:\.\d+)?)(px|pt)\b", lambda m: f"{float(m.group(1)) * panel.k:.2f}{m.group(2)}", css)
+        self.css = Gtk.CssProvider()
+        self.css.load_from_string(css)
+        Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), self.css,
+                                                  Gtk.STYLE_PROVIDER_PRIORITY_USER + 2)
+
+        if DRYRUN:
+            body.append(Gtk.Label(label="РЕЖИМ ПРОВЕРКИ · DRY-RUN", xalign=0, css_classes=["yw-dry"]))
+
+        # Wi-Fi вкл/выкл (+ подтверждение выключения: через Wi-Fi идут SSH и Tailscale)
+        toggle, self.switch = yp.toggle_row(ICON_WIFI, "Wi-Fi", True, self.on_toggle)
+        body.append(toggle)
+        cbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, css_classes=["yw-confirm"])
+        cbox.append(text_label("Выключить Wi-Fi? Пропадут SSH, Tailscale и управление с телефона.",
+                               ["yw-confirm-text"]))
+        btns = Gtk.Box(spacing=8, homogeneous=True)
+        btns.append(yp.action_button("Выключить", lambda *_: self.radio(False), "danger"))
+        btns.append(yp.action_button("Отмена", lambda *_: self.radio_confirm.set_reveal_child(False), "plain"))
+        cbox.append(btns)
+        self.radio_confirm = yp.revealer(cbox)
+        body.append(self.radio_confirm)
+
+        # карточка текущей сети
+        self.card_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        body.append(self.card_box)
+
+        # доступные сети
+        head = Gtk.Box(spacing=8, css_classes=["yw-head-row"])
+        head.append(Gtk.Label(label="ДОСТУПНЫЕ СЕТИ", xalign=0, hexpand=True, valign=Gtk.Align.CENTER,
+                              css_classes=["yp-section"]))
+        self.refresh_btn = Gtk.Button(css_classes=["yw-refresh"], valign=Gtk.Align.CENTER, tooltip_text="Сканировать")
+        rb = Gtk.Box(spacing=6)
+        self.refresh_spin = Gtk.Spinner(visible=False)
+        self.refresh_lbl = Gtk.Label(label=f"{ICON_REFRESH} Обновить")
+        rb.append(self.refresh_spin)
+        rb.append(self.refresh_lbl)
+        self.refresh_btn.set_child(rb)
+        self.refresh_btn.connect("clicked", lambda *_: self.rescan())
+        head.append(self.refresh_btn)
+        self.list_head = head
+        body.append(head)
+
+        self.list_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, propagate_natural_height=True,
+                                         max_content_height=round(300 * panel.k), css_classes=["yw-list"])
+        self.scroll.set_child(self.list_box)
+        body.append(self.scroll)
+        self.list_box.append(yp.spinner_row("Читаю список сетей…"))
+
+        self.saved_btn_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        body.append(self.saved_btn_box)
+        self.saved_btn_box.append(yp.row_button(ICON_SAVED, "Сохранённые сети", lambda *_: self.open_saved()))
+        if shutil.which("nm-connection-editor"):
+            adv = Gtk.Button(label=f"{ICON_GEAR}  Расширенные настройки…", halign=Gtk.Align.CENTER,
+                             css_classes=["yw-link"], tooltip_text="nm-connection-editor")
+            adv.connect("clicked", self.open_settings)
+            body.append(adv)
+
+        panel.set_subtitle("…")
+        panel.stack.connect("notify::visible-child", lambda *_: fit_height(panel))
+        self.radio_confirm.connect("notify::child-revealed", lambda *_: fit_height(panel))
+        panel.app.connect("shutdown", lambda *_: self.stop_monitor())
+        self.request_refresh(first=True)
+        threading.Thread(target=self.monitor, daemon=True).start()
+
+    # ---------- обновление ----------
+    def request_refresh(self, first=False):
+        self.refresh_timer = 0
+        if os.environ.get("YP_DEBUG"):
+            print(f"DBG refresh {time.strftime('%T')}", file=sys.stderr, flush=True)
+        if self.refreshing:
+            self.again = True
+            return False
+        self.refreshing = True
+
+        def work():
+            if first:
+                self.dev = wifi_device()
+            data = snapshot(self.dev)
+            GLib.idle_add(self.apply, data, first)
+        threading.Thread(target=work, daemon=True).start()
+        return False
+
+    def schedule_refresh(self, delay=400):
+        if not self.refresh_timer:          # дебаунс: пачка событий nmcli monitor → одно обновление
+            self.refresh_timer = GLib.timeout_add(delay, self.request_refresh)
+        return False
+
+    def apply(self, data, first=False):
+        self.refreshing = False
+        if self.sim_radio is not None:
+            data["radio"] = self.sim_radio
+            if not self.sim_radio:
+                data.update(cur=None, active=None, nets=[], hidden=0)
+        self.data = data
+        self.render()
+        if first:
+            self.open_from_env()
+            if data["radio"]:
+                self.rescan(quiet=True)          # кэш NetworkManager бывает старым — тихо досканировать
+        if self.again:
+            self.again = False
+            self.schedule_refresh(100)
+        return False
+
+    def fingerprint(self):
+        d = self.data
+        return (d["radio"], d["active"], self.busy, len(d["saved"]),
+                tuple((a["ssid"], a["signal"], a["inuse"], bool(a["saved"]), a["security"]) for a in d["nets"]),
+                d["cur"] and (d["cur"]["ssid"], d["cur"]["signal"], d["cur"]["chan"]))
+
+    def render(self):
+        d = self.data
+        self.radio_guard = True
+        self.switch.set_active(d["radio"])
+        self.radio_guard = False
+        self.update_subtitle()
+        fp = self.fingerprint()
+        if fp != self.sig:
+            self.sig = fp
+            self.fill_card()
+            self.fill_list()
+            self.fill_saved_btn()
+            fit_height(self.panel)
+        self.list_head.set_visible(d["radio"])
+        self.scroll.set_visible(d["radio"])
+        if self.status:
+            self.fill_status()
+
+    def main_subtitle(self):
+        d = self.data
+        if not d["radio"]:
+            return "Wi-Fi выключен"
+        if d["cur"]:
+            c = d["cur"]
+            return f"{c['ssid']} · {signal_icon(c['signal'])} {c['signal']}%" if c["signal"] else c["ssid"]
+        return "Не подключено"
+
+    def update_subtitle(self):
+        if self.panel.pages or time.monotonic() < self.toast_until:
+            return
+        self.panel.toast(self.main_subtitle())
+
+    def toast(self, text, error=False, hold=3.0):
+        self.panel.toast(text, error)
+        self.toast_until = time.monotonic() + hold
+        GLib.timeout_add(int(hold * 1000) + 50, lambda: self.update_subtitle() or False)
+
+    def fill_card(self):
+        while (c := self.card_box.get_first_child()):
+            self.card_box.remove(c)
+        d = self.data
+        if not d["radio"]:
+            return
+        c = d["cur"]
+        if not c:
+            self.card_box.append(text_label(f"{ICON_NONE}  Не подключено — выберите сеть", ["yw-dim"]))
+            return
+        box = Gtk.Box(spacing=12)
+        box.append(Gtk.Label(label=signal_icon(c["signal"]), css_classes=["yp-row-icon"]))
+        txt = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True, valign=Gtk.Align.CENTER)
+        txt.append(Gtk.Label(label=c["ssid"], xalign=0, ellipsize=Pango.EllipsizeMode.END, css_classes=["yw-card-name"]))
+        band, _f = band_of(c["freq"])
+        sub = " · ".join(x for x in ("Подключено", band, f"{c['signal']}%" if c["signal"] else "") if x)
+        txt.append(Gtk.Label(label=sub, xalign=0, css_classes=["yw-card-sub"]))
+        box.append(txt)
+        box.append(Gtk.Label(label="󰅂", css_classes=["yw-chevron"]))
+        b = Gtk.Button(child=box, css_classes=["yp-row", "active", "yw-card"], tooltip_text="Статус сети")
+        b.connect("clicked", lambda *_: self.open_status())
+        self.card_box.append(b)
+
+    def fill_list(self):
+        while (c := self.list_box.get_first_child()):
+            self.list_box.remove(c)
+        d = self.data
+        nets = [a for a in d["nets"] if not a["inuse"]]
+        for ap in nets:
+            self.list_box.append(self.net_row(ap))
+        if not nets:
+            self.list_box.append(text_label("Других сетей рядом нет — нажмите «Обновить»", ["yw-dim"]))
+        if d["hidden"]:
+            self.list_box.append(Gtk.Label(label=f"+ скрытых сетей: {d['hidden']}", xalign=0, css_classes=["yw-note"]))
+
+    def net_row(self, ap):
+        box = Gtk.Box(spacing=12)
+        box.append(Gtk.Label(label=signal_icon(ap["signal"]), css_classes=["yp-row-icon"]))
+        box.append(Gtk.Label(label=ap["ssid"], xalign=0, hexpand=True, ellipsize=Pango.EllipsizeMode.END))
+        if ap["saved"]:
+            box.append(Gtk.Label(label=ICON_SAVED, tooltip_text="Сохранена", css_classes=["yw-row-badge"]))
+        if ap["security"]:
+            box.append(Gtk.Label(label=ICON_LOCK, tooltip_text=security_text(ap["security"]),
+                                 css_classes=["yw-row-badge"]))
+        if self.busy == ap["ssid"]:
+            box.append(Gtk.Spinner(spinning=True))
+        else:
+            box.append(Gtk.Label(label=f"{ap['signal']}%", width_chars=4, xalign=1, css_classes=["yp-row-meta"]))
+        classes = ["yp-row", "yw-row"] + (["weak"] if ap["signal"] < 35 else [])
+        b = Gtk.Button(child=box, css_classes=classes, sensitive=self.busy is None)
+        b.connect("clicked", lambda *_: self.on_net(ap))
+        return b
+
+    # ---------- живое обновление ----------
+    def monitor(self):
+        """nmcli monitor: любое изменение сети → одно обновление (дебаунс)."""
+        try:
+            self.monitor_proc = subprocess.Popen(["nmcli", "monitor"], stdout=subprocess.PIPE, text=True,
+                                                 stderr=subprocess.DEVNULL, preexec_fn=die_with_parent)
+            for _line in self.monitor_proc.stdout:
+                GLib.idle_add(self.schedule_refresh)
+        except Exception:
+            pass
+
+    def stop_monitor(self):
+        if self.monitor_proc and self.monitor_proc.poll() is None:
+            self.monitor_proc.terminate()
+
+    # ---------- сканирование ----------
+    def rescan(self, quiet=False):
+        if self.scanning or not (self.data and self.data["radio"]):
+            return
+        self.scanning = True
+        self.refresh_spin.set_visible(True)
+        self.refresh_spin.set_spinning(True)
+        self.refresh_lbl.set_label("Ищу…")
+        self.refresh_btn.set_sensitive(False)
+
+        def work():
+            ok, err = True, ""
+            try:
+                p = subprocess.run(["nmcli", "dev", "wifi", "rescan", "ifname", self.dev],
+                                   capture_output=True, text=True, timeout=15)
+                ok, err = p.returncode == 0, p.stderr.strip()
+            except Exception as e:
+                ok, err = False, str(e)
+            time.sleep(3.5)              # rescan только запускает поиск; результаты приходят за пару секунд
+            GLib.idle_add(self.rescan_done, ok, err, quiet)
+        threading.Thread(target=work, daemon=True).start()
+
+    def rescan_done(self, ok, err, quiet):
+        self.scanning = False
+        self.refresh_spin.set_spinning(False)
+        self.refresh_spin.set_visible(False)
+        self.refresh_lbl.set_label(f"{ICON_REFRESH} Обновить")
+        self.refresh_btn.set_sensitive(True)
+        if not ok and not quiet and "not allowed" not in err.lower():
+            self.toast(human_error(err), error=True)
+        self.schedule_refresh(50)
+        return False
+
+    # ---------- Wi-Fi вкл/выкл ----------
+    def on_toggle(self, state):
+        if self.radio_guard:
+            return False
+        if not state:                            # выключение — только после подтверждения
+            self.radio_confirm.set_reveal_child(True)
+            GLib.idle_add(lambda: (self.radio_guard_set(True), False)[1])
+            return True                          # оставить переключатель включённым до подтверждения
+        self.radio_confirm.set_reveal_child(False)
+        self.radio(True)
+        return False
+
+    def radio_guard_set(self, val):
+        self.radio_guard = True
+        self.switch.set_active(val)
+        self.switch.set_state(val)
+        self.radio_guard = False
+
+    def radio(self, on):
+        self.radio_confirm.set_reveal_child(False)
+        self.toast("Включаю Wi-Fi…" if on else "Выключаю Wi-Fi…")
+
+        def work():
+            ok, err = change(["nmcli", "radio", "wifi", "on" if on else "off"])
+            GLib.idle_add(done, ok, err)
+
+        def done(ok, err):
+            if ok and DRYRUN:
+                self.sim_radio = on
+                self.toast(("Wi-Fi включён" if on else "Wi-Fi выключен") + " (проверка)")
+            elif not ok:
+                self.toast(human_error(err), error=True)
+            self.sig = None
+            self.request_refresh()
+            return False
+        threading.Thread(target=work, daemon=True).start()
+
+    # ---------- подключение ----------
+    def on_net(self, ap):
+        if self.busy:
+            return
+        if ap["saved"]:
+            self.connect_saved(ap)
+        elif ap["security"]:
+            self.open_password(ap["ssid"], ap)
+        else:
+            self.connect_new(ap["ssid"], None)
+
+    def set_busy(self, ssid):
+        self.busy = ssid
+        self.sig = None
+        self.render()
+
+    def connect_saved(self, ap):
+        name, uuid = ap["saved"]
+        self.set_busy(ap["ssid"])
+        self.toast(f"Подключаюсь к {ap['ssid']}…", hold=60)
+
+        def work():
+            ok, err = change(["nmcli", "-w", "40", "connection", "up", "uuid", uuid, "ifname", self.dev])
+            GLib.idle_add(done, ok, err)
+
+        def done(ok, err):
+            self.set_busy(None)
+            if ok:
+                self.toast(f"Подключено: {ap['ssid']}" + (" (проверка)" if DRYRUN else ""))
+            else:
+                msg = human_error(err)
+                self.toast(f"{ap['ssid']}: {msg}", error=True, hold=5)
+            self.request_refresh()
+            return False
+        threading.Thread(target=work, daemon=True).start()
+
+    def connect_new(self, ssid, password, on_result=None):
+        """Новая сеть. on_result(ok, msg) — для страницы пароля (ошибку показать, не закрывая)."""
+        self.set_busy(ssid)
+        self.toast(f"Подключаюсь к {ssid}…", hold=60)
+        before = set(PROFILE_SSID)
+
+        def work():
+            cmd = ["nmcli", "-w", "40", "dev", "wifi", "connect", ssid, "ifname", self.dev]
+            if password is not None:
+                cmd[7:7] = ["password", password]
+            ok, err = change(cmd)
+            if not ok and not DRYRUN:            # неудачная попытка оставляет «битый» профиль — убрать только его
+                saved_profiles()
+                for uuid in set(PROFILE_SSID) - before:
+                    if PROFILE_SSID.get(uuid) == ssid:
+                        subprocess.run(["nmcli", "connection", "delete", "uuid", uuid], capture_output=True)
+            GLib.idle_add(done, ok, err)
+
+        def done(ok, err):
+            self.set_busy(None)
+            msg = human_error(err) if not ok else ""
+            if ok:
+                self.toast(f"Подключено: {ssid}" + (" (проверка)" if DRYRUN else ""))
+            else:
+                self.toast(f"{ssid}: {msg}", error=True, hold=5)
+            if on_result:
+                on_result(ok, msg)
+            self.request_refresh()
+            return False
+        threading.Thread(target=work, daemon=True).start()
+
+    def open_password(self, ssid, ap=None):
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        page.append(Gtk.Label(label=ssid, xalign=0, ellipsize=Pango.EllipsizeMode.END, css_classes=["yw-netname"]))
+        if ap:
+            band, _f = band_of(ap["freq"])
+            sub = " · ".join(x for x in (f"{signal_icon(ap['signal'])} {ap['signal']}%", band,
+                                         security_text(ap["security"])) if x)
+            page.append(Gtk.Label(label=sub, xalign=0, css_classes=["yw-netsub"]))
+        entry = yp.password_entry("Пароль сети")
+        page.append(entry)
+        err = text_label("", ["yw-error"])
+        err.set_visible(False)
+        page.append(err)
+        spin = yp.revealer(yp.spinner_row("Подключаюсь…"))
+        page.append(spin)
+        btn = yp.action_button("Подключиться", lambda *_: submit(), "primary")
+        page.append(btn)
+
+        def submit(*_):
+            pw = entry.get_text()
+            if not 8 <= len(pw) <= 63:
+                err.set_label("Пароль WPA — от 8 до 63 символов")
+                err.set_visible(True)
+                return
+            err.set_visible(False)
+            btn.set_sensitive(False)
+            entry.set_sensitive(False)
+            spin.set_reveal_child(True)
+
+            def result(ok, msg):
+                spin.set_reveal_child(False)
+                btn.set_sensitive(True)
+                entry.set_sensitive(True)
+                if ok:
+                    if self.panel.pages:
+                        self.panel.pop()
+                else:
+                    err.set_label(msg)
+                    err.set_visible(True)
+                    entry.grab_focus()
+                    entry.select_region(0, -1)
+            self.connect_new(ssid, pw, result)
+
+        entry.connect("activate", submit)
+        self.panel.push("Пароль", page, ssid)
+        GLib.timeout_add(260, lambda: entry.grab_focus() and False)
+        return entry, submit
+
+    # ---------- статус ----------
+    def open_status(self):
+        d = self.data
+        if not d or not d["cur"]:
+            return
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        info = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        page.append(info)
+        pw_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        page.append(pw_box)
+        page.append(Gtk.Box(css_classes=["yw-sep"]))
+        show_pw = yp.action_button(f"{ICON_EYE}  Показать пароль", lambda *_: self.show_password(), "plain")
+        page.append(show_pw)
+        ssid = d["cur"]["ssid"]
+        texts = {
+            "down": (f"Отключиться от «{ssid}»? Пропадут SSH, Tailscale и управление с телефона.",
+                     "Отключиться", self.disconnect),
+            "forget": (f"Забыть «{ssid}»? Сохранённый пароль удалится, автоподключения больше не будет.",
+                       "Забыть", self.forget),
+        }
+        cbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, css_classes=["yw-confirm"])
+        clbl = text_label("", ["yw-confirm-text"])
+        cbox.append(clbl)
+        cb = Gtk.Box(spacing=8, homogeneous=True)
+        cok = Gtk.Button(css_classes=["yp-action", "danger"])
+        cb.append(cok)
+        cb.append(yp.action_button("Отмена", lambda *_: confirm.set_reveal_child(False), "plain"))
+        cbox.append(cb)
+        confirm = yp.revealer(cbox)
+        confirm.connect("notify::child-revealed", lambda *_: fit_height(self.panel))
+        want = {"kind": None}
+
+        def ask(kind):
+            if confirm.get_reveal_child() and want["kind"] == kind:
+                confirm.set_reveal_child(False)
+                return
+            want["kind"] = kind
+            text, label, _fn = texts[kind]
+            clbl.set_label(text)
+            cok.set_label(label)
+            confirm.set_reveal_child(True)
+        cok.connect("clicked", lambda *_: (confirm.set_reveal_child(False), texts[want["kind"]][2]()))
+        self.status_test = (ask, cok)
+
+        acts = Gtk.Box(spacing=8, homogeneous=True)
+        acts.append(yp.action_button("Отключиться", lambda *_: ask("down"), "plain"))
+        acts.append(yp.action_button("Забыть сеть", lambda *_: ask("forget"), "danger"))
+        page.append(acts)
+        page.append(confirm)
+
+        self.status = {"info": info, "pw_box": pw_box, "show_pw": show_pw, "details": None, "uuid": None,
+                       "loading": False}
+        info.append(yp.spinner_row("Читаю параметры…"))
+        self.panel.push("Статус", page, d["cur"]["ssid"])
+        # без фокуса на кнопках: случайный пробел/Enter не должен раскрыть пароль или нажать «Отключиться»
+        GLib.timeout_add(240, lambda: self.panel.set_focus(None) or False)
+        # закрыли страницу — перестать её обновлять
+        page.connect("unrealize", lambda *_: setattr(self, "status", None))
+        self.load_details()
+
+    def load_details(self):
+        st = self.status
+        if not st or st["loading"]:
+            return
+        st["loading"] = True
+
+        def work():
+            det = device_details(self.dev)
+            GLib.idle_add(done, det)
+
+        def done(det):
+            if self.status is st:
+                st["details"] = det
+                st["loading"] = False
+                self.fill_status()
+            return False
+        threading.Thread(target=work, daemon=True).start()
+
+    def fill_status(self):
+        st, d = self.status, self.data
+        if not st or not st["details"]:
+            return
+        if st.get("refilled_at", 0) + 5 < time.monotonic():      # IP/DNS/Tailscale — не чаще раза в 5 с
+            st["refilled_at"] = time.monotonic()
+            if st.get("shown"):
+                self.load_details()
+        st["shown"] = True
+        c, det = d["cur"], st["details"]
+        info = st["info"]
+        while (w := info.get_first_child()):
+            info.remove(w)
+        if not c:
+            info.append(Gtk.Label(label="Не подключено", xalign=0, css_classes=["yw-dim"]))
+            return
+        band, f = band_of(c["freq"])
+        rate = c["rate"].replace("Mbit/s", "Мбит/с")
+        ts = det["ts"]
+        rows = [
+            ("Сеть", c["ssid"], True),
+            ("Сигнал", f"{signal_icon(c['signal'])} {c['signal']}%" if c["signal"] else "", False),
+            ("Диапазон", f"{band} · канал {c['chan']}" if band else "", False),
+            ("Частота", f"{f} МГц" if f else "", False),
+            ("Скорость", rate, False),
+            ("Защита", security_text(c["security"]), False),
+            ("IPv4", det["ip4"], True),
+            ("Шлюз", det["gw"], True),
+            ("DNS", det["dns"], True),
+            ("MAC", det["mac"], True),
+            ("Tailscale", f"󰄬 подключён · {ts['ip']}" if ts["state"] else "не подключён", False),
+        ]
+        for key, val, copy in rows:
+            info.append(yp.info_row(key, val, copy))
+        prof = d["active"]
+        st["uuid"] = prof[1] if prof else None
+
+    def show_password(self):
+        st = self.status
+        if not st or not st["uuid"]:
+            return
+        uuid = st["uuid"]
+        st["show_pw"].set_sensitive(False)
+
+        def work():
+            pw = yp.run("nmcli", "-s", "-g", "802-11-wireless-security.psk", "connection", "show", "uuid", uuid,
+                        timeout=10).strip()
+            GLib.idle_add(done, pw)
+
+        def done(pw):
+            if self.status is not st:
+                return False
+            while (w := st["pw_box"].get_first_child()):
+                st["pw_box"].remove(w)
+            if pw:
+                st["pw_box"].append(yp.info_row("Пароль", pw, copy=True))
+                st["show_pw"].set_visible(False)
+            else:
+                st["pw_box"].append(text_label("Пароль не сохранён или нет доступа", ["yw-error"]))
+                st["show_pw"].set_sensitive(True)
+            return False
+        threading.Thread(target=work, daemon=True).start()
+
+    def disconnect(self):
+        d = self.data
+        if not d["active"]:
+            return
+        name, uuid = d["active"]
+        self.toast("Отключаюсь…", hold=30)
+
+        def work():
+            ok, err = change(["nmcli", "connection", "down", "uuid", uuid])
+            GLib.idle_add(done, ok, err)
+
+        def done(ok, err):
+            if ok:
+                if self.panel.pages:
+                    self.panel.pop()
+                self.toast("Отключено" + (" (проверка)" if DRYRUN else ""))
+            else:
+                self.toast(human_error(err), error=True, hold=5)
+            self.request_refresh()
+            return False
+        threading.Thread(target=work, daemon=True).start()
+
+    def forget(self):
+        d = self.data
+        if not d["active"]:
+            return
+        name, uuid = d["active"]
+        ssid = d["cur"]["ssid"] if d["cur"] else name
+        self.toast("Забываю сеть…", hold=30)
+
+        def work():
+            ok, err = change(["nmcli", "connection", "delete", "uuid", uuid])
+            GLib.idle_add(done, ok, err)
+
+        def done(ok, err):
+            if ok:
+                PROFILE_SSID.pop(uuid, None)
+                if self.panel.pages:
+                    self.panel.pop()
+                self.toast(f"Сеть «{ssid}» забыта" + (" (проверка)" if DRYRUN else ""))
+            else:
+                self.toast(human_error(err), error=True, hold=5)
+            self.request_refresh()
+            return False
+        threading.Thread(target=work, daemon=True).start()
+
+    # ---------- сохранённые сети ----------
+    def fill_saved_btn(self):
+        while (c := self.saved_btn_box.get_first_child()):
+            self.saved_btn_box.remove(c)
+        n = len(list_profiles(cached=True)) or len(self.data["saved"])
+        self.saved_btn_box.append(yp.row_button(ICON_SAVED, "Сохранённые сети", lambda *_: self.open_saved(),
+                                                meta=str(n) if n else ""))
+
+    def open_saved(self):
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        search = Gtk.SearchEntry(placeholder_text="Поиск сети", css_classes=["yp-entry", "yw-search"], visible=False)
+        page.append(search)
+        lst = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        lst.append(yp.spinner_row("Читаю профили…"))
+        page.append(scrolled(lst, 470, self.panel))
+        state = {"profiles": [], "rows": []}
+
+        def filt(*_):
+            q = search.get_text().strip().lower()
+            for prof, row in state["rows"]:
+                row.set_visible(not q or q in prof["ssid"].lower() or q in prof["name"].lower())
+            fit_height(self.panel)
+
+        def fill(profiles):
+            while (c := lst.get_first_child()):
+                lst.remove(c)
+            state["rows"] = []
+            active = self.data["active"][1] if self.data and self.data["active"] else None
+            profiles.sort(key=lambda p: (p["uuid"] != active, -p["ts"], p["ssid"].lower()))
+            for prof in profiles:
+                row = self.profile_row(prof, prof["uuid"] == active)
+                state["rows"].append((prof, row))
+                lst.append(row)
+            if not profiles:
+                lst.append(text_label("Сохранённых сетей нет", ["yw-dim"]))
+            search.set_visible(len(profiles) > 8)
+            self.panel.set_subtitle(f"{len(profiles)} {plural(len(profiles), 'сеть', 'сети', 'сетей')}", live=True)
+            filt()
+            return False
+
+        search.connect("search-changed", filt)
+        self.saved_page = {"fill": fill, "search": search}
+        self.panel.push("Сохранённые сети", page, "", on_leave=lambda: setattr(self, "saved_page", None))
+        self.reload_saved()
+
+    def reload_saved(self):
+        def work():
+            profs = list_profiles()
+            GLib.idle_add(lambda: (self.saved_page and self.saved_page["fill"](profs)) and False)
+        threading.Thread(target=work, daemon=True).start()
+
+    def profile_row(self, prof, current):
+        box = Gtk.Box(spacing=12)
+        box.append(Gtk.Label(label=ICON_WIFI if current else ICON_SAVED, css_classes=["yp-row-icon"]))
+        txt = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True, valign=Gtk.Align.CENTER)
+        txt.append(Gtk.Label(label=prof["ssid"], xalign=0, ellipsize=Pango.EllipsizeMode.END))
+        sub = "подключено сейчас" if current else ago(prof["ts"])
+        if prof["name"] != prof["ssid"]:
+            sub = f"{prof['name']} · {sub}"
+        if not prof["auto"]:
+            sub += " · вручную"
+        txt.append(Gtk.Label(label=sub, xalign=0, ellipsize=Pango.EllipsizeMode.END, css_classes=["yw-prof-sub"]))
+        box.append(txt)
+        box.append(Gtk.Label(label="󰅂", css_classes=["yw-chevron"]))
+        b = Gtk.Button(child=box, css_classes=["yp-row"] + (["active"] if current else []))
+        b.connect("clicked", lambda *_: self.open_profile(prof))
+        return b
+
+    # ---------- профиль ----------
+    def open_profile(self, prof):
+        uuid = prof["uuid"]
+        current = bool(self.data and self.data["active"] and self.data["active"][1] == uuid)
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        outer.append(yp.spinner_row("Читаю профиль…"))
+        self.prof = {"uuid": uuid, "prof": prof, "current": current}
+        self.panel.push("Сеть", outer, prof["ssid"], on_leave=lambda: setattr(self, "prof", None))
+
+        def work():
+            conf = profile_settings(uuid)
+            det = device_details(self.dev) if current else None
+            GLib.idle_add(done, conf, det)
+
+        def done(conf, det):
+            if not self.prof or self.prof["uuid"] != uuid:
+                return False
+            while (c := outer.get_first_child()):
+                outer.remove(c)
+            self.build_profile(page, prof, conf, det, current)
+            sw = scrolled(page, 600, self.panel)
+            outer.append(sw)
+            if self.prof is not None:
+                self.prof.update(scroll=sw, page=page)
+            fit_height(self.panel)
+            GLib.timeout_add(900, self.run_prof_test)
+            return False
+        threading.Thread(target=work, daemon=True).start()
+
+    def build_profile(self, page, prof, conf, det, current):
+        uuid, P = prof["uuid"], self.prof
+        page.append(Gtk.Label(label=prof["ssid"], xalign=0, ellipsize=Pango.EllipsizeMode.END,
+                              css_classes=["yw-netname"]))
+        sub = f"Профиль «{prof['name']}» · " + ("подключено сейчас" if current else ago(prof["ts"]))
+        page.append(text_label(sub, ["yw-netsub"]))
+
+        # пароль
+        if conf.get("802-11-wireless-security.key-mgmt"):
+            pw_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+            page.append(pw_box)
+            show = Gtk.Button(label=f"{ICON_EYE}  Показать пароль", css_classes=["yp-action", "plain"])
+
+            def show_pw(*_):
+                show.set_sensitive(False)
+
+                def work():
+                    pw = yp.run("nmcli", "-s", "-g", "802-11-wireless-security.psk", "connection", "show",
+                                "uuid", uuid, timeout=10).strip()
+                    GLib.idle_add(got, pw)
+
+                def got(pw):
+                    if pw:
+                        pw_box.append(yp.info_row("Пароль", pw, copy=True))
+                        show.set_visible(False)
+                    else:
+                        pw_box.append(text_label("Пароль не сохранён или нет доступа", ["yw-error"]))
+                        show.set_sensitive(True)
+                    return False
+                threading.Thread(target=work, daemon=True).start()
+            show.connect("clicked", show_pw)
+            page.append(show)
+
+        # подключение
+        page.append(yp.section("ПОДКЛЮЧЕНИЕ"))
+        auto_row, auto_sw = yp.toggle_row("󰁪", "Подключаться автоматически",
+                                          conf.get("connection.autoconnect") == "yes",
+                                          lambda st: self.modify(uuid, "Автоподключение " + ("включено" if st else "выключено"),
+                                                                 "connection.autoconnect", "yes" if st else "no"))
+        page.append(auto_row)
+        P["auto_sw"] = auto_sw
+        page.append(Gtk.Label(label="Приоритет среди сохранённых сетей", xalign=0, css_classes=["yw-field-key"]))
+        try:
+            prio = int(conf.get("connection.autoconnect-priority") or 0)
+        except ValueError:
+            prio = 0
+        prio_key = "low" if prio < 0 else "high" if prio > 0 else "normal"
+        prio_val = {"low": "-10", "normal": "0", "high": "10"}
+        prio_name = {"low": "низкий", "normal": "обычный", "high": "высокий"}
+        seg = yp.Segmented([("low", "󰁅", "Низкий", True), ("normal", "󰇘", "Обычный", True),
+                            ("high", "󰁝", "Высокий", True)], prio_key,
+                           lambda k: self.modify(uuid, f"Приоритет: {prio_name[k]}",
+                                                 "connection.autoconnect-priority", prio_val[k]))
+        page.append(seg)
+        P["prio"] = seg
+        met_row, met_sw = yp.toggle_row("󰾆", "Лимитное подключение", conf.get("connection.metered") == "yes",
+                                        lambda st: self.modify(uuid, "Лимитное подключение " + ("включено" if st else "выключено"),
+                                                               "connection.metered", "yes" if st else "unknown"))
+        page.append(met_row)
+        P["met_sw"] = met_sw
+        page.append(yp.hint("Лимитное — система бережёт трафик: без фоновых обновлений и больших загрузок."))
+
+        # IP
+        page.append(yp.section("IP-АДРЕС"))
+        manual = conf.get("ipv4.method") == "manual"
+        addr0 = conf.get("ipv4.addresses", "").split(",")[0].strip()
+        gw0, dns0 = conf.get("ipv4.gateway", ""), conf.get("ipv4.dns", "")
+        if not manual and det:                          # подсказать текущие значения от DHCP
+            addr0 = addr0 or det["ip4"].split(",")[0].strip()
+            gw0, dns0 = gw0 or det["gw"], dns0 or det["dns"]
+        fields = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        e_addr = ip_entry("Адрес, например 192.168.1.50/24", addr0)
+        e_gw = ip_entry("Шлюз, например 192.168.1.1", gw0)
+        e_dns = ip_entry("DNS через запятую: 1.1.1.1, 8.8.8.8", dns0.replace(",", ", "))
+        for key, e in (("Адрес / маска", e_addr), ("Шлюз", e_gw), ("DNS", e_dns)):
+            fields.append(Gtk.Label(label=key, xalign=0, css_classes=["yw-field-key"]))
+            fields.append(e)
+        ip_err = text_label("", ["yw-error"])
+        ip_err.set_visible(False)
+        fields.append(ip_err)
+        if current:
+            fields.append(yp.hint("Для текущей сети новые настройки IP вступят в силу после переподключения."))
+
+        def save_ip(*_):
+            res = validate_ip(e_addr.get_text(), e_gw.get_text(), e_dns.get_text())
+            for e, bad in ((e_addr, res.get("bad") == "addr"), (e_gw, res.get("bad") == "gw"),
+                           (e_dns, res.get("bad") == "dns")):
+                (e.add_css_class if bad else e.remove_css_class)("yw-entry-bad")
+            if "error" in res:
+                ip_err.set_label(res["error"])
+                ip_err.set_visible(True)
+                return
+            ip_err.set_visible(False)
+            e_addr.set_text(res["addr"])
+            self.modify(uuid, "IP вручную сохранён", "ipv4.method", "manual", "ipv4.addresses", res["addr"],
+                        "ipv4.gateway", res["gw"], "ipv4.dns", res["dns"])
+        fields.append(yp.action_button("Сохранить IP", save_ip, "primary"))
+        ip_rev = yp.revealer(fields, shown=manual)
+        ip_rev.connect("notify::child-revealed", lambda *_: fit_height(self.panel))
+        ip_state = {"manual": manual}
+
+        def on_ip(k):
+            ip_rev.set_reveal_child(k == "manual")
+            if k == "auto" and ip_state["manual"]:
+                ip_state["manual"] = False
+                self.modify(uuid, "IP: автоматически (DHCP)", "ipv4.method", "auto",
+                            "ipv4.addresses", "", "ipv4.gateway", "")
+        ip_seg = yp.Segmented([("auto", "󰑓", "Авто (DHCP)", True), ("manual", "󰏫", "Вручную", True)],
+                              "manual" if manual else "auto", on_ip)
+        page.append(ip_seg)
+        page.append(ip_rev)
+        P.update(ip_sec=ip_seg,ip_seg=ip_seg, on_ip=on_ip, e_addr=e_addr, e_gw=e_gw, e_dns=e_dns, save_ip=save_ip)
+
+        # MAC
+        page.append(yp.section("MAC-АДРЕС"))
+        mac = conf.get("802-11-wireless.cloned-mac-address", "")
+        mac_key = "random" if mac == "random" else "stable" if mac == "stable" else "permanent"
+        mac_name = {"permanent": "постоянный", "random": "случайный", "stable": "стабильный"}
+        mac_seg = yp.Segmented([("permanent", "󰌆", "Постоянный", True), ("random", "󰒝", "Случайный", True),
+                                ("stable", "󰒘", "Стабильный", True)], mac_key,
+                               lambda k: self.modify(uuid, f"MAC: {mac_name[k]}",
+                                                     "802-11-wireless.cloned-mac-address", k))
+        page.append(mac_seg)
+        P["mac"] = mac_seg
+        page.append(yp.hint("Случайный — новый при каждом подключении, стабильный — свой постоянный для этой сети."))
+        if mac and mac not in ("random", "stable", "permanent", "preserve"):
+            page.append(text_label(f"Сейчас задан вручную: {mac}", ["yw-note"]))
+
+        # действия
+        page.append(Gtk.Box(css_classes=["yw-sep"]))
+        acts = Gtk.Box(spacing=8, homogeneous=True)
+        if not current:
+            acts.append(yp.action_button("Подключиться", lambda *_: self.connect_profile(prof), "primary"))
+        forget_rev = yp.revealer(yp.confirm_box(
+            f"Забыть «{prof['ssid']}»? Сохранённый пароль и настройки удалятся."
+            + (" Текущее подключение (SSH, Tailscale) оборвётся." if current else ""),
+            lambda: (forget_rev.set_reveal_child(False), self.forget_profile(prof)), "Забыть",
+            on_no=lambda: forget_rev.set_reveal_child(False)))
+        forget_rev.connect("notify::child-revealed", lambda *_: fit_height(self.panel))
+        acts.append(yp.action_button("Забыть сеть", lambda *_: forget_rev.set_reveal_child(
+            not forget_rev.get_reveal_child()), "danger"))
+        page.append(acts)
+        page.append(forget_rev)
+        P["forget_rev"] = forget_rev
+
+    def modify(self, uuid, done_text, *settings):
+        """nmcli connection modify через yp.do (в YP_DRYRUN — только печать)."""
+        self.panel.busy += 1
+
+        def work():
+            ok, out = yp.do("nmcli", "connection", "modify", "uuid", uuid, *settings)
+            GLib.idle_add(done, ok, out)
+
+        def done(ok, out):
+            self.panel.busy -= 1
+            if ok:
+                self.panel.toast(done_text + (" (проверка)" if yp.DRY else ""), hold=3)
+            else:
+                self.panel.toast(human_error(out), error=True, hold=5)
+            return False
+        threading.Thread(target=work, daemon=True).start()
+
+    def connect_profile(self, prof):
+        self.panel.pop()
+        self.panel.pop()
+        self.connect_saved({"ssid": prof["ssid"], "saved": (prof["name"], prof["uuid"])})
+
+    def forget_profile(self, prof):
+        self.panel.busy += 1
+        self.panel.toast("Забываю сеть…", hold=30)
+
+        def work():
+            ok, out = yp.do("nmcli", "connection", "delete", "uuid", prof["uuid"])
+            GLib.idle_add(done, ok, out)
+
+        def done(ok, out):
+            self.panel.busy -= 1
+            if ok:
+                PROFILE_SSID.pop(prof["uuid"], None)
+                self.panel.pop()
+                self.panel.toast(f"Сеть «{prof['ssid']}» забыта" + (" (проверка)" if yp.DRY else ""), hold=3)
+                self.reload_saved()
+            else:
+                self.panel.toast(human_error(out), error=True, hold=5)
+            self.request_refresh()
+            return False
+        threading.Thread(target=work, daemon=True).start()
+
+    def run_prof_test(self):
+        """Проверочные нажатия на странице профиля (только YP_DRYRUN)."""
+        what, P = os.environ.get("YP_TEST", ""), self.prof
+        if not (DRYRUN and what.startswith("prof:") and P):
+            return False
+        w = what[5:]
+        if w == "auto-off":
+            P["auto_sw"].set_active(False)
+        elif w == "metered":
+            P["met_sw"].set_active(not P["met_sw"].get_active())
+        elif w == "prio-high":
+            P["prio"].btns["high"].emit("clicked")
+        elif w == "mac-random":
+            P["mac"].btns["random"].emit("clicked")
+        elif w == "ip-auto":
+            P["ip_seg"].btns["auto"].emit("clicked")
+        elif w in ("ip-manual", "bad-ip"):
+            P["ip_seg"].btns["manual"].emit("clicked")
+            if w == "ip-manual":
+                P["e_addr"].set_text("192.168.1.50")
+                P["e_gw"].set_text("192.168.1.1")
+                P["e_dns"].set_text("1.1.1.1, 8.8.8.8")
+            else:
+                P["e_addr"].set_text("192.168.1.300/24")
+            GLib.timeout_add(500, lambda: P["save_ip"]() or False)
+        elif w == "forget":
+            P["forget_rev"].set_reveal_child(True)
+            if os.environ.get("YP_TEST_CONFIRM") == "1":
+                GLib.timeout_add(900, lambda: self.forget_profile(P["prof"]) or False)
+        elif w == "connect":
+            self.connect_profile(P["prof"])
+
+        def scroll_to():                    # для снимка: прокрутить к затронутому месту
+            adj = P["scroll"].get_vadjustment()
+            if w.startswith("ip") or w == "bad-ip":
+                ok, pt = P["ip_seg"].compute_point(P["page"], Graphene.Point())
+                adj.set_value(pt.y - 40 if ok else 0)
+            elif w in ("forget", "mac-random"):
+                adj.set_value(adj.get_upper())
+            return False
+        GLib.timeout_add(1200, scroll_to)
+        return False
+
+    # ---------- прочее ----------
+    def open_settings(self, *_):
+        yp.spawn("nm-connection-editor")
+        self.panel.app.quit()
+
+    def run_test(self):
+        """Проверочные нажатия (только вместе с YP_DRYRUN=1)."""
+        what, confirm = os.environ.get("YP_TEST", ""), os.environ.get("YP_TEST_CONFIRM") == "1"
+        if not DRYRUN or not what:
+            return False
+        if what.startswith("connect:"):
+            ap = next((a for a in self.data["nets"] if a["ssid"] == what[8:]), None)
+            if ap:
+                self.on_net(ap)
+        elif what.startswith("ask:") and self.status_test:
+            ask, cok = self.status_test
+            ask(what[4:])
+            if confirm:
+                GLib.timeout_add(900, lambda: cok.emit("clicked") or False)
+        elif what == "radio-off":
+            self.switch.set_active(False)              # как будто пользователь щёлкнул переключатель
+            if confirm:
+                GLib.timeout_add(900, lambda: self.radio(False) or False)
+        return False
+
+    def open_from_env(self):
+        GLib.timeout_add(900, self.run_test)
+        what = os.environ.get("YP_OPEN", "")
+        if what == "saved" or what.startswith("profile:"):
+            self.open_saved()
+        if what.startswith("profile:"):
+            key = what.split(":", 1)[1]
+            prof = next((p for p in list_profiles() if key in (p["uuid"], p["name"])), None)
+            if prof:
+                GLib.timeout_add(400, lambda: self.open_profile(prof) or False)
+        if what == "status":
+            self.open_status()
+        elif what.startswith("password:"):
+            ssid = what.split(":", 1)[1]
+            ap = next((a for a in self.data["nets"] if a["ssid"] == ssid), None)
+            entry, submit = self.open_password(ssid, ap)
+            pw = os.environ.get("YP_TEST_SUBMIT") if DRYRUN else None
+            if pw:                                    # проверка: ввести пароль и нажать «Подключиться»
+                GLib.timeout_add(700, lambda: (entry.set_text(pw), submit(), False)[2])
+
+
+PROFILES_CACHE = []
+
+
+def list_profiles(cached=False):
+    """Все сохранённые Wi-Fi профили: [{name, uuid, ts, ssid, auto}] (в потоке)."""
+    global PROFILES_CACHE
+    if cached:
+        return PROFILES_CACHE
+    out = []
+    for line in nm("-t", "-f", "NAME,UUID,TYPE,TIMESTAMP,AUTOCONNECT", "connection", "show").splitlines():
+        f = split_terse(line)
+        if len(f) < 5 or f[2] != "802-11-wireless":
+            continue
+        if f[1] not in PROFILE_SSID:
+            PROFILE_SSID[f[1]] = nm("-g", "802-11-wireless.ssid", "connection", "show", "uuid", f[1]).strip()
+        out.append({"name": f[0], "uuid": f[1], "ts": int(f[3] or 0), "ssid": PROFILE_SSID[f[1]] or f[0],
+                    "auto": f[4] == "yes"})
+    if DRYRUN:
+        for i in range(int(os.environ.get("YP_FAKE_PROFILES", "0") or 0)):
+            out.append({"name": f"Тест-сеть {i + 1}", "uuid": f"fake-{i}", "ts": int(time.time()) - 3600 * 7 * (i + 1),
+                        "ssid": f"Тест-сеть {i + 1}", "auto": i % 3 != 0})
+    PROFILES_CACHE = out
+    return out
+
+
+PROFILE_FIELDS = ("connection.autoconnect", "connection.autoconnect-priority", "connection.metered",
+                  "ipv4.method", "ipv4.addresses", "ipv4.gateway", "ipv4.dns",
+                  "802-11-wireless.cloned-mac-address", "802-11-wireless-security.key-mgmt")
+
+
+def profile_settings(uuid):
+    conf = {}
+    if uuid.startswith("fake-"):
+        return {"connection.autoconnect": "yes", "ipv4.method": "auto",
+                "802-11-wireless-security.key-mgmt": "wpa-psk"}
+    for line in nm("-t", "-f", ",".join(PROFILE_FIELDS), "connection", "show", "uuid", uuid).splitlines():
+        k, _, v = line.partition(":")
+        conf[k] = v.replace("\\:", ":").strip()
+    return conf
+
+
+def plural(n, one, few, many):
+    n = abs(n)
+    if n % 10 == 1 and n % 100 != 11:
+        return one
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return few
+    return many
+
+
+def ago(ts):
+    if not ts:
+        return "ещё не подключались"
+    s = max(time.time() - ts, 0)
+    if s < 90:
+        t = "только что"
+    elif s < 3600:
+        t = f"{int(s // 60)} мин назад"
+    elif s < 86400:
+        t = f"{int(s // 3600)} ч назад"
+    elif s < 30 * 86400:
+        d = int(s // 86400)
+        t = f"{d} {plural(d, 'день', 'дня', 'дней')} назад"
+    elif s < 365 * 86400:
+        t = f"{int(s // (30 * 86400))} мес. назад"
+    else:
+        y = int(s // (365 * 86400))
+        t = f"{y} {plural(y, 'год', 'года', 'лет')} назад"
+    return "подключались " + t
+
+
+def validate_ip(addr, gw, dns):
+    """Проверка полей «IP вручную». → {addr, gw, dns} или {error, bad}."""
+    addr = addr.strip()
+    if not addr:
+        return {"error": "Укажите адрес", "bad": "addr"}
+    if "/" not in addr:
+        addr += "/24"
+    try:
+        iface = ipaddress.IPv4Interface(addr)
+    except ValueError:
+        return {"error": "Адрес — вида 192.168.1.50/24", "bad": "addr"}
+    net = iface.network
+    if net.prefixlen < 31 and iface.ip in (net.network_address, net.broadcast_address):
+        return {"error": "Это адрес сети или широковещательный — выберите другой", "bad": "addr"}
+    gw = gw.strip()
+    if gw:
+        try:
+            g = ipaddress.IPv4Address(gw)
+        except ValueError:
+            return {"error": "Шлюз — вида 192.168.1.1", "bad": "gw"}
+        if g not in net:
+            return {"error": f"Шлюз не из сети {net}", "bad": "gw"}
+        if g == iface.ip:
+            return {"error": "Шлюз совпадает с адресом", "bad": "gw"}
+    servers = [x for x in re.split(r"[,\s]+", dns.strip()) if x]
+    for x in servers:
+        try:
+            ipaddress.IPv4Address(x)
+        except ValueError:
+            return {"error": f"DNS «{x}» — не IPv4-адрес", "bad": "dns"}
+    return {"addr": str(iface), "gw": gw, "dns": ",".join(servers)}
+
+
+def ip_entry(placeholder, text=""):
+    e = Gtk.Entry(placeholder_text=placeholder, text=text or "", hexpand=True, css_classes=["yp-entry"])
+    e.connect("changed", lambda w: w.remove_css_class("yw-entry-bad"))
+    return e
+
+
+def scrolled(child, max_h, panel):
+    sw = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, propagate_natural_height=True,
+                            max_content_height=round(max_h * panel.k), css_classes=["yw-list"])
+    sw.set_child(child)
+    return sw
+
+
+def fit_height(panel):
+    """Окно GTK само не сжимается, когда содержимое стало ниже (подстраница короче главной,
+    список сетей уменьшился) — подогнать высоту под естественную высоту содержимого."""
+    return                                # окно меню теперь постоянного размера (каркас yumipanel)
+    def do():
+        frame = panel.get_child()
+        w = panel.get_width() or frame.get_width()
+        _m, nat, _b1, _b2 = frame.measure(Gtk.Orientation.VERTICAL, w)
+        if nat > 0 and abs(panel.get_height() - nat) > 1:
+            panel.set_default_size(w, nat)
+        return False
+    GLib.timeout_add(260, do)            # после анимации стека
+
+
+def _debug(panel):
+    def tick():
+        st = panel.stack
+        print("DBG win", panel.get_width(), panel.get_height(), "stack", st.get_height(),
+              "child", st.get_visible_child().get_height(),
+              "nat", st.get_visible_child().measure(Gtk.Orientation.VERTICAL, panel.get_width())[1],
+              file=sys.stderr, flush=True)
+        return True
+    GLib.timeout_add(1000, tick)
+
+
+if __name__ == "__main__":
+    app = yp.PanelApp("org.yumi.panel.wifi", "Wi-Fi", ICON_WIFI, lambda panel, body: (Wifi(panel, body), os.environ.get("YP_DEBUG") and _debug(panel)))
+    sys.exit(app.run(sys.argv))

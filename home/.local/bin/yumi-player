@@ -1,0 +1,682 @@
+#!/usr/bin/env python3
+"""yumi-player — всплывающий музыкальный плеер (GTK4 + layer-shell, MPRIS).
+
+  yumi-player toggle [--bar|--center]   открыть / закрыть (повторный вызов закрывает)
+  yumi-player --close                   закрыть, если открыт
+  yumi-player --render-colors           нарисовать colors.css из текущей палитры wallbash
+
+--bar     под пилюлей Waybar (по центру сверху, монитор под курсором), закрывается, если увести мышь
+--center  по центру экрана в фокусе (бинд SUPER+M)
+Цвета: ~/.config/yumi-player/colors.css (шаблон wallbash always/yumi-player.dcol), меняются на лету.
+Стиль: ~/.config/yumi-player/style.css. Откат: yumi-player-uninstall
+"""
+import os
+import sys
+
+LAYER_LIB = "/usr/lib/libgtk4-layer-shell.so"
+HOME = os.path.expanduser("~")
+CONF = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.join(HOME, ".config")), "yumi-player")
+COLORS = os.path.join(CONF, "colors.css")
+ACCENT = os.path.join(CONF, "accent.css")      # живой акцент из обоев (yumi-accent), поверх wallbash
+STYLE = os.path.join(CONF, "style.css")
+TEMPLATE = os.path.join(HOME, ".config/hyde/wallbash/always/yumi-player.dcol")
+DCOL = os.path.join(HOME, ".cache/hyde/wall.dcol")
+STATERC = os.path.join(HOME, ".local/state/hyde/staterc")
+
+
+def render_colors():
+    """То же, что делает wallbash для шаблона, — для первой установки без перезапуска всей темы."""
+    import re
+    vals, mode, wall_dcol = {}, "dark", 0
+    with open(DCOL) as f:
+        for line in f:
+            m = re.match(r'^(dcol_\w+)="(.*)"\s*$', line)
+            if m:
+                vals[m.group(1)] = m.group(2)
+    mode = vals.get("dcol_mode", "dark")
+    try:
+        with open(STATERC) as f:
+            m = re.search(r'^enableWallDcol="?(\d)', f.read(), re.M)
+            wall_dcol = int(m.group(1)) if m else 0
+    except OSError:
+        pass
+    invert = (wall_dcol == 2 and mode == "light") or (wall_dcol == 3 and mode == "dark")
+
+    def name(n):
+        if not invert:
+            return n
+        n = re.sub(r"^(pry|txt)(\d)", lambda m: f"{m.group(1)}{5 - int(m.group(2))}", n)
+        return re.sub(r"^(\d)xa", lambda m: f"{5 - int(m.group(1))}xa", n)
+
+    def rgba(m):
+        return vals.get(f"dcol_{name(m.group(1))}_rgba", "").replace("\\1", m.group(2))
+
+    with open(TEMPLATE) as f:
+        body = f.read().split("\n", 1)[1]
+    body = re.sub(r"<wallbash_(\w+?)_rgba\(([^)]*)\)>", rgba, body)
+    body = re.sub(r"<wallbash_(\w+)>", lambda m: vals.get(f"dcol_{name(m.group(1))}", ""), body)
+    os.makedirs(CONF, exist_ok=True)
+    tmp = COLORS + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(body)
+    os.replace(tmp, COLORS)
+
+
+if __name__ == "__main__" and "--render-colors" in sys.argv:
+    render_colors()
+    sys.exit(0)
+
+# layer-shell для GTK4 должен загрузиться раньше libwayland-client, playerctl — с UTF-8
+if LAYER_LIB not in os.environ.get("LD_PRELOAD", "") and os.path.exists(LAYER_LIB):
+    env = dict(os.environ, LD_PRELOAD=(LAYER_LIB + " " + os.environ.get("LD_PRELOAD", "")).strip(),
+               LANG="C.UTF-8", LC_ALL="C.UTF-8")
+    os.execve(sys.executable, [sys.executable, os.path.abspath(__file__)] + sys.argv[1:], env)
+
+import json
+import re
+import subprocess
+import time
+import urllib.request
+import threading
+
+import gi
+gi.require_version("Gtk", "4.0")
+gi.require_version("Gdk", "4.0")
+gi.require_version("Gtk4LayerShell", "1.0")
+gi.require_version("Playerctl", "2.0")
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import Gtk, Gdk, Gio, GLib, GdkPixbuf, Pango, Playerctl  # noqa: E402
+from gi.repository import Gtk4LayerShell as Layer  # noqa: E402
+
+FALLBACK_COLORS = """
+@define-color yp-bg      rgba(20,12,38,0.85);
+@define-color yp-border  rgba(120,101,163,1);
+@define-color yp-fg      rgba(255,255,255,1);
+@define-color yp-fg2     rgba(220,204,255,1);
+@define-color yp-accent  rgba(177,154,230,1);
+@define-color yp-btn     rgba(73,58,107,0.55);
+@define-color yp-hover   rgba(104,87,143,0.8);
+@define-color yp-on-acc  rgba(20,12,38,1);
+"""
+
+# Масштаб окна по монитору (как у экрана блокировки и rofi): на внешнем MSI всё ×0.8
+MONITOR_SCALE = {"DP-1": 0.8}
+
+PLAYER_ICONS = {"firefox": "󰈹 Firefox", "spotify": "󰓇 Spotify", "mpv": "󰐹 mpv",
+                "chromium": " Chromium", "vlc": "󰕼 VLC"}
+PLAYING, PAUSED = Playerctl.PlaybackStatus.PLAYING, Playerctl.PlaybackStatus.PAUSED
+
+
+def fmt_time(us):
+    s = max(0, int(us // 1_000_000))
+    h, m, s = s // 3600, s % 3600 // 60, s % 60
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def run(*cmd):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=2).stdout
+    except Exception:
+        return ""
+
+
+def square_texture(pixbuf, size):
+    w, h = pixbuf.get_width(), pixbuf.get_height()
+    side = min(w, h)
+    sub = pixbuf.new_subpixbuf((w - side) // 2, (h - side) // 2, side, side)
+    pb = sub.scale_simple(size, size, GdkPixbuf.InterpType.BILINEAR)
+    fmt = Gdk.MemoryFormat.R8G8B8A8 if pb.get_has_alpha() else Gdk.MemoryFormat.R8G8B8
+    return Gdk.MemoryTexture.new(pb.get_width(), pb.get_height(), fmt, pb.read_pixel_bytes(), pb.get_rowstride())
+
+
+class PlayerWindow(Gtk.ApplicationWindow):
+    def __init__(self, app, mode):
+        super().__init__(application=app, title="Плеер")
+        self.app, self.mode = app, mode
+        self.player = None
+        self.pinned = None
+        self.last_active = {}
+        self.art_cache = {}
+        self.art_key = None
+        self.seek_block_until = 0
+        self.vol_block_until = 0
+        self.sink = None
+        self.entered = False
+        self.close_timer = 0
+        self.update_timer = 0
+        self.k = 1.0
+
+        self.add_css_class("yp-window")
+        self.setup_layer()
+        self.build()
+        self.setup_css()
+
+        self.manager = Playerctl.PlayerManager()
+        self.manager.connect("name-appeared", lambda _m, n: self.manage(n))
+        self.manager.connect("player-vanished", lambda *_: self.schedule_update())
+        for n in self.manager.props.player_names:
+            self.manage(n)
+
+        self.refresh(force=True)
+        self.refresh_volume()
+        GLib.timeout_add(500, self.tick)
+        GLib.timeout_add(2000, self.refresh_volume)
+        if mode == "bar":   # мышь так и не дошла до окна — закрыть
+            GLib.timeout_add(2500, lambda: (self.entered or self.app.quit()) and False)
+
+    # ---------- окно ----------
+    def setup_layer(self):
+        Layer.init_for_window(self)
+        Layer.set_namespace(self, "yumi-player")
+        Layer.set_layer(self, Layer.Layer.OVERLAY)
+        kbd = os.environ.get("YP_KEYBOARD", "exclusive")
+        Layer.set_keyboard_mode(self, Layer.KeyboardMode.NONE if kbd == "none" else Layer.KeyboardMode.EXCLUSIVE)
+        mon = self.pick_monitor()
+        if mon:
+            Layer.set_monitor(self, mon)
+            self.k = MONITOR_SCALE.get(mon.get_connector(), 1.0)
+        if self.mode == "bar":
+            Layer.set_anchor(self, Layer.Edge.TOP, True)
+            Layer.set_margin(self, Layer.Edge.TOP, 8)
+
+    def pick_monitor(self):
+        """--bar: монитор под курсором; --center: монитор в фокусе."""
+        try:
+            mons = json.loads(run("hyprctl", "-j", "monitors") or "[]")
+            name = next((m["name"] for m in mons if m.get("focused")), None)
+            if self.mode == "bar":
+                x, y = (int(float(v)) for v in run("hyprctl", "cursorpos").split(","))
+                for m in mons:
+                    if m["x"] <= x < m["x"] + m["width"] / m["scale"] and m["y"] <= y < m["y"] + m["height"] / m["scale"]:
+                        name = m["name"]
+            name = os.environ.get("YP_MONITOR", name)    # для проверки: принудительно этот монитор
+            mlist = Gdk.Display.get_default().get_monitors()
+            for i in range(mlist.get_n_items()):
+                if mlist.get_item(i).get_connector() == name:
+                    return mlist.get_item(i)
+        except Exception:
+            pass
+        return None
+
+    def build(self):
+        frame = Gtk.Overlay(css_classes=["yp-frame"])
+        frame.set_overflow(Gtk.Overflow.HIDDEN)
+        # размер окна задаёт только карточка: обложка-фон не измеряется и рисуется под ней
+        frame.set_child(Gtk.Box())
+        self.bgart = Gtk.Picture(css_classes=["yp-bgart"], content_fit=Gtk.ContentFit.COVER, can_shrink=True)
+        frame.add_overlay(self.bgart)
+        frame.set_measure_overlay(self.bgart, False)
+
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, css_classes=["yp-card"])
+        card.set_size_request(round(440 * self.k), -1)
+        frame.add_overlay(card)
+        frame.set_measure_overlay(card, True)
+
+        top = Gtk.Box(spacing=16)
+        card.append(top)
+        cover_box = Gtk.Box(css_classes=["yp-cover-box"], valign=Gtk.Align.START)
+        cover_box.set_overflow(Gtk.Overflow.HIDDEN)
+        self.cover_stack = Gtk.Stack()
+        self.cover = Gtk.Image(pixel_size=round(112 * self.k), css_classes=["yp-cover"])
+        self.cover_ph = Gtk.Label(label="󰝚", css_classes=["yp-cover-ph"])
+        self.cover_ph.set_size_request(round(112 * self.k), round(112 * self.k))
+        self.cover_stack.add_named(self.cover, "art")
+        self.cover_stack.add_named(self.cover_ph, "ph")
+        cover_box.append(self.cover_stack)
+        top.append(cover_box)
+
+        info = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True, valign=Gtk.Align.CENTER)
+        top.append(info)
+        self.head = Gtk.Label(xalign=0, css_classes=["yp-head"], ellipsize=Pango.EllipsizeMode.END)
+        self.title_l = Gtk.Label(xalign=0, css_classes=["yp-title"], ellipsize=Pango.EllipsizeMode.END,
+                                 max_width_chars=26, width_chars=26)
+        self.artist_l = Gtk.Label(xalign=0, css_classes=["yp-artist"], ellipsize=Pango.EllipsizeMode.END,
+                                  max_width_chars=30)
+        for w in (self.head, self.title_l, self.artist_l):
+            info.append(w)
+
+        self.progress = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL, draw_value=False,
+                                  css_classes=["yp-progress"], hexpand=True, focusable=False)
+        self.progress.set_range(0, 1)
+        self.progress.connect("change-value", self.on_seek)
+        # перемотка мышью: пока кнопка зажата — двигаем только ползунок, команду шлём один раз при отпускании
+        self.dragging = False
+        self.seek_pending = None
+        self.seek_timer = 0
+        drag = Gtk.GestureClick(propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        drag.connect("pressed", self.on_seek_press)
+        drag.connect("released", self.on_seek_release)
+        drag.connect("cancel", lambda *_: self.on_seek_release())
+        self.progress.add_controller(drag)
+        info.append(self.progress)
+        times = Gtk.Box()
+        self.pos_l = Gtk.Label(xalign=0, hexpand=True, css_classes=["yp-time"])
+        self.len_l = Gtk.Label(xalign=1, css_classes=["yp-time"])
+        times.append(self.pos_l)
+        times.append(self.len_l)
+        info.append(times)
+
+        ctl = Gtk.Box(spacing=10, halign=Gtk.Align.CENTER, css_classes=["yp-controls"])
+        card.append(ctl)
+        self.b_prev = self.button("󰒮", "Назад", lambda *_: self.cmd("previous"))
+        self.b_play = self.button("󰏤", "Пауза", lambda *_: self.cmd("play_pause"), ["yp-play"])
+        self.b_next = self.button("󰒭", "Вперёд", lambda *_: self.cmd("next"))
+        self.b_switch = self.button("󰓃", "Другой плеер", self.on_switch)
+        for b in (self.b_prev, self.b_play, self.b_next, self.b_switch):
+            ctl.append(b)
+
+        vol = Gtk.Box(spacing=8, css_classes=["yp-volume"])
+        card.append(vol)
+        self.b_mute = self.button("󰕾", "Без звука", self.on_mute, ["yp-mute"])
+        self.volume = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL, draw_value=False,
+                                css_classes=["yp-progress", "yp-vol"], hexpand=True, valign=Gtk.Align.CENTER,
+                                focusable=False)
+        self.volume.set_range(0, 100)
+        self.volume.set_increments(5, 10)
+        self.volume.connect("change-value", self.on_volume)
+        self.vol_l = Gtk.Label(css_classes=["yp-time", "yp-vol-l"], width_chars=4, xalign=1)
+        for w in (self.b_mute, self.volume, self.vol_l):
+            vol.append(w)
+
+        self.set_child(frame)
+
+        # окно ловит клавиши первым (CAPTURE): иначе стрелки уходят ползунку под фокусом и он «перематывает»
+        keys = Gtk.EventControllerKey(propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        keys.connect("key-pressed", self.on_key)
+        self.add_controller(keys)
+        motion = Gtk.EventControllerMotion()
+        motion.connect("enter", self.on_enter)
+        motion.connect("leave", self.on_leave)
+        self.add_controller(motion)
+
+    def button(self, icon, tip, cb, extra=()):
+        b = Gtk.Button(label=icon, tooltip_text=tip, css_classes=["yp-btn", *extra], focusable=False)
+        b.connect("clicked", cb)
+        return b
+
+    # ---------- цвета и стиль: перекраска на лету ----------
+    def setup_css(self):
+        self.css = Gtk.CssProvider()
+        Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), self.css,
+                                                  Gtk.STYLE_PROVIDER_PRIORITY_USER + 1)
+        self.load_css()
+        os.makedirs(CONF, exist_ok=True)
+        self.mon = Gio.File.new_for_path(CONF).monitor_directory(Gio.FileMonitorFlags.WATCH_MOVES, None)
+        self.mon.connect("changed", self.on_conf_changed)
+        self.css_timer = 0
+
+    def load_css(self):
+        parts = []
+        for path, fallback in ((COLORS, FALLBACK_COLORS), (ACCENT, ""), (STYLE, "")):
+            try:
+                with open(path) as f:
+                    parts.append(f.read())
+            except OSError:
+                parts.append(fallback)
+        css = "\n".join(parts)
+        if self.k != 1.0:   # все размеры из style.css (px/pt) — под масштаб монитора
+            css = re.sub(r"(\d+(?:\.\d+)?)(px|pt)\b",
+                         lambda m: f"{float(m.group(1)) * self.k:.2f}{m.group(2)}", css)
+        self.css.load_from_string(css)
+
+    def on_conf_changed(self, _mon, f, other, _ev):
+        names = {x.get_basename() for x in (f, other) if x}
+        if names & {"colors.css", "accent.css", "style.css"}:
+            if self.css_timer:
+                GLib.source_remove(self.css_timer)
+            self.css_timer = GLib.timeout_add(200, self._reload_css)
+
+    def _reload_css(self):
+        self.css_timer = 0
+        self.load_css()
+        return False
+
+    # ---------- плееры ----------
+    def manage(self, name):
+        try:
+            p = Playerctl.Player.new_from_name(name)
+        except GLib.Error:
+            return
+        p.connect("playback-status", self.on_status)
+        p.connect("metadata", lambda *_: self.schedule_update())
+        p.connect("seeked", lambda *_: self.tick())
+        p.connect("exit", lambda *_: self.schedule_update())
+        self.manager.manage_player(p)
+        self.last_active[p.props.player_instance] = time.monotonic()
+        self.schedule_update()
+
+    def players(self):
+        return list(self.manager.props.players)
+
+    def choose(self):
+        ps = self.players()
+        if not ps:
+            return None
+        for p in ps:
+            if p.props.player_instance == self.pinned:
+                return p
+        playing = [p for p in ps if p.props.playback_status == PLAYING]
+        if self.player in playing:
+            return self.player
+        if playing:
+            return playing[0]
+        if self.player in ps:
+            return self.player
+        return max(ps, key=lambda p: self.last_active.get(p.props.player_instance, 0))
+
+    def on_status(self, p, _st):
+        self.last_active[p.props.player_instance] = time.monotonic()
+        # при смене трека браузер на мгновение шлёт «Paused» — склеиваем серию событий
+        self.schedule_update(300)
+
+    def schedule_update(self, delay=120):
+        if self.update_timer:
+            GLib.source_remove(self.update_timer)
+        self.update_timer = GLib.timeout_add(delay, self._do_update)
+
+    def _do_update(self):
+        self.update_timer = 0
+        self.refresh()
+        return False
+
+    def meta(self, p):
+        try:
+            return p.props.metadata.unpack() or {}
+        except Exception:
+            return {}
+
+    def refresh(self, force=False):
+        p = self.choose()
+        changed = p is not self.player
+        self.player = p
+        self.b_switch.set_visible(len(self.players()) > 1)
+        if not p:
+            self.head.set_label("󰝛 Тишина")
+            self.title_l.set_label("ничего не играет")
+            self.artist_l.set_label("")
+            self.set_art(None)
+            self.progress.set_value(0)
+            self.pos_l.set_label("-:--")
+            self.len_l.set_label("-:--")
+            self.b_play.set_label("󰐊")
+            return
+        md = self.meta(p)
+        title = md.get("xesam:title") or "Без названия"
+        artist = md.get("xesam:artist") or ""
+        if isinstance(artist, list):
+            artist = ", ".join(a for a in artist if a)
+        playing = p.props.playback_status == PLAYING
+        src = p.props.player_name.lower()
+        src = PLAYER_ICONS.get(src, f"󰝚 {p.props.player_name}")
+        self.head.set_label(f"{'󰐊 Сейчас играет' if playing else '󰏤 На паузе'}  ·  {src}")
+        self.title_l.set_label(title)
+        self.title_l.set_tooltip_text(title)
+        self.artist_l.set_label(artist)
+        self.artist_l.set_visible(bool(artist))
+        self.b_play.set_label("󰏤" if playing else "󰐊")
+        self.b_play.set_tooltip_text("Пауза" if playing else "Играть")
+        self.b_prev.set_sensitive(p.props.can_go_previous)
+        self.b_next.set_sensitive(p.props.can_go_next)
+        self.length = int(md.get("mpris:length") or 0)
+        self.len_l.set_label(fmt_time(self.length) if self.length else "-:--")
+        self.progress.set_sensitive(bool(self.length) and p.props.can_seek)
+        self.set_art(md.get("mpris:artUrl") or None)
+        self.tick()
+        if os.environ.get("YP_DEBUG"):
+            print(f"{time.strftime('%T')} refresh: {p.props.player_instance} | {'Playing' if playing else 'Paused'} | {title} | art={bool(md.get('mpris:artUrl'))}", file=sys.stderr, flush=True)
+        if changed or force:
+            self.sink = None
+            self.refresh_volume()
+
+    def tick(self):
+        p = self.player
+        if p and time.monotonic() > self.seek_block_until:
+            try:
+                pos = p.get_position()
+            except GLib.Error:
+                pos = 0
+            length = getattr(self, "length", 0)
+            self.progress.set_value(min(pos / length, 1) if length else 0)
+            self.pos_l.set_label(fmt_time(pos) if length else "-:--")
+        return True
+
+    # ---------- обложка ----------
+    def set_art(self, url):
+        if url == self.art_key and url is not None:
+            return
+        self.art_key = url
+        if not url:
+            self.show_art(None)
+            return
+        if url in self.art_cache:
+            self.show_art(self.art_cache[url])
+            return
+        if url.startswith("file://"):
+            path = GLib.filename_from_uri(url)[0]
+            self.load_art(url, path)        # файл Firefox удаляет при смене трека — читаем сразу
+        elif url.startswith("http"):
+            threading.Thread(target=self.download_art, args=(url,), daemon=True).start()
+        else:
+            self.show_art(None)
+
+    def download_art(self, url):
+        path = None
+        try:
+            data = urllib.request.urlopen(url, timeout=6).read()
+            path = os.path.join(GLib.get_user_runtime_dir(), "yumi-player-art")
+            with open(path, "wb") as f:
+                f.write(data)
+        except Exception:
+            pass
+        GLib.idle_add(self.load_art, url, path)
+
+    def load_art(self, url, path):
+        tex = None
+        try:
+            pb = GdkPixbuf.Pixbuf.new_from_file(path)
+            tex = (square_texture(pb, 256), square_texture(pb, 24))
+        except Exception:
+            pass
+        if len(self.art_cache) > 20:
+            self.art_cache.clear()
+        self.art_cache[url] = tex
+        if url == self.art_key:
+            self.show_art(tex)
+        return False
+
+    def show_art(self, tex):
+        if tex:
+            self.cover.set_from_paintable(tex[0])
+            self.bgart.set_paintable(tex[1])
+            self.cover_stack.set_visible_child_name("art")
+        else:
+            self.bgart.set_paintable(None)
+            self.cover_stack.set_visible_child_name("ph")
+
+    # ---------- управление ----------
+    def cmd(self, what):
+        if self.player:
+            try:
+                getattr(self.player, what)()
+            except GLib.Error:
+                pass
+            self.schedule_update(300)
+
+    def on_switch(self, *_):
+        ps = self.players()
+        if len(ps) < 2:
+            return
+        i = ps.index(self.player) if self.player in ps else -1
+        self.pinned = ps[(i + 1) % len(ps)].props.player_instance
+        self.refresh(force=True)
+
+    def on_seek(self, _scale, _scroll, value):
+        length = getattr(self, "length", 0)
+        if self.player and length:
+            v = min(max(value, 0), 1)
+            self.seek_pending = int(v * length)
+            self.seek_block_until = time.monotonic() + 1.5   # tick не двигает ползунок обратно
+            self.pos_l.set_label(fmt_time(self.seek_pending))
+            if not self.dragging:                          # клик, колесо, клавиши — короткая пауза и одна команда
+                if self.seek_timer:
+                    GLib.source_remove(self.seek_timer)
+                self.seek_timer = GLib.timeout_add(150, self._seek_timeout)
+        return False
+
+    def on_seek_press(self, *_):
+        self.dragging = True
+
+    def on_seek_release(self, *_):
+        self.dragging = False
+        self.commit_seek()
+
+    def _seek_timeout(self):
+        self.seek_timer = 0          # источник завершается сам (return False) — не удаляем его вручную
+        return self.commit_seek()
+
+    def commit_seek(self):
+        if self.seek_timer:
+            GLib.source_remove(self.seek_timer)
+        self.seek_timer = 0
+        if self.player and self.seek_pending is not None:
+            try:
+                self.player.set_position(self.seek_pending)
+            except GLib.Error:
+                pass
+            self.seek_block_until = time.monotonic() + 0.8
+        self.seek_pending = None
+        return False
+
+    def seek_rel(self, sec):
+        if self.player:
+            try:
+                self.player.seek(int(sec * 1_000_000))
+            except GLib.Error:
+                pass
+
+    # ---------- громкость: поток плеера в PipeWire (MPRIS-громкость Firefox не меняет) ----------
+    def player_pid(self):
+        if not self.player:
+            return None
+        try:
+            bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+            r = bus.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+                              "GetConnectionUnixProcessID",
+                              GLib.Variant("(s)", ("org.mpris.MediaPlayer2." + self.player.props.player_instance,)),
+                              GLib.VariantType("(u)"), Gio.DBusCallFlags.NONE, 500, None)
+            return str(r.unpack()[0])
+        except Exception:
+            return None
+
+    def find_sink(self):
+        pid = self.player_pid()
+        name = self.player.props.player_name.lower() if self.player else ""
+        try:
+            items = json.loads(run("pactl", "-f", "json", "list", "sink-inputs") or "[]")
+        except ValueError:
+            items = []
+        for it in items:
+            pr = it.get("properties", {})
+            if pid and pr.get("application.process.id") == pid:
+                return it
+        for it in items:
+            pr = it.get("properties", {})
+            if name and name in (pr.get("application.process.binary", "") + pr.get("application.name", "")).lower():
+                return it
+        return None
+
+    def refresh_volume(self):
+        if time.monotonic() < self.vol_block_until:
+            return True
+        it = self.find_sink()
+        if it:
+            self.sink = it["index"]
+            vols = [int(v["value_percent"].rstrip("%")) for v in it.get("volume", {}).values()] or [100]
+            vol, muted = max(vols), it.get("mute", False)
+            self.b_mute.set_tooltip_text("Без звука (только этот плеер)")
+        else:
+            self.sink = None
+            out = run("wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@")   # «Volume: 0.55 [MUTED]»
+            try:
+                vol = round(float(out.split()[1]) * 100)
+            except (IndexError, ValueError):
+                vol = 0
+            muted = "MUTED" in out
+            self.b_mute.set_tooltip_text("Без звука (вся система)")
+        self.volume.set_value(vol)
+        self.vol_l.set_label(f"{vol}%")
+        self.b_mute.set_label("󰖁" if muted else "󰕾")
+        self.volume.set_opacity(0.5 if muted else 1)
+        return True
+
+    def on_volume(self, _scale, _scroll, value):
+        v = int(min(max(value, 0), 100))
+        self.vol_block_until = time.monotonic() + 1
+        self.vol_l.set_label(f"{v}%")
+        if self.sink is not None:
+            subprocess.Popen(["pactl", "set-sink-input-volume", str(self.sink), f"{v}%"])
+        else:
+            subprocess.Popen(["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", f"{v}%"])
+        return False
+
+    def on_mute(self, *_):
+        if self.sink is not None:
+            subprocess.run(["pactl", "set-sink-input-mute", str(self.sink), "toggle"])
+        else:
+            subprocess.run(["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"])
+        self.vol_block_until = 0
+        self.refresh_volume()
+
+    # ---------- клавиши и мышь ----------
+    def on_key(self, _c, keyval, _code, _state):
+        k = Gdk.keyval_name(keyval) or ""
+        ch = chr(Gdk.keyval_to_unicode(keyval) or 0).lower()
+        if k == "Escape":
+            self.app.quit()
+        elif k == "space":
+            self.cmd("play_pause")
+        elif k == "Left":           # ←/→ — предыдущий/следующий трек (перемотка — мышью по полосе)
+            self.cmd("previous")
+        elif k == "Right":
+            self.cmd("next")
+        elif k in ("Up", "Down"):
+            v = self.volume.get_value() + (5 if k == "Up" else -5)
+            self.on_volume(None, None, v)
+            self.volume.set_value(min(max(v, 0), 100))
+        elif ch in ("n", "т"):
+            self.cmd("next")
+        elif ch in ("p", "з"):
+            self.cmd("previous")
+        else:
+            return False
+        return True
+
+    def on_enter(self, *_):
+        self.entered = True
+        if self.close_timer:
+            GLib.source_remove(self.close_timer)
+            self.close_timer = 0
+
+    def on_leave(self, *_):
+        if self.mode == "bar" and not self.close_timer:
+            self.close_timer = GLib.timeout_add(700, lambda: self.app.quit() or False)
+
+
+class App(Gtk.Application):
+    def __init__(self):
+        super().__init__(application_id="org.yumi.player", flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE)
+        self.win = None
+
+    def do_command_line(self, cmdline):
+        args = cmdline.get_arguments()[1:]
+        if self.win is not None or "--close" in args:
+            self.quit()        # повторный вызов (клик, бинд) закрывает открытый плеер
+            return 0
+        mode = "center" if "--center" in args else "bar"
+        self.win = PlayerWindow(self, mode)
+        self.win.present()
+        return 0
+
+
+if __name__ == "__main__":
+    sys.exit(App().run(sys.argv))

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Общий стиль панелей: тема лаунчера HyDE, значки Nerd Font в тексте.
+# Общий стиль панелей: тема yumi (обёртка ~/.local/bin/rofi подменяет style_10), значки Nerd Font в тексте.
+# Заголовок окна = текст -p; шрифт, рамка и скругления задаёт обёртка под монитор.
 # Использование: ... | rofi-panel "Заголовок" [макс_строк] [--center|--at-cursor|--top-right] [доп. аргументы rofi]
 # Без флага (клик в Waybar): под иконкой, закрывается, если увести мышь.
 # --center / --at-cursor (бинды): мышь игнорируется.
@@ -57,11 +58,9 @@ esac
 
 rofi -dmenu -i -p "$prompt" \
     -theme style_10 \
-    -theme-str '* {font: "JetBrainsMono Nerd Font 12";}' \
-    -theme-str 'window {border: 2px; border-radius: 30px; width: 18em; height: 0;}' \
-    -theme-str 'element {children: [element-text]; border-radius: 20px; padding: 10px 16px; margin: 0;}' \
-    -theme-str 'element-text {expand: true; horizontal-align: 0; vertical-align: 0.5; margin: 0; padding: 0;}' \
-    -theme-str "listview {lines: ${lines}; fixed-height: false; scrollbar: false; spacing: 6px; padding: 10px 12px 12px 12px;}" \
+    -theme-str 'window {width: 18em; height: 0;}' \
+    -theme-str 'element {children: [element-text];}' \
+    -theme-str "listview {lines: ${lines}; fixed-height: true; scrollbar: false;}" \
     -theme-str "$pos" \
     "$@" <&0 &
 rpid=$!

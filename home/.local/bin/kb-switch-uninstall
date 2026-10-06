@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Откат kb-switch: вернуть SUPER+K от HyDE (убрать только свой блок из hyprland.lua и копии в rice-local)
+for f in ~/.config/hypr/hyprland.lua ~/.config/rice-local/home/.config/hypr/hyprland.lua; do
+    [ -f "$f" ] || continue
+    python3 - "$f" <<'PY'
+import sys, re
+p = sys.argv[1]; s = open(p).read()
+s2 = re.sub(r'\n\n-- === Раскладка: SUPER\+K переключает СРАЗУ все клавиатуры.*?locked = true \}\)\n', '\n', s, flags=re.S)
+open(p, 'w').write(s2); print(p, 'восстановлен' if s2 != s else 'без изменений')
+PY
+done
+# пилюля языка в Waybar — снова как у HyDE
+for f in ~/.config/waybar/layouts/yumi.jsonc ~/.config/waybar/config.jsonc ~/.config/rice-local/home/.config/waybar/layouts/yumi.jsonc; do
+    [ -f "$f" ] && sed -i 's|"on-click": "@HOME@/.local/bin/kb-switch"|"on-click": "hyprctl switchxkblayout all next"|' "$f"
+done
+systemctl --user restart hyde-Hyprland-bar.service 2>/dev/null
+rm -f ~/.local/bin/kb-switch ~/.local/bin/kb-switch-uninstall
+echo "SUPER+K снова от HyDE"

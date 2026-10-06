@@ -1,0 +1,9 @@
+#!/bin/sh
+# yumi-telegram: тема Telegram Desktop в цветах обоев (откат — yumi-telegram-uninstall)
+T="$HOME/.local/bin/yumi-telegram-theme"
+[ -x "$T" ] || exit 0
+command -v Telegram >/dev/null 2>&1 || command -v telegram-desktop >/dev/null 2>&1 || exit 0
+timeout 8 "$T" >/dev/null 2>&1 || exit 0
+# вопрос «Применить?» ждёт нажатия — отдельным фоновым процессом, yumi-accent не ждёт
+setsid -f "$T" --notify >/dev/null 2>&1 </dev/null
+exit 0

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Откат экрана блокировки «Yumi Google»: вернуть layout20 и удалить файлы макета
+conf=~/.config/hypr/hyprlock.conf
+if grep -q 'yumi-google.conf' "$conf" 2>/dev/null; then
+    sed -i 's|^\$LAYOUT_PATH=.*|$LAYOUT_PATH=@HOME@/.config/hypr/hyprlock/layout20.conf|' "$conf"
+    echo "hyprlock: снова layout20"
+fi
+rm -f ~/.config/hypr/hyprlock/yumi-google.conf ~/.config/hypr/hyprlock/yumi-google.base.tmpl ~/.local/bin/hyprlock-google-build ~/.config/hypr/hyprlock/quotes.txt ~/.local/bin/hyprlock-info
+rm -rf ~/.cache/hyprlock-info
+rm -f ~/.local/bin/hyprlock-google-uninstall
+echo "hyprlock: макет Yumi Google удалён"

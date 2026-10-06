@@ -1,0 +1,453 @@
+#!/usr/bin/env python3
+"""yumi-menu-clipboard — буфер обмена на GTK (каркас yumi-panel; замена menu-clipboard и HyDE cliphist.sh).
+  yumi-menu-clipboard [--bar|--center]   открыть / закрыть
+  yumi-menu-clipboard --close            закрыть
+
+Хранилище — cliphist (как раньше). Поиск сверху фильтрует на лету; Enter — скопировать первую запись,
+↓ — к списку, Esc — очистить поиск / закрыть. Клик по записи — скопировать (wl-copy) и закрыть.
+Картинки — миниатюрами. На строке: закрепить / удалить. «Очистить всё» — с подтверждением.
+Закреплённые — тот же файл избранного, что у HyDE cliphist.sh (base64 по строке):
+  ~/.cliphist_favorites, если есть, иначе ~/.cache/hyde/landing/cliphist_favorites
+
+Переменные для проверки:
+  YP_DRYRUN=1      копирование, удаление, очистка, закрепление не выполняются (команда — в stderr)
+  YP_FAKE_CLIP=1   выдуманные записи вместо настоящей истории (для снимков; включает и YP_DRYRUN)
+  YP_SEARCH=текст  сразу ввести текст в поиск;  YP_TEST=confirm — открыть подтверждение очистки
+  YP_FILTER=all|text|img|pin — открыть вкладку
+Откат: удалить этот файл"""
+import os
+import sys
+import base64
+import threading
+import subprocess
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-panel"))
+import yumipanel as yp  # noqa: E402  (сам перезапускает процесс с layer-shell)
+from yumipanel import Gtk, Gdk, GLib, Gio, Pango, Layer  # noqa: E402
+import gi  # noqa: E402
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import GdkPixbuf  # noqa: E402
+
+FAKE = bool(os.environ.get("YP_FAKE_CLIP"))
+DRY = yp.DRY or FAKE
+yp.DRY = DRY                    # yp.do() тоже только печатает
+LIMIT = 60                      # строк на экране за раз (поиск идёт по всей истории)
+THUMB = 46                      # высота миниатюры, px
+HOME = os.path.expanduser("~")
+FAV_FILE = os.path.join(HOME, ".cliphist_favorites")
+if not os.path.exists(FAV_FILE):
+    FAV_FILE = os.path.join(os.environ.get("HYDE_CACHE_HOME", os.path.join(HOME, ".cache/hyde")),
+                            "landing/cliphist_favorites")
+
+CSS = """
+.yc-search { margin-bottom: 2px; }
+.yc-list scrollbar { background: transparent; border: none; }
+.yc-item { background: @yp-btn; border-radius: 16px; transition: background 150ms; }
+.yc-item:hover { background: @yp-hover; }
+.yc-item.first { box-shadow: inset 0 0 0 1px alpha(@yp-accent, 0.55); }
+.yc-item.pinned { background: alpha(@yp-accent, 0.14); }
+.yc-main { background: transparent; border: none; box-shadow: none; padding: 7px 4px 7px 12px; color: @yp-fg; }
+.yc-main:focus-visible { outline: 1px solid @yp-accent; border-radius: 14px; }
+.yc-text { font-size: 10.5pt; }
+.yc-meta { font-size: 8.5pt; color: alpha(@yp-fg2, 0.65); }
+.yc-thumb { border-radius: 8px; }
+.yc-kind { color: @yp-accent; font-size: 12pt; min-width: 18px; }
+.yc-tools { margin-right: 6px; }
+.yc-tool { min-width: 26px; min-height: 26px; border-radius: 13px; padding: 0; font-size: 10pt;
+           background: transparent; color: alpha(@yp-fg2, 0.7); border: none; box-shadow: none; }
+.yc-tool:hover { background: alpha(@yp-fg, 0.12); color: @yp-fg; }
+.yc-tool.del:hover { color: #ed8796; background: alpha(#ed8796, 0.15); }
+.yc-tool.on { color: @yp-accent; }
+.yc-empty { color: alpha(@yp-fg2, 0.6); font-size: 10pt; padding: 18px 6px; }
+.yc-seg .yp-seg-btn { padding: 5px 4px; }
+.yc-seg .yp-seg-icon { font-size: 12pt; }
+.yc-seg .yp-seg-text { font-size: 8.5pt; }
+.yc-dry { color: @yp-accent; font-size: 8.5pt; font-weight: 700; letter-spacing: 1px; padding: 0 6px; }
+"""
+
+
+# ---------- данные ----------
+def fake_wall_png():
+    """Картинка для выдуманных записей — уменьшенные обои (не личные данные)."""
+    try:
+        pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(os.path.realpath(os.path.join(HOME, ".cache/hyde/wall.thmb")),
+                                                     320, -1, True)
+        ok, buf = pb.save_to_bufferv("png", [], [])
+        return bytes(buf) if ok else b""
+    except Exception:
+        return b""
+
+
+FAKE_ITEMS = [
+    ("text", "git commit -m \"Пилюли Waybar: новые цвета\""),
+    ("text", "https://github.com/sonoyumi/yumi-rice"),
+    ("img", "png 1920x1080"),
+    ("text", "Привет! Встречаемся завтра в 10:30 у входа в библиотеку, не забудь ноутбук и зарядку."),
+    ("text", "def greet(name):\n    return f\"Привет, {name}!\""),
+    ("text", "yay -S gtk4-layer-shell"),
+    ("img", "png 2560x1600"),
+    ("text", "Bolzano · Libera Università di Bolzano"),
+    ("text", "sudo systemctl restart bluetooth"),
+    ("text", "#a6da95"),
+    ("text", "Список покупок: молоко, хлеб, яблоки, кофе"),
+    ("img", "jpeg 800x600"),
+    ("text", "hyprctl dispatch 'hl.dsp.exec_cmd([[kitty]])'"),
+]
+FAKE_FAVS = ["ssh yumi@laptop", "Мой адрес для доставки: ул. Примерная, 1"]
+
+
+def load_history():
+    """[(id, превью, вид)]; вид: text | img. В поддельном режиме — свой набор."""
+    if FAKE:
+        return [(str(900 - i), body if kind == "text" else f"[[ binary data 512 KiB {body} ]]", kind)
+                for i, (kind, body) in enumerate(FAKE_ITEMS)]
+    out = []
+    for line in yp.run("cliphist", "list", timeout=5).splitlines():
+        cid, _, prev = line.partition("\t")
+        if cid:
+            out.append((cid, prev, "img" if prev.startswith("[[ binary data") else "text"))
+    return out
+
+
+def load_favs():
+    if FAKE:
+        return list(FAKE_FAVS)
+    favs = []
+    try:
+        with open(FAV_FILE) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        favs.append(base64.b64decode(line).decode("utf-8", "replace").rstrip("\n"))
+                    except Exception:
+                        pass
+    except OSError:
+        pass
+    return favs
+
+
+def save_favs(favs):
+    """Формат HyDE cliphist.sh: строка = base64(текст + перевод строки)."""
+    if DRY:
+        print("[dry-run] save favorites:", len(favs), "записей ->", FAV_FILE, file=sys.stderr, flush=True)
+        return
+    os.makedirs(os.path.dirname(FAV_FILE), exist_ok=True)
+    tmp = FAV_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        for t in favs:
+            f.write(base64.b64encode((t + "\n").encode()).decode() + "\n")
+    os.replace(tmp, FAV_FILE)
+
+
+def decode(cid):
+    try:
+        return subprocess.run(["cliphist", "decode", cid], capture_output=True, timeout=5).stdout
+    except Exception:
+        return b""
+
+
+def img_meta(prev):
+    """'[[ binary data 944 KiB png 1920x1080 ]]' → 'PNG · 1920×1080 · 944 КБ'."""
+    parts = prev.strip("[] ").split()
+    try:
+        size, unit, fmt = parts[2], parts[3], parts[4]
+        dims = parts[5].replace("x", "×") if len(parts) > 5 else ""
+        unit = {"KiB": "КБ", "MiB": "МБ", "B": "Б"}.get(unit, unit)
+        return " · ".join(x for x in (fmt.upper(), dims, f"{size} {unit}") if x)
+    except IndexError:
+        return "Картинка"
+
+
+def text_meta(prev):
+    n = len(prev)
+    if prev.startswith(("http://", "https://")):
+        return "Ссылка"
+    if "\n" in prev or n > 90:
+        return f"Текст · {n}{'+' if n >= 100 else ''} симв."
+    return "Текст"
+
+
+class Clipboard:
+    def __init__(self, panel, body):
+        self.panel = panel
+        panel.add_css(CSS)
+        self.history = load_history()
+        self.favs = load_favs()
+        self.filter = os.environ.get("YP_FILTER", "all")
+        self.thumbs = {}              # id → Gdk.Texture
+        self.thumb_wait = {}          # id → [Gtk.Picture] (ждут декодирования)
+        self.thumb_queue = []
+        self.thumb_busy = False
+        self.first = None             # действие для Enter
+
+        # клавиатура: настоящему окну — сразу (как rofi), тестовому (YP_KEYBOARD=none) — нет
+        if os.environ.get("YP_KEYBOARD") != "none":
+            Layer.set_keyboard_mode(panel, Layer.KeyboardMode.EXCLUSIVE)
+
+        self.search = Gtk.SearchEntry(placeholder_text="Поиск в истории…", hexpand=True,
+                                      css_classes=["yp-entry", "yc-search"])
+        self.search.connect("search-changed", lambda *_: self.render())
+        self.search.connect("activate", lambda *_: self.first and self.first())
+        self.search.set_key_capture_widget(panel)
+        body.append(self.search)
+
+        self.seg = yp.Segmented([("all", "󰅌", "Все", True), ("text", "󰦨", "Текст", True),
+                                 ("img", "󰋩", "Картинки", True), ("pin", "󰐃", "Закреп", True)],
+                                self.filter, self.set_filter)
+        self.seg.add_css_class("yc-seg")
+        body.append(self.seg)
+
+        self.list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, propagate_natural_height=True,
+                                         max_content_height=round(400 * panel.k), css_classes=["yc-list"])
+        self.scroll.set_child(self.list)
+        body.append(self.scroll)
+
+        self.confirm = yp.revealer(yp.confirm_box("Удалить всю историю буфера обмена? Закреплённые останутся.",
+                                                  self.wipe, "Очистить",
+                                                  lambda: self.confirm.set_reveal_child(False)))
+        body.append(self.confirm)
+        foot = Gtk.Box(spacing=8, homogeneous=True)
+        foot.append(yp.action_button("󰃢  Очистить всё", lambda *_: self.confirm.set_reveal_child(True), "danger"))
+        body.append(foot)
+        if DRY:
+            body.append(Gtk.Label(label="ПРОВЕРКА: ИЗМЕНЕНИЯ НЕ ВЫПОЛНЯЮТСЯ", xalign=0, css_classes=["yc-dry"]))
+
+        keys = Gtk.EventControllerKey(propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        keys.connect("key-pressed", self.on_key)
+        self.search.add_controller(keys)
+        prev_hook = getattr(panel, "on_key_hook", None)
+        panel.on_key_hook = lambda kv: self.on_esc(kv) or (prev_hook and prev_hook(kv))
+
+        if os.environ.get("YP_SEARCH"):
+            self.search.set_text(os.environ["YP_SEARCH"])
+        self.render()
+        if os.environ.get("YP_TEST") == "confirm":
+            self.confirm.set_reveal_child(True)
+        GLib.timeout_add(80, lambda: self.search.grab_focus() and False)
+
+    # ---------- клавиши ----------
+    def on_esc(self, keyval):
+        if Gdk.keyval_name(keyval) == "Escape" and self.search.get_text() and not self.panel.pages:
+            self.search.set_text("")
+            return True
+        return False
+
+    def on_key(self, _c, keyval, *_):
+        if Gdk.keyval_name(keyval) == "Down":
+            child = self.list.get_first_child()
+            if child and hasattr(child, "main"):
+                child.main.grab_focus()
+                return True
+        return False
+
+    def set_filter(self, key):
+        self.filter = key
+        self.render()
+
+    # ---------- список ----------
+    def render(self):
+        while (c := self.list.get_first_child()):
+            self.list.remove(c)
+        q = self.search.get_text().strip().lower()
+        self.first = None
+        shown = 0
+
+        favs = [t for t in self.favs if not q or q in t.lower()] if self.filter in ("all", "pin") else []
+        if favs and self.filter != "pin":
+            self.list.append(yp.section("ЗАКРЕПЛЁННЫЕ"))
+        for t in favs:
+            self.add_row(None, t, "text", pinned=True)
+            shown += 1
+
+        if self.filter != "pin":
+            items = [h for h in self.history
+                     if (self.filter == "all" or h[2] == self.filter) and (not q or q in h[1].lower())]
+            if items and favs:
+                self.list.append(yp.section("ИСТОРИЯ"))
+            for cid, prev, kind in items[:LIMIT]:
+                self.add_row(cid, prev, kind)
+                shown += 1
+            if len(items) > LIMIT:
+                self.list.append(Gtk.Label(label=f"…и ещё {len(items) - LIMIT} — уточните поиск", xalign=0,
+                                           css_classes=["yc-empty"]))
+            total = len(items)
+        else:
+            total = len(favs)
+
+        if not shown:
+            msg = ("Ничего не найдено" if q else
+                   "Закреплённых пока нет — нажмите 󰐃 у записи" if self.filter == "pin" else "История пуста")
+            self.list.append(Gtk.Label(label=msg, xalign=0, wrap=True, max_width_chars=1, css_classes=["yc-empty"]))
+        n_img = sum(1 for h in self.history if h[2] == "img")
+        sub = f"Найдено: {total}" if q else f"Записей: {len(self.history)} · картинок: {n_img} · закреплено: {len(self.favs)}"
+        self.panel.set_subtitle(sub, live=True)
+        self.pump_thumbs()
+
+    def add_row(self, cid, prev, kind, pinned=False):
+        row = Gtk.Box(css_classes=["yc-item"] + (["pinned"] if pinned else []))
+        if self.first is None:
+            row.add_css_class("first")
+        inner = Gtk.Box(spacing=10)
+        if kind == "img":
+            pic = Gtk.Picture(can_shrink=True, content_fit=Gtk.ContentFit.COVER, css_classes=["yc-thumb"])
+            k = self.panel.k
+            frame = Gtk.Overlay(valign=Gtk.Align.CENTER)       # размер задаёт коробка, картинка не измеряется
+            frame.set_overflow(Gtk.Overflow.HIDDEN)
+            frame.add_css_class("yc-thumb")
+            sizer = Gtk.Box()
+            sizer.set_size_request(round(THUMB * 1.6 * k), round(THUMB * k))
+            frame.set_child(sizer)
+            frame.add_overlay(pic)
+            frame.set_measure_overlay(pic, False)
+            if cid in self.thumbs:
+                pic.set_paintable(self.thumbs[cid])
+            else:
+                self.thumb_wait.setdefault(cid, []).append(pic)
+                if cid not in self.thumb_queue:
+                    self.thumb_queue.append(cid)
+            inner.append(frame)
+        else:
+            icon = "󰐃" if pinned else ("󰌹" if prev.startswith(("http://", "https://")) else "󰦨")
+            inner.append(Gtk.Label(label=icon, valign=Gtk.Align.START, css_classes=["yc-kind"]))
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1, hexpand=True, valign=Gtk.Align.CENTER)
+        if kind == "img":
+            col.append(Gtk.Label(label="Картинка", xalign=0, css_classes=["yc-text"]))
+            meta = img_meta(prev)
+        else:
+            text = " ".join(prev.split())
+            col.append(Gtk.Label(label=text, xalign=0, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR, lines=2,
+                                 ellipsize=Pango.EllipsizeMode.END, max_width_chars=1, hexpand=True,
+                                 css_classes=["yc-text"]))
+            meta = "Закреплено" if pinned else text_meta(prev)
+        if cid:
+            meta += f" · №{cid}"
+        col.append(Gtk.Label(label=meta, xalign=0, css_classes=["yc-meta"], ellipsize=Pango.EllipsizeMode.END))
+        inner.append(col)
+
+        main = Gtk.Button(child=inner, hexpand=True, css_classes=["yc-main"])
+        action = (lambda t=prev: self.copy_text(t)) if pinned else (lambda c=cid: self.copy_id(c))
+        main.connect("clicked", lambda *_: action())
+        row.append(main)
+        row.main = main
+        if self.first is None:
+            self.first = action
+
+        tools = Gtk.Box(spacing=2, valign=Gtk.Align.CENTER, css_classes=["yc-tools"])
+        if pinned:
+            tools.append(self.tool("󰐃", "Открепить", lambda *_, t=prev: self.unpin(t), "on"))
+        else:
+            if kind == "text":
+                tools.append(self.tool("󰐃", "Закрепить", lambda *_, c=cid, p=prev: self.pin(c, p)))
+            tools.append(self.tool("󰆴", "Удалить из истории", lambda *_, c=cid, p=prev: self.delete(c, p), "del"))
+        row.append(tools)
+        self.list.append(row)
+
+    def tool(self, icon, tip, cb, cls=None):
+        b = Gtk.Button(label=icon, tooltip_text=tip, css_classes=["yc-tool"] + ([cls] if cls else []))
+        b.connect("clicked", cb)
+        return b
+
+    # ---------- миниатюры (в фоне, по одной) ----------
+    def pump_thumbs(self):
+        if self.thumb_busy or not self.thumb_queue:
+            return
+        cid = self.thumb_queue.pop(0)
+        self.thumb_busy = True
+        k = self.panel.k
+
+        def work():
+            data = self.fake_png() if FAKE else decode(cid)
+            pb = None
+            try:
+                stream = Gio.MemoryInputStream.new_from_bytes(GLib.Bytes.new(data))
+                pb = GdkPixbuf.Pixbuf.new_from_stream_at_scale(stream, round(THUMB * 3.2 * k), -1, True, None)
+            except Exception:
+                pass
+            GLib.idle_add(self.thumb_done, cid, pb)
+        threading.Thread(target=work, daemon=True).start()
+
+    def fake_png(self):
+        if not hasattr(self, "_fake_png"):
+            self._fake_png = fake_wall_png()
+        return self._fake_png
+
+    def thumb_done(self, cid, pb):
+        self.thumb_busy = False
+        if pb is not None:
+            tex = Gdk.Texture.new_for_pixbuf(pb)
+            self.thumbs[cid] = tex
+            for pic in self.thumb_wait.pop(cid, []):
+                pic.set_paintable(tex)
+        self.pump_thumbs()
+        return False
+
+    # ---------- действия ----------
+    def wl_copy(self, data):
+        if DRY:
+            print("[dry-run] wl-copy <", len(data), "байт>", file=sys.stderr, flush=True)
+            return
+        p = subprocess.Popen(["wl-copy"], stdin=subprocess.PIPE, start_new_session=True)
+        p.stdin.write(data)
+        p.stdin.close()
+
+    def copy_id(self, cid):
+        if DRY:
+            yp.do("sh", "-c", f"cliphist decode {cid} | wl-copy")
+        else:
+            data = decode(cid)
+            if not data:
+                self.panel.toast("Запись не найдена", error=True, hold=3)
+                return
+            self.wl_copy(data)
+        self.done("Скопировано")
+
+    def copy_text(self, text):
+        self.wl_copy(text.encode())
+        self.done("Скопировано")
+
+    def done(self, msg):
+        self.panel.toast(msg, hold=3)
+        if DRY:
+            return                         # в проверке окно не закрываем — видно результат
+        GLib.timeout_add(120, lambda: self.panel.app.quit() or False)
+
+    def delete(self, cid, prev):
+        if DRY:
+            yp.do("cliphist", "delete", f"<{cid}>")
+        else:
+            subprocess.run(["cliphist", "delete"], input=f"{cid}\t{prev}\n", text=True, timeout=5)
+        self.history = [h for h in self.history if h[0] != cid]
+        self.panel.toast("Удалено из истории", hold=3)
+        self.render()
+
+    def pin(self, cid, prev):
+        text = prev if FAKE else decode(cid).decode("utf-8", "replace").rstrip("\n")
+        if text in self.favs:
+            self.panel.toast("Уже закреплено", hold=3)
+            return
+        self.favs.append(text)
+        save_favs(self.favs)
+        self.panel.toast("Закреплено", hold=3)
+        self.render()
+
+    def unpin(self, text):
+        self.favs = [t for t in self.favs if t != text]
+        save_favs(self.favs)
+        self.panel.toast("Откреплено", hold=3)
+        self.render()
+
+    def wipe(self):
+        yp.do("cliphist", "wipe")
+        self.history = []
+        self.confirm.set_reveal_child(False)
+        self.panel.toast("История очищена", hold=3)
+        self.render()
+
+
+if __name__ == "__main__":
+    app = yp.PanelApp("org.yumi.panel.clipboard", "Буфер обмена", "󰅌", lambda panel, body: Clipboard(panel, body))
+    sys.exit(app.run(sys.argv))

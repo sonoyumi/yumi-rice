@@ -1,0 +1,10 @@
+[Unit]
+Description=Проверка напоминаний календаря yumi раз в минуту
+
+[Timer]
+OnCalendar=*-*-* *:*:00
+AccuracySec=5s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

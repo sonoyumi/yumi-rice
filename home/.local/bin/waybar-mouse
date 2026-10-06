@@ -22,6 +22,8 @@ def hz(rate):
     if not m:
         return None
     n, unit = int(m[1]), m[2]
+    if n == 0:                      # Solaar иногда отдаёт «0ms» — не падать
+        return None
     return round(1000 / n) if unit == "ms" else round(1_000_000 / n)
 
 

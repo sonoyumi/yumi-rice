@@ -1,8 +1,28 @@
 {
     "workbench.startupEditor": "none",
-    "python.analysis.typeCheckingMode": "basic",
+    "python.analysis.typeCheckingMode": "off",
     "workbench.colorTheme": "Wallbash",
     "python.analysis.languageServerMode": "light",
+    "python.analysis.diagnosticMode": "openFilesOnly",
+    "python.analysis.indexing": false,
+    "python.analysis.autoImportCompletions": false,
+    "python.analysis.exclude": [
+        "**/.venv",
+        "**/venv",
+        "**/node_modules",
+        "**/__pycache__",
+        "**/.git",
+        "**/.pytest_cache",
+        "**/.ruff_cache"
+    ],
+    "files.watcherExclude": {
+        "**/.venv/**": true,
+        "**/venv/**": true,
+        "**/node_modules/**": true,
+        "**/__pycache__/**": true,
+        "**/.pytest_cache/**": true,
+        "**/.ruff_cache/**": true
+    },
     "wallBash.autoUpdate": false,
     "editor.fontSize": 12,
     "github.copilot.enable": {

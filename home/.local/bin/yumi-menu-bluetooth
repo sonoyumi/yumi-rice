@@ -1,0 +1,1543 @@
+#!/usr/bin/env python3
+"""yumi-menu-bluetooth — меню Bluetooth на GTK (каркас yumi-panel, замена rofi menu-bluetooth и Blueman).
+  yumi-menu-bluetooth [--bar|--center]   открыть / закрыть
+  yumi-menu-bluetooth --close            закрыть открытое меню
+Состояние читается из D-Bus org.bluez (живые сигналы, без опроса), действия — через bluetoothctl/busctl/pactl.
+YP_DRYRUN=1 — действия, меняющие состояние (питание, видимость, подключение, сопряжение, доверие, блокировка,
+переименование, профиль звука, удаление, отправка файла), не выполняются: команда пишется в stderr,
+меню показывает имитацию результата. Поиск устройств — всегда настоящий.
+YP_BT_PAGE — сразу открыть подстраницу (для проверки/снимков), см. debug_page().
+AirPods (Apple, AAP): на странице подключённых наушников — батарея Л/П/кейс, режим шумоподавления,
+восприятие разговора, ношение (модуль aap.py). YP_BT_AAP_DEMO=1 (вместе с YP_DRYRUN=1) — имитация наушников.
+Откат: yumi-panel-uninstall"""
+import os
+import re
+import select
+import shutil
+import subprocess
+import sys
+import threading
+import time
+
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-panel"))
+import yumipanel as yp  # noqa: E402  (сам перезапускает процесс с layer-shell)
+from yumipanel import Gtk, Gio, GLib, Pango  # noqa: E402
+import aap  # noqa: E402  (~/.local/lib/yumi-panel/aap.py — управление AirPods по AAP)
+
+DRY = yp.DRY
+SCAN_S = 20
+ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|[\x01\x02]")
+BLUEZ = "org.bluez"
+
+KINDS = {   # тип → (значок, название)
+    "headphones": ("󰋋", "Наушники"),
+    "mouse": ("󰍽", "Мышь"),
+    "keyboard": ("󰌌", "Клавиатура"),
+    "speaker": ("󰓃", "Колонка"),
+    "phone": ("󰄜", "Телефон"),
+    "gamepad": ("󰊴", "Геймпад"),
+    "computer": ("󰟀", "Компьютер"),
+    "other": ("󰂯", "Устройство"),
+}
+BY_ICON = {"audio-headphones": "headphones", "audio-headset": "headphones", "input-mouse": "mouse",
+           "input-tablet": "mouse", "input-keyboard": "keyboard", "audio-card": "speaker",
+           "audio-speakers": "speaker", "phone": "phone", "input-gaming": "gamepad", "computer": "computer"}
+BY_NAME = [(r"airpods|buds|headphone|headset|наушник|wh-|wf-|earbud", "headphones"),
+           (r"mouse|мыш|\bm\d{3}\b|mx master|mx anywhere|rival|pro x", "mouse"),
+           (r"keyboard|клавиат|keys\b|k\d{3}\b", "keyboard"),
+           (r"speaker|колонк|soundlink|jbl|boom|charge|flip", "speaker"),
+           (r"controller|gamepad|dualsense|dualshock|joy-?con", "gamepad"),
+           (r"iphone|galaxy|pixel|phone|redmi|xiaomi", "phone")]
+
+# сервисы (короткие UUID) по-русски; None — служебные, не показываем
+SERVICES = {
+    "110b": "Звук (A2DP)", "110a": "Источник звука (A2DP)", "110d": "Звук (A2DP)",
+    "110e": "Пульт (AVRCP)", "110c": "Пульт (AVRCP)", "110f": "Пульт (AVRCP)",
+    "111e": "Гарнитура (HFP)", "111f": "Шлюз гарнитуры (HFP)", "1108": "Гарнитура (HSP)", "1112": "Шлюз гарнитуры (HSP)",
+    "1124": "Ввод (HID)", "1812": "Ввод (HID)", "180f": "Уровень заряда", "1105": "Приём файлов (OBEX)",
+    "1106": "Обмен файлами (FTP)", "112f": "Контакты (PBAP)", "1132": "Сообщения (MAP)", "1115": "Сеть (PAN)",
+    "1116": "Сеть (PAN)", "1117": "Сеть (PAN)", "1101": "Последовательный порт", "184e": "LE Audio",
+    "1850": "LE Audio", "1853": "LE Audio", "184f": "LE Audio", "1844": "Громкость (LE)",
+    "1200": None, "1000": None, "1800": None, "1801": None, "180a": None,
+}
+AUDIO_UUIDS = {"110b", "110d", "111e", "1108", "184e", "1850"}
+OBEX_UUIDS = {"1105", "1106"}
+VENDORS = {2: "Intel", 10: "Qualcomm", 13: "Texas Instruments", 15: "Broadcom", 29: "Qualcomm", 70: "MediaTek",
+           93: "Realtek", 305: "Cypress", 76: "Apple"}
+HCI_VER = {6: "4.0", 7: "4.1", 8: "4.2", 9: "5.0", 10: "5.1", 11: "5.2", 12: "5.3", 13: "5.4", 14: "6.0"}
+SEND_CMD = next((c for c in ("bluetooth-sendto", "blueman-sendto") if shutil.which(c)), None)
+
+ERRORS = [
+    (r"page-timeout|Page Timeout|HostDown|Host is down|ConnectionAttemptFailed|abort-by-local",
+     "Устройство не отвечает — оно включено и рядом?"),
+    (r"AuthenticationFailed|Authentication Failed", "Не удалось подтвердить код"),
+    (r"AuthenticationCanceled|AuthenticationRejected|Canceled|Rejected", "Сопряжение отклонено"),
+    (r"AuthenticationTimeout|Timeout|timed out", "Время ожидания истекло"),
+    (r"AlreadyExists", "Устройство уже сопряжено"),
+    (r"InProgress", "Операция уже выполняется — подождите"),
+    (r"not available|DoesNotExist", "Устройство не найдено — запустите поиск ещё раз"),
+    (r"NotReady|Not Ready|not ready", "Адаптер Bluetooth не готов (выключен?)"),
+    (r"profile-unavailable|Protocol not available|NotAvailable", "Нет подходящего профиля для подключения"),
+    (r"Access denied|AccessDenied|NotAuthorized|not authorized", "Нет прав на это действие"),
+]
+
+AGENT = [   # запросы агента bluetoothctl (приходят без перевода строки)
+    (re.compile(r"Confirm passkey (\d+)"), "confirm"),
+    (re.compile(r"Enter PIN code:"), "pin"),
+    (re.compile(r"Enter passkey \(number in 0-999999\):"), "passkey"),
+    (re.compile(r"\[agent\] Passkey: (\d+)"), "display"),
+    (re.compile(r"\[agent\] PIN code: (\w+)"), "display"),
+    (re.compile(r"Authorize service \S+ \(yes/no\)"), "auto-yes"),
+    (re.compile(r"Accept pairing \(yes/no\)"), "auto-yes"),
+]
+
+EXTRA_CSS = """
+.yp-bt-card { background: alpha(@yp-btn, 0.55); border-radius: 16px; padding: 6px 8px; }
+.yp-bt-ask { background: alpha(@yp-accent, 0.10); border-radius: 16px; padding: 12px;
+             box-shadow: inset 0 0 0 1px alpha(@yp-accent, 0.45); }
+.yp-bt-steps { background: alpha(@yp-btn, 0.55); border-radius: 16px; padding: 8px 10px; }
+.yp-bt-ok { color: @yp-accent; font-weight: 700; font-size: 11pt; }
+.yp-bt-err { color: #ed8796; font-size: 10pt; }
+.yp-bt-link { background: none; border: none; box-shadow: none; padding: 2px 8px; min-height: 0;
+              color: alpha(@yp-fg2, 0.65); font-size: 9.5pt; }
+.yp-bt-link:hover { color: @yp-fg; }
+.yp-bt-blocked { color: #f5a97f; }
+.yp-bt-tile { padding: 8px 4px; }
+.yp-bt-ap-modes .yp-seg-btn { padding-left: 0; padding-right: 0; }
+.yp-bt-ap-modes .yp-seg-text { font-size: 9pt; }
+.yp-bt-tile-name { font-size: 9.5pt; color: alpha(@yp-fg2, 0.8); }
+.yp-bt-tile-val { font-size: 13pt; font-weight: 700; }
+.yp-bt-tile-val.low { color: #ed8796; }
+.yp-bt-tile-val.charging { color: #a6da95; }
+.yp-bt-tile-val.off { color: alpha(@yp-fg, 0.4); }
+"""
+
+
+# ---------- данные ----------
+def short_uuid(u):
+    u = (u or "").lower()
+    return u[4:8] if u.endswith("-0000-1000-8000-00805f9b34fb") else ""
+
+
+def dev_kind(d):
+    if d.get("Icon") in BY_ICON:
+        return BY_ICON[d["Icon"]]
+    app = d.get("Appearance")
+    if app:
+        cat, sub = app >> 6, app & 0x3F
+        if cat == 0x0F:
+            return {1: "keyboard", 2: "mouse", 3: "gamepad", 4: "gamepad"}.get(sub, "other")
+        if cat == 0x01:
+            return "phone"
+        if cat == 0x02:
+            return "computer"
+        if cat == 0x25:
+            return "headphones"
+        if cat == 0x21:
+            return "speaker"
+    cls = d.get("Class")
+    if cls:
+        major, minor = (cls >> 8) & 0x1F, (cls >> 2) & 0x3F
+        if major == 1:
+            return "computer"
+        if major == 2:
+            return "phone"
+        if major == 4:
+            return "speaker" if minor in (5, 7, 8) else "headphones"
+        if major == 5:
+            if minor & 0x10:
+                return "keyboard"
+            if minor & 0x20:
+                return "mouse"
+            if minor & 0x0F in (1, 2):
+                return "gamepad"
+    name = (d.get("Name") or "").lower()
+    for pat, kind in BY_NAME:
+        if re.search(pat, name):
+            return kind
+    return "other"
+
+
+def services(uuids):
+    out = []
+    for u in uuids:
+        name = SERVICES.get(short_uuid(u))
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
+def battery_meta(p):
+    if p is None:
+        return ""
+    icons = "󰁺󰁻󰁼󰁽󰁾󰁿󰂀󰂁󰂂󰁹"
+    return f"{icons[min(max(int(p) - 1, 0) // 10, 9)]} {int(p)}%"
+
+
+def friendly(text):
+    for pat, msg in ERRORS:
+        if re.search(pat, text or ""):
+            return msg
+    lines = [l.strip() for l in (text or "").splitlines() if "Fail" in l or "Error" in l or "rror" in l]
+    return (lines[-1] if lines else "Не получилось")[:80]
+
+
+def bt(*args, timeout=25):
+    """Одна команда bluetoothctl, меняющая состояние. В dry-run — только пишет в stderr (yp.do)."""
+    if DRY:
+        yp.do("bluetoothctl", *args)
+        time.sleep(0.8)
+        return True, ""
+    ok, out = yp.do("bluetoothctl", "--timeout", str(timeout), *args, timeout=timeout + 3)
+    out = ANSI.sub("", out)
+    if not ok or re.search(r"Failed|not available|org\.bluez\.Error", out):
+        return False, friendly(out)
+    return True, out
+
+
+def set_prop(path, iface, prop, sig, value):
+    """Свойство org.bluez через busctl (Alias и т.п. — у bluetoothctl нет неинтерактивной команды)."""
+    if not path:
+        return False, "Устройство не найдено"
+    ok, out = yp.do("busctl", "--system", "set-property", BLUEZ, path, iface, prop, sig, str(value))
+    if DRY:
+        time.sleep(0.6)
+    return (True, "") if ok else (False, friendly(out))
+
+
+def label(text, classes=(), wrap=False, xalign=0.0):
+    l = Gtk.Label(label=text, xalign=xalign, css_classes=list(classes))
+    if wrap:
+        l.set_wrap(True)
+        l.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        l.set_max_width_chars(1)        # иначе подпись просит ширину по всему тексту и раздувает окно
+        l.set_hexpand(True)
+    return l
+
+
+def clear(box):
+    while (c := box.get_first_child()):
+        box.remove(c)
+
+
+def hbox(*widgets, spacing=8, homogeneous=True):
+    b = Gtk.Box(spacing=spacing, homogeneous=homogeneous)
+    for w in widgets:
+        w.set_hexpand(True)
+        b.append(w)
+    return b
+
+
+def link_button(text, cb):
+    """Маленькая строка-ссылка внизу страницы («Расширенные настройки…»)."""
+    b = Gtk.Button(label=text, css_classes=["yp-bt-link"], halign=Gtk.Align.CENTER)
+    b.connect("clicked", cb)
+    return b
+
+
+class Rename:
+    """Строка «Имя  [значение] ✎» + раскрывающееся поле переименования. on_save(new_name)."""
+
+    def __init__(self, key, on_save):
+        self.on_save = on_save
+        self.row = yp.info_row(key, "—")
+        self.row.append(yp.icon_button("󰏫", "Переименовать", lambda *_: self.open(True), ("yp-small",)))
+        self.entry = Gtk.Entry(css_classes=["yp-entry"], hexpand=True, max_length=64)
+        self.entry.connect("activate", lambda *_: self.save())
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.append(self.entry)
+        box.append(hbox(yp.action_button("Отмена", lambda *_: self.open(False), "plain"),
+                        yp.action_button("Сохранить", lambda *_: self.save())))
+        self.rev = yp.revealer(box)
+
+    def set(self, value):
+        self.value = value
+        self.row.value.set_label(value)
+
+    def open(self, show):
+        if show:
+            self.entry.set_text(self.value)
+            GLib.idle_add(lambda: self.entry.grab_focus() and False)
+        self.rev.set_reveal_child(show)
+
+    def save(self):
+        name = self.entry.get_text().strip()
+        self.open(False)
+        if name and name != self.value:
+            self.on_save(name)
+
+
+# ---------- звук: профили карты PipeWire/PulseAudio ----------
+def audio_card(mac):
+    """(имя карты, {профиль: доступен}, активный) или None, если устройство не подключено как звук."""
+    import json
+    name = "bluez_card." + mac.replace(":", "_")
+    try:
+        cards = json.loads(yp.run("pactl", "-f", "json", "list", "cards", timeout=3) or "[]")
+    except ValueError:
+        cards = []
+    for c in cards:
+        if c.get("name") == name:
+            profs = {k: (v.get("available", True) if isinstance(v, dict) else True)
+                     for k, v in (c.get("profiles") or {}).items()}
+            return name, profs, c.get("active_profile", "")
+    return None
+
+
+def profile_group(p):
+    if p.startswith("a2dp"):
+        return "a2dp"
+    if p.startswith(("headset", "handsfree", "hfp", "hsp")):
+        return "hfp"
+    return ""
+
+
+def best_profile(profs, group, active):
+    if profile_group(active) == group:
+        return active
+    cands = [p for p, avail in profs.items() if profile_group(p) == group and avail]
+    order = ["a2dp-sink-aac", "a2dp-sink-aptx_hd", "a2dp-sink-aptx", "a2dp-sink-ldac", "a2dp-sink",
+             "headset-head-unit-msbc", "headset-head-unit", "headset-head-unit-cvsd"]
+    cands.sort(key=lambda p: order.index(p) if p in order else 99)
+    return cands[0] if cands else ""
+
+
+# ---------- сопряжение: bluetoothctl с агентом ----------
+class Pairer(threading.Thread):
+    """pair → trust → connect в одном интерактивном bluetoothctl; запросы агента (код, PIN) — в окно."""
+    STEPS = [("pair", "Сопряжение", ["Pairing successful", "AlreadyExists"],
+              r"Failed to pair[^\n]*|Device \S+ not available", 90),
+             ("trust", "Доверие", ["trust succeeded"], r"Failed to set trust[^\n]*|Device \S+ not available", 10),
+             ("connect", "Подключение", ["Connection successful"], r"Failed to connect[^\n]*|Device \S+ not available", 30)]
+
+    def __init__(self, mac, ui):
+        super().__init__(daemon=True)
+        self.mac, self.ui = mac, ui
+        self.proc = None
+        self.cancelled = False
+        self.answer = None
+        self.answer_ev = threading.Event()
+        self.buf = ""
+        self.agent_pos = 0
+
+    def send(self, line, log=True):
+        if DRY:
+            if log:
+                print(f"[dry-run] bluetoothctl> {line}", file=sys.stderr, flush=True)
+            return
+        try:
+            self.proc.stdin.write((line + "\n").encode())
+            self.proc.stdin.flush()
+        except (OSError, AttributeError, ValueError):
+            pass
+
+    def reply(self, text):          # из окна: ответ на запрос агента
+        if DRY:
+            print(f"[dry-run] agent ← {text}", file=sys.stderr, flush=True)
+            self.answer = text
+            self.answer_ev.set()
+        else:
+            self.send(text)
+
+    def cancel(self):
+        self.cancelled = True
+        self.answer_ev.set()
+        if self.proc and self.proc.poll() is None:
+            self.send(f"cancel-pairing {self.mac}")
+            self.proc.terminate()
+
+    def run(self):
+        try:
+            ok, msg = self.run_dry() if DRY else self.run_real()
+        except Exception as e:          # noqa: BLE001
+            ok, msg = False, str(e)
+        finally:
+            if self.proc and self.proc.poll() is None:
+                self.proc.terminate()
+        if not self.cancelled:
+            GLib.idle_add(self.ui.pair_done, ok, msg)
+
+    def run_dry(self):
+        for i, (key, *_r) in enumerate(self.STEPS):
+            GLib.idle_add(self.ui.pair_step, i, "run")
+            self.send(f"{key} {self.mac}")
+            if key == "pair":       # имитация: устройство просит сверить код
+                time.sleep(1.2)
+                GLib.idle_add(self.ui.pair_agent, "confirm", "482915")
+                self.answer_ev.wait(90)
+                if self.cancelled:
+                    return False, ""
+                if self.answer != "yes":
+                    GLib.idle_add(self.ui.pair_step, i, "err")
+                    return False, "Сопряжение отклонено"
+            time.sleep(1.0)
+            GLib.idle_add(self.ui.pair_step, i, "ok")
+        return True, ""
+
+    def run_real(self):
+        self.proc = subprocess.Popen(["bluetoothctl"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     stderr=subprocess.STDOUT, env=yp.CHILD_ENV)
+        self.fd = self.proc.stdout.fileno()
+        self.wait_for(["Agent registered", "agent is already registered"], None, 6)
+        for i, (key, _title, oks, fail, limit) in enumerate(self.STEPS):
+            GLib.idle_add(self.ui.pair_step, i, "run")
+            self.buf, self.agent_pos = "", 0
+            self.send(f"{key} {self.mac}")
+            ok, msg = self.wait_for(oks, fail, limit)
+            if self.cancelled:
+                return False, ""
+            GLib.idle_add(self.ui.pair_step, i, "ok" if ok else "err")
+            GLib.idle_add(self.ui.pair_agent, None, None)
+            if not ok:
+                return False, friendly(msg)
+        self.send("quit", log=False)
+        return True, ""
+
+    def wait_for(self, oks, fail, limit):
+        end = time.monotonic() + limit
+        while time.monotonic() < end and not self.cancelled:
+            r, _, _ = select.select([self.fd], [], [], 0.25)
+            if r:
+                chunk = os.read(self.fd, 4096)
+                if not chunk:
+                    return False, "bluetoothctl завершился"
+                self.buf += ANSI.sub("", chunk.decode(errors="replace")).replace("\r", "\n")
+            # запросы агента — по одному, по порядку появления
+            hits = [(m, kind) for rx, kind in AGENT if (m := rx.search(self.buf, self.agent_pos))]
+            if hits:
+                m, kind = min(hits, key=lambda h: h[0].start())
+                self.agent_pos = m.end()
+                end += 60               # человеку нужно время на ответ
+                if kind == "auto-yes":
+                    self.send("yes")
+                else:
+                    GLib.idle_add(self.ui.pair_agent, kind, m.group(1) if m.groups() else "")
+                continue
+            if any(o in self.buf for o in oks):
+                return True, ""
+            if fail and (m := re.search(fail, self.buf)):
+                return False, m.group(0)
+        return False, "Timeout"
+
+
+# ---------- меню ----------
+class Bluetooth:
+    def __init__(self, panel, body):
+        self.panel, self.app = panel, panel.app
+        self.powered, self.adapter, self.ad, self.devs = None, None, {}, {}
+        self.fake, self.fake_ad = {}, {}             # имитация результата в dry-run
+        self.fake_card = {}                          # dry-run: mac → активный профиль звука
+        self.pages = []                              # мои подстраницы (словари состояния)
+        self.sig_main = None
+        self.refresh_timer = 0
+        self.toast_until = 0
+        self.syncing = False
+        self.scan_proc = None
+        self.pairer = None
+        self.closed = False
+        panel.add_css(EXTRA_CSS)
+        self.clamp_width()
+
+        self.power_row, self.power_sw = yp.toggle_row("󰂯", "Bluetooth", False, self.on_power)
+        self.power_icon = self.power_row.get_first_child()
+        body.append(self.power_row)
+
+        on = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        on.append(yp.section("ПОДКЛЮЧЕНЫ"))
+        self.conn_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        on.append(self.conn_box)
+        on.append(yp.section("СОПРЯЖЁННЫЕ"))
+        self.paired_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        on.append(self.paired_box)
+        on.append(yp.row_button("󰐕", "Добавить устройство", lambda *_: self.open_add()))
+        self.on_rev = yp.revealer(on)
+        body.append(self.on_rev)
+        self.off_rev = yp.revealer(yp.hint("Bluetooth выключен — включите, чтобы увидеть устройства"))
+        body.append(self.off_rev)
+        self.adapter_box = Gtk.Box()
+        body.append(self.adapter_box)
+        self.settings_cmd = next((c for c in ("overskride", "blueman-manager") if shutil.which(c)), None)
+        if self.settings_cmd:
+            body.append(link_button("Расширенные настройки…", self.open_settings))
+
+        self.orig_pop = panel.pop
+        panel.pop = self.pop            # «назад» и Esc идут через self.pop
+        self.app.connect("shutdown", lambda *_: self.cleanup())
+
+        try:
+            self.bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+            self.bus.signal_subscribe(BLUEZ, None, None, None, None, Gio.DBusSignalFlags.NONE,
+                                      lambda *_: self.schedule_refresh())
+            reply = self.bus.call_sync(BLUEZ, "/", "org.freedesktop.DBus.ObjectManager", "GetManagedObjects",
+                                       None, None, Gio.DBusCallFlags.NONE, 1500, None)
+            self.apply(reply.unpack()[0])        # первый раз — сразу, чтобы окно открылось готовым
+        except GLib.Error:
+            self.bus = None
+            self.apply({})
+        if os.environ.get("YP_BT_TRACE"):           # покадровый размер окна и страниц в stderr (поиск скачков)
+            last = {}
+
+            def tick(w, clock):
+                frame = self.panel.get_child()
+                vals = (w.get_width(), w.get_height(), frame.get_width(),
+                        self.panel.stack.get_width(), self.panel.stack.get_height())
+                if vals != last.get("v"):
+                    last["v"] = vals
+                    print(f"[trace] {clock.get_frame_time() / 1e6 % 100:.3f} win={vals[0]}x{vals[1]} "
+                          f"child={vals[2]} stack={vals[3]}x{vals[4]}", file=sys.stderr, flush=True)
+                return True
+            panel.add_tick_callback(tick)
+        if os.environ.get("YP_BT_PAGE"):            # для проверки/снимков: сразу открыть подстраницу
+            GLib.timeout_add(400, self.debug_page, os.environ["YP_BT_PAGE"])
+
+    def debug_page(self, spec):
+        """YP_BT_PAGE = add | off | adapter | adapter-rename | device:MAC | rename:MAC | remove:MAC |
+        connect:MAC | airpods:MAC | block:MAC | hfp:MAC | pair:MAC | pair-yes:MAC | pair-no:MAC  (действия — только вместе с YP_DRYRUN=1)"""
+        what, _, mac = spec.partition(":")
+        if what == "add":
+            self.open_add()
+        elif what in ("adapter", "adapter-rename"):
+            self.open_adapter()
+            if what == "adapter-rename":
+                self.pages[-1]["rename"].open(True)
+        elif what in ("device", "remove", "connect", "rename"):
+            self.open_device(mac)
+            page = self.pages[-1] if self.pages else None
+            if page and what == "remove":
+                self.ask_remove(page, True)
+            elif page and what == "rename":
+                page["rename"].open(True)
+            elif page and what == "connect" and DRY:
+                self.do_connect(page, True)
+        elif what == "pingpong":                       # проверка ширины: Адаптер ↔ главная каждые 1,2 с
+            def flip():
+                if self.closed:
+                    return False
+                self.pop() if self.pages else self.open_adapter()
+                return True
+            GLib.timeout_add(1200, flip)
+        elif what == "airpods" and DRY:                # имитация подключённых AirPods (+ YP_BT_AAP_DEMO=1)
+            self.fake.setdefault(mac, {}).update(connected=True)
+            self.refresh()
+            GLib.timeout_add(300, lambda: self.open_device(mac) or False)
+        elif what in ("block", "hfp") and DRY:           # имитация: заблокировать / профиль «гарнитура»
+            self.open_device(mac)
+            page = self.pages[-1]
+            if what == "block":
+                GLib.timeout_add(300, lambda: page["block"].set_active(True) and False)
+            else:
+                self.fake.setdefault(mac, {}).update(connected=True)
+                self.refresh()
+                GLib.timeout_add(900, lambda: self.set_profile(page, "hfp") or False)
+        elif what == "off" and DRY:                  # имитация выключения
+            self.power_sw.set_active(False)
+        elif what in ("pair", "pair-yes", "pair-no"):
+            self.open_pair(mac)
+            if what != "pair" and DRY:                # имитация: человек нажал «Подтвердить»/«Отклонить»
+                ans = "yes" if what == "pair-yes" else "no"
+                GLib.timeout_add(2500, lambda: self.pairer and self.pairer.reply(ans) and False)
+        return False
+
+    def clamp_width(self):
+        """Ширина окна — ровно ширина каркаса: длинные подписи с многоточием (имя устройства, toast)
+        иначе просят место под весь текст и раздувают окно. ScrolledWindow без прокрутки отдаёт наружу
+        минимальную ширину содержимого и естественную высоту."""
+        frame = self.panel.get_child()
+        self.panel.set_child(None)
+        width = frame.measure(Gtk.Orientation.HORIZONTAL, -1)[0]      # = WIDTH*k + рамка
+        sw = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, vscrollbar_policy=Gtk.PolicyType.NEVER,
+                                propagate_natural_height=True, min_content_width=width,
+                                max_content_width=width, halign=Gtk.Align.START, valign=Gtk.Align.START)
+        sw.set_child(frame)
+        self.panel.set_child(sw)
+        # если компоновщик на кадр выдаст слою больше места (скачок «до края экрана»), рамка не растянется:
+        # остаток окна прозрачный, а блюр Hyprland с ignore_alpha его не рисует
+
+    # ---------- чтение состояния ----------
+    def schedule_refresh(self, delay=300):
+        if not self.refresh_timer and not self.closed:
+            self.refresh_timer = GLib.timeout_add(delay, self.refresh)
+        return False
+
+    def refresh(self):
+        self.refresh_timer = 0
+        if self.bus is None:
+            return False
+        self.bus.call(BLUEZ, "/", "org.freedesktop.DBus.ObjectManager", "GetManagedObjects", None, None,
+                      Gio.DBusCallFlags.NONE, 3000, None, self.on_objects)
+        return False
+
+    def on_objects(self, bus, res):
+        try:
+            self.apply(bus.call_finish(res).unpack()[0])
+        except GLib.Error:
+            self.apply({})
+
+    def apply(self, objs):
+        ad, devs = None, {}
+        for path, ifs in sorted(objs.items()):
+            a = ifs.get("org.bluez.Adapter1")
+            if a and ad is None:
+                ad, self.adapter = dict(a), path
+            d = ifs.get("org.bluez.Device1")
+            if not d or not d.get("Address"):
+                continue
+            mac = d["Address"]
+            dev = dict(mac=mac, path=path, name=d.get("Alias") or d.get("Name") or mac, has_name=bool(d.get("Name")),
+                       paired=bool(d.get("Paired") or d.get("Bonded")), connected=bool(d.get("Connected")),
+                       trusted=bool(d.get("Trusted")), blocked=bool(d.get("Blocked")),
+                       battery=ifs.get("org.bluez.Battery1", {}).get("Percentage"),
+                       rssi=d.get("RSSI"), kind=dev_kind(d), uuids=list(d.get("UUIDs") or []),
+                       modalias=d.get("Modalias") or "")
+            dev.update(self.fake.get(mac, {}))
+            if not dev.get("removed"):
+                devs[mac] = dev
+        if ad is not None:
+            ad.update(self.fake_ad)
+        self.ad = ad or {}
+        self.powered = bool(ad.get("Powered")) if ad is not None else None
+        if not self.powered:
+            for d in devs.values():
+                d["connected"] = False
+        self.devs = devs
+        self.update_main()
+        page = self.pages[-1] if self.pages else None
+        if page and page["kind"] == "device":
+            self.fill_device(page)
+        elif page and page["kind"] == "add":
+            self.fill_add(page)
+        elif page and page["kind"] == "adapter":
+            self.fill_adapter(page)
+        self.show_default_sub()
+
+    # ---------- шапка ----------
+    def default_sub(self):
+        page = self.pages[-1] if self.pages else None
+        if page is None:
+            if self.powered is None:
+                return "Служба Bluetooth недоступна"
+            if not self.powered:
+                return "Выключен"
+            n = sum(d["connected"] for d in self.devs.values())
+            return f"Включён · {n} подключено" if n else "Включён · нет подключений"
+        if page["kind"] == "device":
+            d = self.devs.get(page["mac"])
+            return self.status_text(d) if d else ""
+        if page["kind"] == "add":
+            if self.scan_running():
+                return f"Поиск… {page.get('left', SCAN_S)} с"
+            return f"Найдено: {len(page['rows'])}"
+        if page["kind"] == "adapter":
+            if not self.powered:
+                return "Выключен"
+            return "Видим для других" if self.ad.get("Discoverable") else "Скрыт от других устройств"
+        return "Сопряжение"
+
+    def show_default_sub(self):
+        if time.monotonic() >= self.toast_until:
+            self.panel.toast(self.default_sub())        # toast(…, False) заодно снимает красный цвет
+        return False
+
+    def toast(self, text, error=False, hold=None):
+        """hold: сколько секунд держать надпись (None — пока не снимут)."""
+        self.panel.toast(text, error)
+        self.toast_until = time.monotonic() + (hold if hold is not None else 1e9)
+        if hold is not None:
+            GLib.timeout_add(int(hold * 1000) + 50, self.show_default_sub)
+
+    # ---------- подстраницы ----------
+    def max_page_height(self):
+        """Сколько высоты остаётся странице на мониторе: экран − бар − шапка − отступы (логические px)."""
+        k = self.panel.k
+        try:
+            surf = self.panel.get_surface()
+            mon = self.panel.get_display().get_monitor_at_surface(surf) if surf else None
+            h = mon.get_geometry().height if mon else 0
+        except Exception:       # noqa: BLE001
+            h = 0
+        if not h:
+            return 0
+        return max(int(h - 52 - yp.BAR_GAP - 16 - yp.HEADER_H * k - 32 * k), 200)
+
+    def push(self, page, title, widget):
+        """Подстраница; если она выше экрана — прокручивается внутри, окно не вылезает за край."""
+        limit = self.max_page_height()
+        if limit:
+            sc = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER,
+                                    vscrollbar_policy=Gtk.PolicyType.AUTOMATIC,
+                                    propagate_natural_height=True, max_content_height=limit,
+                                    overlay_scrolling=True)
+            sc.set_child(widget)
+            widget = sc
+        self.pages.append(page)
+        self.panel.push(title, widget, "")
+        self.toast_until = 0
+        self.show_default_sub()
+
+    def pop(self):
+        if not self.pages:
+            return
+        page = self.pages.pop()
+        self.leave_page(page)
+        self.orig_pop()
+        self.toast_until = 0
+        if self.pages and self.pages[-1]["kind"] == "add":
+            self.fill_add(self.pages[-1])
+        self.show_default_sub()
+
+    def pop_to_main(self):
+        while self.pages:
+            self.pop()
+
+    def leave_page(self, page):
+        if page["kind"] == "add":
+            self.stop_scan()
+        elif page["kind"] == "device" and "ap" in page:
+            self.airpods_session(page, False)
+        elif page["kind"] == "pair" and self.pairer:
+            self.pairer.cancel()
+            self.pairer = None
+            self.panel.busy = max(self.panel.busy - 1, 0)
+
+    # ---------- общее: действие в потоке ----------
+    def act(self, doing, fn, fake=None, ok_text="Готово", page=None, after=None, on_fail=None):
+        """fn() → (ok, сообщение) выполняется в потоке. fake() — имитация результата в dry-run."""
+        if page is not None:
+            self.set_busy(page, doing)
+        else:
+            self.toast(doing)
+        self.panel.busy += 1            # пока идёт операция, меню не закрывается от ухода мыши
+
+        def work():
+            try:
+                ok, msg = fn()
+            except Exception as e:      # noqa: BLE001
+                ok, msg = False, str(e)
+            GLib.idle_add(done, ok, msg)
+
+        def done(ok, msg):
+            self.panel.busy = max(self.panel.busy - 1, 0)
+            if ok and DRY and fake:
+                fake()
+            if page is not None:
+                self.set_busy(page, None)
+            if ok:
+                self.toast(ok_text, hold=2.5)
+                if after:
+                    after()
+            else:
+                self.toast(msg, error=True, hold=6)
+                if on_fail:
+                    on_fail()
+            self.sig_main = None
+            self.refresh()
+            return False
+        threading.Thread(target=work, daemon=True).start()
+
+    def fake_dev(self, mac, **kw):
+        return lambda: self.fake.setdefault(mac, {}).update(kw)
+
+    def fake_adapter(self, **kw):
+        return lambda: self.fake_ad.update(kw)
+
+    # ---------- главная ----------
+    def update_main(self):
+        paired = [d for d in self.devs.values() if d["paired"]]
+        sig = (self.powered, self.ad.get("Alias"),
+               tuple(sorted((d["mac"], d["name"], d["connected"], d["battery"], d["kind"], d["blocked"])
+                            for d in paired)))
+        if sig == self.sig_main:
+            return
+        self.sig_main = sig
+        self.syncing = True
+        self.power_sw.set_active(bool(self.powered))
+        self.power_sw.set_sensitive(self.powered is not None)
+        self.syncing = False
+        self.power_icon.set_label("󰂯" if self.powered else "󰂲")
+        self.on_rev.set_reveal_child(bool(self.powered))
+        self.off_rev.set_reveal_child(not self.powered)
+
+        clear(self.conn_box)
+        clear(self.paired_box)
+        conn = sorted((d for d in paired if d["connected"]), key=lambda d: d["name"].lower())
+        rest = sorted((d for d in paired if not d["connected"]), key=lambda d: d["name"].lower())
+        for box, items, active in ((self.conn_box, conn, True), (self.paired_box, rest, False)):
+            for d in items:
+                meta = "󰂭 заблок." if d["blocked"] else battery_meta(d["battery"])
+                box.append(yp.row_button(KINDS[d["kind"]][0], d["name"], lambda *_, m=d["mac"]: self.open_device(m),
+                                         active=active, meta=meta))
+        if not conn:
+            self.conn_box.append(yp.hint("Нет подключённых устройств"))
+        if not rest:
+            self.paired_box.append(yp.hint("Больше сопряжённых устройств нет" if conn else "Нет сопряжённых устройств"))
+
+        clear(self.adapter_box)
+        if self.ad:
+            b = yp.row_button("󰂳", "Адаптер", lambda *_: self.open_adapter(), meta=self.ad.get("Alias", ""))
+            b.set_hexpand(True)
+            self.adapter_box.append(b)
+
+    def on_power(self, state):
+        if self.syncing or state == bool(self.powered):
+            return
+        self.act("Включаю…" if state else "Выключаю…", lambda: bt("power", "on" if state else "off"),
+                 fake=self.fake_adapter(Powered=state),
+                 ok_text="Bluetooth включён" if state else "Bluetooth выключен",
+                 on_fail=lambda: self.sync_switch(self.power_sw, bool(self.powered)))
+
+    def sync_switch(self, sw, value):
+        self.syncing = True
+        sw.set_active(value)
+        self.syncing = False
+
+    def open_settings(self, *_):
+        yp.spawn(self.settings_cmd)
+        self.app.quit()
+
+    # ---------- адаптер ----------
+    def open_adapter(self):
+        if not self.ad:
+            return
+        page = dict(kind="adapter", sig=None)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, css_classes=["yp-bt-card"])
+        page["rename"] = Rename("Имя", self.rename_adapter)
+        card.append(page["rename"].row)
+        card.append(yp.info_row("MAC", self.ad.get("Address", ""), copy=True))
+        ver = self.ad.get("Version")
+        card.append(yp.info_row("Bluetooth", HCI_VER.get(ver, f"HCI {ver}" if ver is not None else "")))
+        man = self.ad.get("Manufacturer")
+        card.append(yp.info_row("Чип", VENDORS.get(man, f"код {man}" if man is not None else "")))
+        box.append(card)
+        box.append(page["rename"].rev)
+
+        row, page["power"] = yp.toggle_row("󰐥", "Питание", bool(self.powered), self.on_power_adapter)
+        box.append(row)
+
+        box.append(yp.section("ВИДИМОСТЬ"))
+        row, page["disc"] = yp.toggle_row("󰈈", "Видим для других", bool(self.ad.get("Discoverable")),
+                                          lambda st: self.set_adapter(page, "disc", st))
+        box.append(row)
+        page["timeout"] = yp.Segmented([(180, "󰔛", "3 минуты", True), (600, "󰔛", "10 минут", True),
+                                        (0, "󰈈", "Всегда", True)],
+                                       self.ad.get("DiscoverableTimeout", 180), self.set_disc_timeout)
+        box.append(page["timeout"])
+        page["disc_hint"] = yp.hint("")
+        box.append(page["disc_hint"])
+
+        box.append(yp.section("СОПРЯЖЕНИЕ"))
+        row, page["pair"] = yp.toggle_row("󰌹", "Разрешить сопряжение", bool(self.ad.get("Pairable")),
+                                          lambda st: self.set_adapter(page, "pair", st))
+        box.append(row)
+        box.append(yp.hint("Если выключить, новые устройства не смогут сопрячься с ноутбуком. "
+                           "Уже сопряжённые работают как прежде."))
+        self.push(page, "󰂳  Адаптер", box)
+        self.fill_adapter(page)
+
+    def fill_adapter(self, page):
+        a = self.ad
+        sig = (a.get("Alias"), self.powered, a.get("Discoverable"), a.get("DiscoverableTimeout"), a.get("Pairable"))
+        if sig == page["sig"]:
+            return
+        page["sig"] = sig
+        page["rename"].set(a.get("Alias", ""))
+        self.syncing = True
+        page["power"].set_active(bool(self.powered))
+        page["disc"].set_active(bool(a.get("Discoverable")))
+        page["disc"].set_sensitive(bool(self.powered))
+        page["pair"].set_active(bool(a.get("Pairable")))
+        page["pair"].set_sensitive(bool(self.powered))
+        page["timeout"].set_active(a.get("DiscoverableTimeout", 180))
+        self.syncing = False
+        t = a.get("DiscoverableTimeout", 180)
+        when = "пока не выключите" if not t else f"ещё {t // 60} мин после включения"
+        page["disc_hint"].set_label(f"Устройства рядом видят «{a.get('Alias', '')}» {when}." if a.get("Discoverable")
+                                    else f"Телефоны и ноутбуки рядом не видят «{a.get('Alias', '')}». "
+                                         "Включите, чтобы подключиться к ноутбуку с другого устройства.")
+
+    def on_power_adapter(self, state):
+        self.on_power(state)
+
+    def set_adapter(self, page, what, state):
+        if self.syncing:
+            return
+        word = "on" if state else "off"
+        if what == "disc":
+            self.act("Включаю видимость…" if state else "Скрываю…", lambda: bt("discoverable", word),
+                     fake=self.fake_adapter(Discoverable=state),
+                     ok_text="Ноутбук виден другим" if state else "Ноутбук скрыт",
+                     on_fail=lambda: self.sync_switch(page["disc"], bool(self.ad.get("Discoverable"))))
+        else:
+            self.act("Меняю…", lambda: bt("pairable", word), fake=self.fake_adapter(Pairable=state),
+                     ok_text="Сопряжение разрешено" if state else "Сопряжение запрещено",
+                     on_fail=lambda: self.sync_switch(page["pair"], bool(self.ad.get("Pairable"))))
+
+    def set_disc_timeout(self, sec):
+        if self.syncing or sec == self.ad.get("DiscoverableTimeout"):
+            return
+        self.act("Меняю время видимости…", lambda: bt("discoverable-timeout", str(sec)),
+                 fake=self.fake_adapter(DiscoverableTimeout=sec),
+                 ok_text="Виден всегда" if not sec else f"Виден {sec // 60} мин после включения")
+
+    def rename_adapter(self, name):
+        self.act("Переименовываю…", lambda: set_prop(self.adapter, "org.bluez.Adapter1", "Alias", "s", name),
+                 fake=self.fake_adapter(Alias=name), ok_text=f"Теперь ноутбук называется «{name}»")
+
+    # ---------- страница устройства ----------
+    @staticmethod
+    def status_text(d):
+        parts = ["подключено" if d["connected"] else "не подключено"]
+        if d["paired"]:
+            parts.append("сопряжено")
+        if d["trusted"]:
+            parts.append("доверенное")
+        if d["blocked"]:
+            parts.append("заблокировано")
+        s = " · ".join(parts)
+        return s[0].upper() + s[1:]
+
+    @staticmethod
+    def is_audio(d):
+        return d["kind"] in ("headphones", "speaker") or bool({short_uuid(u) for u in d["uuids"]} & AUDIO_UUIDS)
+
+    def open_device(self, mac):
+        d = self.devs.get(mac)
+        if not d:
+            return
+        page = dict(kind="device", mac=mac, busy=False, sig=None, card=None, card_sig=None)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, css_classes=["yp-bt-card"])
+        page["rename"] = Rename("Имя", lambda name: self.rename_device(page, name))
+        card.append(page["rename"].row)
+        card.append(yp.info_row("MAC", d["mac"], copy=True))
+        page["r_type"] = yp.info_row("Тип", "")
+        page["r_state"] = yp.info_row("Статус", "")
+        page["r_batt"] = yp.info_row("Батарея", "")
+        for w in (page["r_type"], page["r_state"], page["r_batt"]):
+            card.append(w)
+        box.append(card)
+        box.append(page["rename"].rev)
+
+        spin = yp.spinner_row("")
+        page["spin_lbl"] = spin.get_last_child()
+        page["spin"] = yp.revealer(spin)
+        box.append(page["spin"])
+        page["acts"] = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.append(page["acts"])
+        if aap.is_airpods(d["modalias"], d["uuids"]):
+            box.append(self.build_airpods(page, d))
+
+        # звук: профиль A2DP / HFP (только у подключённых аудиоустройств)
+        audio = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        audio.append(yp.section("ЗВУК"))
+        page["seg"] = yp.Segmented([("a2dp", "󰋋", "Высокое качество", True),
+                                    ("hfp", "󰋎", "Гарнитура + микр.", True)], "a2dp",
+                                   lambda k: self.set_profile(page, k))
+        audio.append(page["seg"])
+        audio.append(yp.hint("Высокое качество (A2DP) — стерео без микрофона. "
+                             "Гарнитура (HFP) — работает микрофон, звук проще."))
+        audio.set_visible(False)             # большой блок — без Revealer (меньше ресайзов окна)
+        page["audio"] = audio
+        box.append(audio)
+
+        if SEND_CMD:
+            page["send"] = yp.action_button("󰈔  Отправить файл…", lambda *_: self.send_file(page), "plain")
+            box.append(page["send"])
+
+        row, page["trust"] = yp.toggle_row("󰒘", "Доверять · автоподключение", d["trusted"],
+                                           lambda st: self.set_trust(page, st))
+        box.append(row)
+        row, page["block"] = yp.toggle_row("󰂭", "Заблокировать", d["blocked"],
+                                           lambda st: self.set_block(page, st))
+        box.append(row)
+
+        page["svc_box"] = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.append(page["svc_box"])
+
+        page["del"] = yp.action_button("󰆴  Удалить устройство", lambda *_: self.ask_remove(page, True), "danger")
+        box.append(page["del"])
+        page["ask"] = yp.revealer(yp.confirm_box(
+            f"Удалить «{d['name']}»? Чтобы подключить его снова, придётся заново выполнить сопряжение.",
+            lambda: self.remove(page), on_no=lambda: self.ask_remove(page, False)))
+        box.append(page["ask"])
+        self.fill_device(page)
+        self.push(page, f"{KINDS[d['kind']][0]}  {d['name']}", box)
+
+    def fill_device(self, page):
+        d = self.devs.get(page["mac"])
+        if d is None:                                 # устройство удалили (здесь или в другой программе)
+            if not page["busy"] and self.pages and self.pages[-1] is page:
+                GLib.idle_add(lambda: self.pop() or False)
+            return
+        sig = (d["name"], d["connected"], d["paired"], d["trusted"], d["blocked"], d["battery"],
+               tuple(d["uuids"]), self.powered, page["busy"])
+        if sig == page["sig"]:
+            return
+        page["sig"] = sig
+        busy = page["busy"]
+        page["rename"].set(d["name"])
+        page["r_type"].value.set_label(f"{KINDS[d['kind']][0]}  {KINDS[d['kind']][1]}")
+        page["r_state"].value.set_label("Подключено" if d["connected"] else "Не подключено")
+        page["r_batt"].value.set_label(battery_meta(d["battery"]))
+        page["r_batt"].set_visible(d["battery"] is not None)
+
+        acts = page["acts"]
+        clear(acts)
+        if d["connected"]:
+            b = yp.action_button("󰂲  Отключить", lambda *_: self.do_connect(page, False), "plain")
+        else:
+            b = yp.action_button("󰂱  Подключить", lambda *_: self.do_connect(page, True), "primary")
+        b.set_sensitive(bool(self.powered) and not busy and not d["blocked"])
+        acts.append(b)
+        if d["blocked"]:
+            acts.append(yp.hint("Устройство заблокировано — снимите блокировку, чтобы подключить."))
+
+        self.syncing = True
+        page["trust"].set_active(d["trusted"])
+        page["block"].set_active(d["blocked"])
+        self.syncing = False
+        for w in (page["trust"], page["block"], page["del"]):
+            w.set_sensitive(not busy)
+        if "send" in page:
+            obex = bool({short_uuid(u) for u in d["uuids"]} & OBEX_UUIDS) or d["kind"] in ("phone", "computer")
+            page["send"].set_visible(obex)
+            page["send"].set_sensitive(not busy and bool(self.powered))
+
+        svc_box = page["svc_box"]
+        names = services(d["uuids"])
+        if names != page.get("svc"):
+            page["svc"] = names
+            clear(svc_box)
+        if names and not svc_box.get_first_child():
+            svc_box.append(yp.section("ВОЗМОЖНОСТИ"))
+            svc_box.append(yp.hint(" · ".join(n.replace(" ", "\u00a0") for n in names)))   # название не рвётся
+
+        if "ap" in page:
+            self.airpods_session(page, d["connected"] and bool(self.powered))
+        if d["connected"] and self.is_audio(d):
+            self.load_card(page)
+        else:
+            page["audio"].set_visible(False)
+
+    # ---------- AirPods (AAP) ----------
+    AP_MODES = [(1, "󰖁", "Выкл", "Выключено"), (2, "󰋋", "Шумоподав.", "Шумоподавление"),
+                (3, "󰈈", "Прозрачн.", "Прозрачность"), (4, "󰁨", "Адаптив.", "Адаптивный")]
+    EAR = {0: "в ухе", 1: "вне уха", 2: "в кейсе"}
+
+    def build_airpods(self, page, d):
+        """Блок «AIRPODS». Строится один раз; дальше меняются только подписи (без ресайзов окна)."""
+        ap = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, visible=False)
+        model = aap.model_name(d["modalias"])
+        ap.append(yp.section("AIRPODS" + (f" · {model.upper()}" if model else "")))
+
+        st = Gtk.Box(spacing=10, css_classes=["yp-spin-row"])
+        page["ap_spin"] = Gtk.Spinner(spinning=True)
+        page["ap_msg"] = label("", ["yp-hint"], wrap=True)
+        st.append(page["ap_spin"])
+        st.append(page["ap_msg"])
+        page["ap_status"] = st
+        ap.append(st)
+
+        tiles = Gtk.Box(spacing=8, homogeneous=True, visible=False)
+        page["ap_tiles_box"] = tiles
+        page["ap_tiles"] = {}
+        for key, icon, name in (("left", "󰋋", "Левый"), ("right", "󰋋", "Правый"),
+                                ("single", "󰋋", "Наушники"), ("case", "󰏗", "Кейс")):
+            t = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, css_classes=["yp-bt-card", "yp-bt-tile"],
+                        visible=False)
+            t.append(label(f"{icon} {name}", ["yp-bt-tile-name"], xalign=0.5))
+            val = label("—", ["yp-bt-tile-val"], xalign=0.5)
+            t.append(val)
+            tiles.append(t)
+            page["ap_tiles"][key] = (t, val)
+        ap.append(tiles)
+        page["ap_ear"] = yp.hint("")
+        page["ap_ear"].set_visible(False)
+        ap.append(page["ap_ear"])
+
+        page["ap_modes"] = yp.Segmented([(v, icon, short, True) for v, icon, short, _ in self.AP_MODES], None,
+                                        lambda v: self.set_ap_mode(page, v))
+        page["ap_modes"].add_css_class("yp-bt-ap-modes")
+        page["ap_modes"].set_visible(False)
+        ap.append(page["ap_modes"])
+        page["ap_note"] = yp.hint("")
+        page["ap_note"].set_visible(False)
+        ap.append(page["ap_note"])
+        row, page["ap_conv"] = yp.toggle_row("󰗋", "Восприятие разговора", False,
+                                             lambda st: self.set_ap_conv(page, st))
+        row.set_visible(False)
+        page["ap_conv_row"] = row
+        ap.append(row)
+        page["ap"] = ap
+        page["aap"] = None
+        page["ap_snap"] = None
+        return ap
+
+    def airpods_session(self, page, on):
+        """Открыть/закрыть фоновую AAP-сессию. Окно никогда не ждёт её."""
+        sess = page.get("aap")
+        if on and sess is None:
+            demo = DRY and os.environ.get("YP_BT_AAP_DEMO", "")   # "1" — имитация наушников, "busy" — занято
+            sess = aap.Session(page["mac"], lambda snap: self.ap_post(page, snap), dry=DRY, demo=demo)
+            page["aap"] = sess
+            page["ap"].set_visible(True)
+            sess.start()
+        elif not on and sess is not None:
+            sess.stop()
+            page["aap"] = None
+            page["ap"].set_visible(False)
+
+    def ap_post(self, page, snap):
+        """Из потока сессии: запомнить последний снимок и обновить окно один раз (а не на каждый пакет)."""
+        first = page["ap_snap"] is None
+        page["ap_snap"] = snap
+        if first or not page.get("ap_idle"):
+            page["ap_idle"] = True
+            GLib.idle_add(self.ap_update, page)
+
+    def ap_update(self, page):
+        page["ap_idle"] = False
+        snap = page["ap_snap"]
+        if snap is None or self.closed or page.get("aap") is None:
+            return False
+        status, batt, settings = snap["status"], snap["battery"], snap["settings"]
+        waiting = status == "ok" and not batt and not settings
+        show_status = status != "ok" or waiting
+        page["ap_status"].set_visible(show_status)
+        page["ap_spin"].set_visible(status == "connecting" or waiting)
+        page["ap_msg"].set_label({"connecting": "Подключаюсь к наушникам…"}.get(status, snap["message"])
+                                 if not waiting else "Жду данные от наушников…")
+        if status == "busy" and self.settings_cmd:
+            page["ap_msg"].set_label(snap["message"])
+
+        # батарея
+        page["ap_tiles_box"].set_visible(bool(batt))
+        for key, (tile, val) in page["ap_tiles"].items():
+            r = batt.get(key)
+            tile.set_visible(r is not None)
+            if r is None:
+                continue
+            if not r["available"]:
+                text, cls = "—", "off"
+            elif r["status"] == "charging":
+                text, cls = f"󰂄 {r['level']}%", "charging"
+            else:
+                text, cls = f"{r['level']}%", "low" if r["level"] <= 20 else ""
+            if val.get_label() != text:
+                val.set_label(text)
+            for c in ("off", "charging", "low"):
+                (val.add_css_class if c == cls else val.remove_css_class)(c)
+
+        # ношение
+        ear = snap["ear"]
+        if ear:
+            a, b = (self.EAR.get(ear.get(k), "?") for k in ("primary", "secondary"))
+            page["ap_ear"].set_label(f"Наушники: {a}" if a == b else f"Наушники: {a} · {b}")
+        page["ap_ear"].set_visible(bool(ear))
+
+        # режим шумоподавления
+        has_mode = aap.S_MODE in settings
+        page["ap_modes"].set_visible(has_mode)
+        page["ap_note"].set_visible(has_mode)
+        if has_mode:
+            mode = settings[aap.S_MODE][0]
+            for v, btn in page["ap_modes"].btns.items():
+                btn.set_sensitive(v in snap["allowed"])
+            page["ap_modes"].set_active(mode)
+            name = next((full for v, _i, _s, full in self.AP_MODES if v == mode), "?")
+            note = f"Режим: {name}"
+            if aap.S_MODE in snap["pending"]:
+                note += " · жду подтверждения…"
+            elif aap.S_MODE in snap["stale"]:
+                note += " · наушники не подтвердили (часто применяется после переподключения)"
+            page["ap_note"].set_label(note)
+
+        # восприятие разговора
+        has_conv = aap.S_CONVERSATION in settings
+        page["ap_conv_row"].set_visible(has_conv)
+        if has_conv:
+            self.sync_switch(page["ap_conv"], settings[aap.S_CONVERSATION][0] == aap.ON)
+        return False
+
+    def set_ap_mode(self, page, v):
+        sess = page.get("aap")
+        if not sess:
+            return
+        sess.change(aap.S_MODE, v)
+        name = next((full for m, _i, _s, full in self.AP_MODES if m == v), "")
+        self.toast(f"Режим: {name}", hold=2.5)
+
+    def set_ap_conv(self, page, state):
+        sess = page.get("aap")
+        if self.syncing or not sess:
+            return
+        sess.change(aap.S_CONVERSATION, aap.ON if state else aap.OFF)
+        self.toast("Восприятие разговора: " + ("вкл" if state else "выкл"), hold=2.5)
+
+    def set_busy(self, page, text):
+        page["busy"] = bool(text)
+        if text:
+            page["spin_lbl"].set_label(text)
+            self.toast(text)
+        page["spin"].set_reveal_child(bool(text))
+        page["sig"] = None
+        fill = {"device": self.fill_device}.get(page["kind"])
+        if fill:
+            fill(page)
+
+    def do_connect(self, page, on):
+        mac = page["mac"]
+        if on:
+            self.act("Подключаю…", lambda: bt("connect", mac), fake=self.fake_dev(mac, connected=True),
+                     ok_text="Подключено", page=page)
+        else:
+            self.act("Отключаю…", lambda: bt("disconnect", mac), fake=self.fake_dev(mac, connected=False),
+                     ok_text="Отключено", page=page)
+
+    def set_trust(self, page, state):
+        if self.syncing or page["busy"]:
+            return
+        self.act("Меняю доверие…", lambda: bt("trust" if state else "untrust", page["mac"]),
+                 fake=self.fake_dev(page["mac"], trusted=state), page=page,
+                 ok_text="Доверие включено" if state else "Доверие снято")
+
+    def set_block(self, page, state):
+        if self.syncing or page["busy"]:
+            return
+        fake = dict(blocked=state, connected=False) if state else dict(blocked=False)
+        self.act("Блокирую…" if state else "Снимаю блокировку…", lambda: bt("block" if state else "unblock", page["mac"]),
+                 fake=self.fake_dev(page["mac"], **fake), page=page,
+                 ok_text="Заблокировано" if state else "Блокировка снята")
+
+    def rename_device(self, page, name):
+        d = self.devs.get(page["mac"])
+        if not d:
+            return
+        self.act("Переименовываю…", lambda: set_prop(d["path"], "org.bluez.Device1", "Alias", "s", name),
+                 fake=self.fake_dev(page["mac"], name=name), page=page, ok_text="Переименовано",
+                 after=lambda: self.panel.title_l.set_label(f"{KINDS[d['kind']][0]}  {name}"))
+
+    def ask_remove(self, page, show):
+        page["ask"].set_reveal_child(show)
+        page["del"].set_visible(not show)
+
+    def remove(self, page):
+        self.ask_remove(page, False)
+        self.act("Удаляю…", lambda: bt("remove", page["mac"]), fake=self.fake_dev(page["mac"], removed=True),
+                 page=page, ok_text="Устройство удалено",
+                 after=lambda: self.pages and self.pages[-1] is page and self.pop())
+
+    # профиль звука
+    def load_card(self, page):
+        mac = page["mac"]
+
+        def work():
+            card = audio_card(mac)
+            if card is None and DRY:                 # имитация карты подключённых наушников
+                card = (f"bluez_card.{mac.replace(':', '_')}",
+                        {"a2dp-sink": True, "headset-head-unit": True, "off": True},
+                        self.fake_card.get(mac, "a2dp-sink"))
+            GLib.idle_add(show, card)
+
+        def show(card):
+            if not self.pages or self.pages[-1] is not page:
+                return False
+            page["card"] = card
+            if not card:
+                page["audio"].set_visible(False)
+                return False
+            _name, profs, active = card
+            for key, btn in page["seg"].btns.items():
+                btn.set_sensitive(any(profile_group(p) == key and av for p, av in profs.items()))
+            page["seg"].set_active(profile_group(active) or None)
+            page["audio"].set_visible(True)
+            return False
+        threading.Thread(target=work, daemon=True).start()
+
+    def set_profile(self, page, group):
+        card = page.get("card")
+        if not card:
+            return
+        name, profs, active = card
+        prof = best_profile(profs, group, active)
+        if not prof or prof == active:
+            return
+        mac = page["mac"]
+        text = "Высокое качество (A2DP)" if group == "a2dp" else "Гарнитура с микрофоном (HFP)"
+
+        def fn():
+            ok, out = yp.do("pactl", "set-card-profile", name, prof)
+            return (True, "") if ok else (False, out or "Не удалось сменить профиль")
+        self.act("Меняю профиль звука…", fn, fake=lambda: self.fake_card.__setitem__(mac, prof),
+                 ok_text=text, page=page, after=lambda: self.load_card(page),
+                 on_fail=lambda: self.load_card(page))
+
+    # отправка файла
+    def send_file(self, page):
+        mac = page["mac"]
+        dlg = Gtk.FileDialog(title="Отправить файл по Bluetooth", modal=True)
+        self.panel.busy += 1                  # окно выбора — далеко от меню: не закрываться
+        yp.Layer.set_keyboard_mode(self.panel, yp.Layer.KeyboardMode.NONE)   # клавиатура — диалогу
+
+        def done(d, res):
+            self.panel.busy = max(self.panel.busy - 1, 0)
+            mode = {"none": yp.Layer.KeyboardMode.NONE, "ondemand": yp.Layer.KeyboardMode.ON_DEMAND}.get(
+                os.environ.get("YP_KEYBOARD", ""), yp.Layer.KeyboardMode.EXCLUSIVE)
+            yp.Layer.set_keyboard_mode(self.panel, mode)
+            try:
+                f = d.open_finish(res)
+            except GLib.Error:
+                return                        # выбор отменили
+            path = f.get_path() if f else None
+            if not path:
+                return
+            args = ["--device", mac, path] if SEND_CMD == "bluetooth-sendto" else [f"--device={mac}", path]
+            yp.do(SEND_CMD, *args, background=True)
+            self.toast(f"Отправляю «{os.path.basename(path)}»…", hold=4)
+        dlg.open(self.panel, None, done)
+
+    # ---------- добавление ----------
+    def open_add(self):
+        page = dict(kind="add", rows={}, left=SCAN_S, seen={})
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.append(yp.hint("Переведите устройство в режим сопряжения — оно появится в списке."))
+        spin = yp.spinner_row("Ищу устройства…")
+        page["spin_lbl"] = spin.get_last_child()
+        page["spin"] = yp.revealer(spin)
+        box.append(page["spin"])
+        box.append(yp.section("НАЙДЕНЫ"))
+        page["list"] = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        box.append(page["list"])
+        page["empty"] = yp.hint("Пока ничего не найдено")
+        box.append(page["empty"])
+        page["again"] = yp.action_button("󰑐  Сканировать ещё", lambda *_: self.start_scan(page), "plain")
+        box.append(page["again"])
+        if self.settings_cmd:
+            box.append(link_button("Расширенные настройки…", self.open_settings))
+        self.push(page, "󰐕  Добавить", box)
+        self.fill_add(page)
+        self.start_scan(page)
+
+    def scan_running(self):
+        return self.scan_proc is not None and self.scan_proc.poll() is None
+
+    def start_scan(self, page):
+        if not self.powered:
+            self.toast("Bluetooth выключен", error=True, hold=4)
+            return
+        self.stop_scan()
+        page["left"] = SCAN_S
+        try:
+            proc = subprocess.Popen(["bluetoothctl", "--timeout", str(SCAN_S), "scan", "on"], env=yp.CHILD_ENV,
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as e:
+            self.toast(str(e), error=True, hold=5)
+            return
+        self.scan_proc = proc
+        page["again"].set_sensitive(False)
+        page["spin"].set_reveal_child(True)
+
+        def wait():
+            proc.wait()
+            GLib.idle_add(self.scan_finished, page, proc)
+        threading.Thread(target=wait, daemon=True).start()
+
+        def tick():
+            if self.scan_proc is not proc or proc.poll() is not None:
+                return False
+            page["left"] = max(page["left"] - 1, 0)
+            page["spin_lbl"].set_label(f"Ищу устройства… {page['left']} с")
+            self.show_default_sub()
+            return True
+        page["spin_lbl"].set_label(f"Ищу устройства… {SCAN_S} с")
+        GLib.timeout_add_seconds(1, tick)
+        self.show_default_sub()
+
+    def scan_finished(self, page, proc):
+        if self.scan_proc is proc:
+            self.scan_proc = None
+        if self.closed:
+            return False
+        page["spin"].set_reveal_child(False)
+        page["again"].set_sensitive(True)
+        self.fill_add(page)
+        self.show_default_sub()
+        return False
+
+    def stop_scan(self):
+        p, self.scan_proc = self.scan_proc, None
+        if p and p.poll() is None:
+            p.terminate()
+            try:
+                p.wait(1.5)
+            except subprocess.TimeoutExpired:
+                p.kill()
+
+    def fill_add(self, page):
+        """Список найденных: новые строки добавляются, у старых меняется только подпись RSSI —
+        без пересоздания и анимаций (каждый кадр анимации = ресайз окна и пересчёт блюра)."""
+        seen = page["seen"]
+        found = sorted((d for d in self.devs.values() if not d["paired"] and d["has_name"]),
+                       key=lambda d: (seen.get(d["mac"], d["rssi"]) is None,
+                                      -(seen.get(d["mac"], d["rssi"]) or 0), d["name"].lower()))
+        rows, lst = page["rows"], page["list"]
+        macs = [d["mac"] for d in found]
+        for mac in [m for m in rows if m not in macs]:
+            lst.remove(rows.pop(mac)["w"])
+        for d in found:
+            if d["rssi"] is not None:                    # после поиска bluez стирает RSSI — помним последний
+                seen[d["mac"]] = d["rssi"]
+            rssi = seen.get(d["mac"])
+            meta = f"{rssi} dBm" if rssi is not None else ""
+            r = rows.get(d["mac"])
+            if r and r["key"] == (d["name"], d["kind"]):
+                if r["meta"].get_label() != meta:
+                    r["meta"].set_label(meta)               # только подпись, без перестройки
+                continue
+            btn = yp.row_button(KINDS[d["kind"]][0], d["name"], lambda *_, m=d["mac"]: self.open_pair(m),
+                                meta=meta or " ")
+            btn.set_hexpand(True)
+            meta_l = btn.get_child().get_last_child()
+            meta_l.set_label(meta)
+            w = Gtk.Box(margin_bottom=6)
+            w.append(btn)
+            if r:
+                lst.remove(r["w"])
+            lst.append(w)
+            rows[d["mac"]] = {"w": w, "key": (d["name"], d["kind"]), "meta": meta_l}
+        order = [rows[m]["w"] for m in macs]
+        cur, c = [], lst.get_first_child()
+        while c:
+            cur.append(c)
+            c = c.get_next_sibling()
+        if cur != order:                                  # переставлять только если порядок изменился
+            prev = None
+            for w in order:
+                lst.reorder_child_after(w, prev)
+                prev = w
+        page["empty"].set_visible(not found)
+
+    # ---------- сопряжение ----------
+    def open_pair(self, mac):
+        d = self.devs.get(mac)
+        if not d:
+            return
+        self.stop_scan()
+        page = dict(kind="pair", mac=mac, name=d["name"], steps=[])
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        steps = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, css_classes=["yp-bt-steps"])
+        for _key, title, *_r in Pairer.STEPS:
+            st = yp.Step(title)
+            steps.append(st)
+            page["steps"].append(st)
+        box.append(steps)
+        page["ask_box"] = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, css_classes=["yp-bt-ask"])
+        page["ask"] = yp.revealer(page["ask_box"])
+        box.append(page["ask"])
+        page["res_box"] = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        page["res"] = yp.revealer(page["res_box"])
+        box.append(page["res"])
+        self.push(page, f"{KINDS[d['kind']][0]}  {d['name']}", box)
+        self.start_pair(page)
+
+    def start_pair(self, page):
+        for st in page["steps"]:
+            st.set_state("wait")
+        page["res"].set_reveal_child(False)
+        page["ask"].set_reveal_child(False)
+        self.ui_page = page
+        self.pairer = Pairer(page["mac"], self)
+        self.panel.busy += 1          # сопряжение ждёт человека — не закрываться от ухода мыши
+        self.pairer.start()
+
+    # колбэки Pairer (в главном потоке)
+    def pair_step(self, i, state):
+        page = self.ui_page
+        if not self.pages or self.pages[-1] is not page:
+            return False
+        page["steps"][i].set_state(state)
+        if state == "run":
+            self.toast(f"{Pairer.STEPS[i][1]}…")
+        return False
+
+    def pair_agent(self, kind, code):
+        page = self.ui_page
+        box = page["ask_box"]
+        if kind is None:
+            page["ask"].set_reveal_child(False)
+            return False
+        clear(box)
+        pairer = self.pairer
+
+        def answer(text):
+            page["ask"].set_reveal_child(False)
+            if pairer:
+                pairer.reply(text)
+
+        if kind == "confirm":
+            box.append(label("Проверьте, что на устройстве показан такой же код:", wrap=True))
+            box.append(yp.code_display(code))
+            box.append(hbox(yp.action_button("Отклонить", lambda *_: answer("no"), "plain"),
+                            yp.action_button("Подтвердить", lambda *_: answer("yes"), "primary")))
+            self.toast("Подтвердите код сопряжения")
+        elif kind in ("pin", "passkey"):
+            box.append(label("Введите PIN-код устройства (часто 0000 или 1234):" if kind == "pin" else
+                             "Введите код, показанный на устройстве:", wrap=True))
+            entry = Gtk.Entry(placeholder_text="Код", css_classes=["yp-entry"], hexpand=True)
+            if kind == "passkey":
+                entry.set_input_purpose(Gtk.InputPurpose.DIGITS)
+            entry.connect("activate", lambda e: answer(e.get_text().strip() or "0000"))
+            box.append(entry)
+            box.append(yp.action_button("Отправить", lambda *_: answer(entry.get_text().strip() or "0000")))
+            GLib.idle_add(lambda: entry.grab_focus() and False)
+            self.toast("Нужен код сопряжения")
+        else:   # display
+            box.append(label("Наберите этот код на устройстве и нажмите Enter:", wrap=True))
+            box.append(yp.code_display(code))
+            self.toast("Наберите код на устройстве")
+        page["ask"].set_reveal_child(True)
+        return False
+
+    def pair_done(self, ok, msg):
+        page = self.ui_page
+        self.pairer = None
+        self.panel.busy = max(self.panel.busy - 1, 0)
+        if not self.pages or self.pages[-1] is not page:
+            return False
+        page["ask"].set_reveal_child(False)
+        box = page["res_box"]
+        clear(box)
+        if ok:
+            if DRY:
+                self.fake.setdefault(page["mac"], {}).update(paired=True, trusted=True, connected=True)
+            box.append(label(f"󰄬  «{page['name']}» подключено", ["yp-bt-ok"], wrap=True))
+            box.append(yp.action_button("К устройствам", lambda *_: self.pop_to_main()))
+            self.toast("Готово", hold=3)
+        else:
+            box.append(label(msg or "Не получилось", ["yp-bt-err"], wrap=True))
+            btns = [yp.action_button("󰑐  Повторить", lambda *_: self.start_pair(page), "primary")]
+            if self.settings_cmd:
+                btns.append(yp.action_button("󰒓  Расширенные", self.open_settings, "plain"))
+            box.append(hbox(*btns))
+            self.toast(msg or "Не получилось", error=True, hold=8)
+        page["res"].set_reveal_child(True)
+        self.refresh()
+        return False
+
+    # ---------- закрытие ----------
+    def cleanup(self):
+        if self.closed:
+            return
+        self.closed = True
+        self.stop_scan()
+        for page in self.pages:
+            if page.get("aap"):
+                page["aap"].stop()
+        if self.pairer:
+            self.pairer.cancel()
+
+
+if __name__ == "__main__":
+    app = yp.PanelApp("org.yumi.panel.bluetooth", "Bluetooth", "󰂯", lambda panel, body: Bluetooth(panel, body))
+    sys.exit(app.run(sys.argv))

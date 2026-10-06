@@ -1,0 +1,77 @@
+/**
+ * rofi-yumi wide — широкий макет лаунчера (вместо HyDE style_1/4/6/8/9/11/12):
+ * слева картинка обоев с заголовком, столбик кнопок режимов, справа поиск и список.
+ * Оформление — из yumi.rasi (цвета, таблетки, скругления). Размеры в em,
+ * шрифт под монитор задаёт обёртка ~/.local/bin/rofi. Откат: rofi-yumi-uninstall.
+ */
+@import "~/.config/rofi/yumi/yumi.rasi"
+
+configuration {
+    modi:                 "drun,filebrowser,window";   // без run: тысячи служебных команд из PATH не нужны
+    display-drun:         "󰀻";
+    display-filebrowser:  "󰉋";
+    display-window:       "󰖯";
+    display-run:          "󰆍";
+}
+
+window {
+    width:                44em;
+    height:               25em;
+}
+
+mainbox {
+    orientation:          horizontal;
+    children:             [ "wallpane", "mode-switcher", "body" ];
+}
+
+/* картинка обоев слева, заголовок внизу на затемнении */
+wallpane {
+    orientation:          vertical;
+    expand:               false;
+    width:                17em;
+    background-image:     url("~/.cache/hyde/wall.thmb", height);
+    border-radius:        1.45em 0 0 1.45em;
+    children:             [ "shade" ];
+}
+shade {
+    expand:               true;
+    padding:              0 1.05em 1em 1.05em;
+    border-radius:        1.45em 0 0 1.45em;
+    children:             [ "wallspacer", "textbox-title", "textbox-sub" ];
+}
+wallspacer { expand: true; }
+
+/* столбик кнопок режимов */
+mode-switcher {
+    orientation:          vertical;
+    expand:               false;
+    width:                3.4em;
+    padding:              1em 0.55em;
+    spacing:              0.45em;
+}
+button {
+    expand:               false;
+    padding:              0.55em 0;
+    border:               1px;
+    border-radius:        0.85em;
+    border-color:         @yr-none;
+    background-color:     @yr-btn;
+    text-color:           @yr-fg2;
+    horizontal-align:     0.5;
+    vertical-align:       0.5;
+    cursor:               pointer;
+}
+button selected {
+    background-color:     @yr-sel;
+    border-color:         @yr-sel-br;
+    text-color:           @yr-accent;
+}
+
+body {
+    expand:               true;
+    padding:              1em 1em 1em 0.2em;
+}
+listview {
+    lines:                8;
+    expand:               true;
+}

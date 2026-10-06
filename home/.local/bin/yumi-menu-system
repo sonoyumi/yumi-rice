@@ -1,0 +1,663 @@
+#!/usr/bin/env python3
+"""yumi-menu-system — меню «Система» на GTK (каркас yumi-panel), открывается по значку Arch в Waybar.
+  yumi-menu-system [--bar|--center]   открыть / закрыть
+  yumi-menu-system --close            закрыть открытое меню
+Разделы:
+  ОБНОВЛЕНИЯ   — число, как у пилюли custom/updates (HyDE system.update: кеш $XDG_RUNTIME_DIR/hyde/update_info.json,
+                 pacman = checkupdates, AUR = paru -Qua, flatpak); список пакетов — на подстранице;
+                 «Обновить систему» — kitty с интерактивным system.update.py (сам спросит «Apply updates now?»).
+  СНИМКИ BTRFS — snapper (конфиги root и home, их настроил setup-snapshots); «Сделать снимок сейчас» — оба конфига.
+  ОФОРМЛЕНИЕ   — обои, анимации (SUPER+SHIFT+Y), экран блокировки (SUPER+SHIFT+U), перезапуск Waybar, yumi-accent.
+  СИСТЕМА      — диск /, память, батарея, температура; btop, Arch Wiki, подсказка клавиш HyDE.
+
+Отладка:
+  YP_DRYRUN=1          ничего не запускается и не меняется: команда пишется в stderr, меню показывает имитацию
+  YP_SYS_PAGE=updates|snapshots   сразу открыть подстраницу
+  YP_SYS_ACT=ключ      через 0,8 с «нажать» действие (update, snapshot, wallpaper, animations, hyprlock,
+                       waybar, accent, btop, wiki, keys) — только вместе с YP_DRYRUN=1
+Откат: rm ~/.local/bin/yumi-menu-system (и убрать on-click у custom/archlogo)"""
+import json
+import os
+import shlex
+import shutil
+import sys
+import threading
+import time
+
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-panel"))
+import yumipanel as yp  # noqa: E402  (сам перезапускает процесс с layer-shell)
+from yumipanel import Gtk, GLib, Pango  # noqa: E402
+
+HOME = os.path.expanduser("~")
+DRY = yp.DRY
+HYDE_LIB = os.path.join(HOME, ".local/lib/hyde")
+HYDE_SHELL = shutil.which("hyde-shell") or os.path.join(HOME, ".local/bin/hyde-shell")
+UPDATE_INFO = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "hyde/update_info.json")
+SYS_BAT = "/sys/class/power_supply/macsmc-battery"
+RED, ORANGE, GREEN = "#ed8796", "#f5a97f", "#a6da95"
+MGR_NAME = {"pacman": "pacman", "paru": "AUR", "yay": "AUR", "flatpak": "flatpak"}
+
+# действие → (значок, текст, команда, меняет систему?)
+ACTIONS = {
+    "update":     ("󰚰", "Обновить систему",
+                   ["kitty", "--title", "systemupdate", "-e", sys.executable,
+                    os.path.join(HYDE_LIB, "system.update.py"), "interactive"], False),
+    "wallpaper":  ("󰸉", "Обои", [os.path.join(HOME, ".local/bin/yumi-menu-wallpaper"), "--center"], False),
+    "animations": ("󰪐", "Анимации", [HYDE_SHELL, "animations", "--select"], False),
+    "hyprlock":   ("󰌾", "Экран блокировки", [HYDE_SHELL, "hyprlock", "--select"], False),
+    "waybar":     ("󰑓", "Перезапустить Waybar", ["systemctl", "--user", "restart", "hyde-Hyprland-bar.service"], True),
+    "accent":     ("󰏘", "Пересчитать цвета", [os.path.join(HOME, ".local/bin/yumi-accent")], True),
+    "btop":       ("󰄨", "Системный монитор (btop)", ["kitty", "--title", "btop", "-e", "btop"], False),
+    "wiki":       ("󰖟", "Arch Wiki", ["xdg-open", "https://wiki.archlinux.org"], False),
+    "keys":       ("󰌌", "Горячие клавиши", [HYDE_SHELL, "keybinds_hint"], False),
+}
+KEYS_HINT = {"animations": "Super ⇧ Y", "hyprlock": "Super ⇧ U"}
+TILE_TEXT = {"hyprlock": "Экран\nблокировки", "animations": "Анимации", "wallpaper": "Обои",
+             "waybar": "Перезапустить\nWaybar", "accent": "Пересчитать\nцвета",
+             "btop": "Монитор\nbtop", "wiki": "Arch\nWiki", "keys": "Горячие\nклавиши"}
+SNAP_DESC = "Вручную из меню «Система»"
+
+CSS = f"""
+.ysy-tile {{ background: @yp-btn; color: @yp-fg; border-radius: 16px; border: none; box-shadow: none;
+             padding: 7px 6px; transition: background 150ms; }}
+.ysy-tile:hover, .ysy-tile:focus-visible {{ background: @yp-hover; box-shadow: inset 0 0 0 1px alpha(@yp-accent, 0.5); }}
+.ysy-tile-icon {{ color: @yp-accent; font-size: 14pt; }}
+.ysy-tile-text {{ font-size: 9pt; line-height: 1.05; }}
+.ysy-row {{ padding: 6px 14px; font-size: 10.5pt; }}
+.ysy-row .yp-row-icon {{ font-size: 12pt; }}
+.ysy-chev {{ color: alpha(@yp-fg2, 0.55); font-size: 11pt; }}
+.ysy-key {{ font-size: 8pt; font-weight: 700; color: alpha(@yp-fg2, 0.6);
+            background: alpha(@yp-fg, 0.08); border-radius: 6px; padding: 0 5px; }}
+
+.ysy-upd {{ padding: 8px 14px; }}
+.ysy-upd-num {{ font-size: 20pt; font-weight: 800; color: @yp-accent; min-width: 40px; }}
+.ysy-upd-num.zero {{ color: {GREEN}; }}
+.ysy-upd-title {{ font-size: 11pt; font-weight: 700; }}
+.ysy-upd-sub {{ font-size: 9pt; color: alpha(@yp-fg2, 0.75); }}
+
+.ysy-snap {{ padding: 8px 14px; }}
+.ysy-snap-line {{ font-size: 9.5pt; }}
+.ysy-snap-tag {{ font-size: 8pt; font-weight: 700; color: @yp-accent; background: alpha(@yp-accent, 0.14);
+                 border-radius: 6px; padding: 0 5px; min-width: 40px; }}
+.ysy-snap-desc {{ color: @yp-fg; }}
+.ysy-snap-time {{ color: alpha(@yp-fg2, 0.7); font-size: 9pt; }}
+.ysy-snap-sub {{ font-size: 8.5pt; color: alpha(@yp-fg2, 0.55); }}
+
+.ysy-stats {{ }}
+.ysy-stat {{ background: alpha(@yp-btn, 0.55); border-radius: 16px; padding: 7px 12px 8px 12px; }}
+.ysy-stat-icon {{ color: @yp-accent; font-size: 12pt; }}
+.ysy-stat-key {{ font-size: 8.5pt; color: alpha(@yp-fg2, 0.7); }}
+.ysy-stat-val {{ font-size: 10.5pt; font-weight: 700; }}
+.ysy-bar trough {{ min-height: 5px; border-radius: 3px; background: alpha(@yp-fg, 0.13); }}
+.ysy-bar progress {{ min-height: 5px; border-radius: 3px; background: @yp-accent; }}
+.ysy-stat.warn .ysy-stat-icon, .ysy-stat.warn .ysy-stat-val {{ color: {ORANGE}; }}
+.ysy-stat.warn .ysy-bar progress {{ background: {ORANGE}; }}
+.ysy-stat.crit .ysy-stat-icon, .ysy-stat.crit .ysy-stat-val {{ color: {RED}; }}
+.ysy-stat.crit .ysy-bar progress {{ background: {RED}; }}
+.ysy-stat.good .ysy-stat-icon {{ color: {GREEN}; }}
+.ysy-stat.good .ysy-bar progress {{ background: {GREEN}; }}
+
+.ysy-pkg {{ padding: 3px 6px; font-size: 9.5pt; }}
+.ysy-pkg-name {{ color: @yp-fg; }}
+.ysy-pkg-ver {{ color: alpha(@yp-fg2, 0.65); font-size: 8.5pt; }}
+.ysy-list {{ background: alpha(@yp-btn, 0.4); border-radius: 16px; padding: 6px 8px; }}
+.ysy-dry {{ font-size: 9pt; color: alpha(@yp-fg2, 0.8); background: alpha(@yp-fg, 0.06);
+            border-radius: 12px; padding: 6px 10px; }}
+"""
+
+
+# ---------- данные ----------
+def read(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def uptime_hm():
+    try:
+        s = int(float(read("/proc/uptime").split()[0]))
+    except (AttributeError, ValueError, IndexError):
+        return ""
+    d, s = divmod(s, 86400)
+    t = f"{s // 3600:02d}:{s % 3600 // 60:02d}"
+    return f"{d} д {t}" if d else t
+
+
+def subtitle():
+    host = read("/proc/sys/kernel/hostname") or ""
+    kernel = os.uname().release.split("-")[0]
+    parts = [host, f"ядро {kernel}"]
+    up = uptime_hm()
+    if up:
+        parts.append(f"в сети {up}")
+    return " · ".join(p for p in parts if p)
+
+
+def plural(n, one, few, many):
+    n = abs(n)
+    if n % 10 == 1 and n % 100 != 11:
+        return one
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return few
+    return many
+
+
+def cached_updates():
+    """Число обновлений из кеша HyDE (тот же файл, что у пилюли custom/updates). None — кеша нет."""
+    try:
+        with open(UPDATE_INFO) as f:
+            data = json.load(f)
+        return [(m["name"], int(m["count"])) for m in data.get("managers", []) if isinstance(m, dict)]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def list_updates():
+    """Пакеты к обновлению по менеджерам: {имя: [(пакет, старая, новая)]} — как list_updates в HyDE pm."""
+    out = {}
+    if shutil.which("checkupdates"):
+        rows = []
+        for line in yp.run("checkupdates", timeout=40).splitlines():
+            p = line.split()
+            if len(p) >= 4:
+                rows.append((p[0], p[1], p[3]))
+        out["pacman"] = rows
+    aur = "paru" if shutil.which("paru") else ("yay" if shutil.which("yay") else None)
+    if aur:
+        rows = []
+        for line in yp.run(aur, "-Qua", timeout=40).splitlines():
+            p = line.split()
+            if len(p) >= 4 and not line.startswith(":"):
+                rows.append((p[0], p[1], p[3]))
+        out[aur] = rows
+    if shutil.which("flatpak"):
+        rows = []
+        for line in yp.run("flatpak", "remote-ls", "--updates", "--columns=application,version",
+                           timeout=40).splitlines():
+            p = line.split("\t")
+            if p and p[0].strip() and not p[0].startswith("Application"):
+                rows.append((p[0].strip(), "", p[1].strip() if len(p) > 1 else ""))
+        out["flatpak"] = rows
+    return out
+
+
+def snapper_list():
+    """Снимки snapper по конфигам: {'root': [...], 'home': [...]} — пары pre/post склеены в одну запись."""
+    raw = yp.run("snapper", "--jsonout", "list", "--all-configs", timeout=8)
+    try:
+        data = json.loads(raw) if raw.strip() else {}
+    except ValueError:
+        data = {}
+    res = {}
+    for cfg, snaps in data.items():
+        snaps = [s for s in snaps if s.get("number")]
+        by_num = {s["number"]: s for s in snaps}
+        paired = {s["pre-number"] for s in snaps if s.get("type") == "post" and s.get("pre-number")}
+        items = []
+        for s in snaps:
+            if s.get("type") == "pre" and s["number"] in paired:
+                continue                              # покажем вместе с парой «после»
+            desc = s.get("description") or ""
+            sub = ""
+            nums = str(s["number"])
+            if s.get("type") == "post" and s.get("pre-number") in by_num:
+                pre = by_num[s["pre-number"]]
+                sub, desc = desc, pre.get("description") or desc
+                nums = f"{pre['number']}–{s['number']}"
+            elif s.get("type") == "pre":
+                sub = "незавершённое: снимок «до» без «после»"
+            if desc == "timeline":
+                desc = "по расписанию"
+            desc, sub = human(desc, sub)
+            items.append({"num": nums, "date": s.get("date", ""), "desc": desc, "sub": sub})
+        items.sort(key=lambda x: x["date"], reverse=True)
+        res[cfg] = items
+    return res
+
+
+PM_VERB = {"-Syu": "Обновление системы", "-Syyu": "Обновление системы", "-Su": "Обновление системы",
+           "-S": "Установка", "-U": "Установка из файла", "-R": "Удаление", "-Rs": "Удаление",
+           "-Rns": "Удаление", "-Rn": "Удаление", "--upgrade": "Установка из файла", "--sync": "Установка",
+           "--remove": "Удаление", "-Sy": "Установка"}
+
+
+def human(desc, sub):
+    """«pacman -U --config … /home/…pkg» → «Установка из файла: имена пакетов» (имена — из снимка «после»)."""
+    p = desc.split()
+    if p and p[0] in ("pacman", "yay", "paru", "pacman-key"):
+        verb = next((PM_VERB[a] for a in p[1:] if a in PM_VERB), "pacman")
+        if sub:
+            return f"{verb}: {sub}", desc
+        return verb, desc
+    return desc, sub
+
+
+def when(date):
+    try:
+        t = time.strptime(date, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return date
+    today = time.localtime()
+    days = (time.mktime(today[:3] + (0, 0, 0, 0, 0, -1)) - time.mktime(t[:3] + (0, 0, 0, 0, 0, -1))) // 86400
+    hm = time.strftime("%H:%M", t)
+    if days == 0:
+        return f"сегодня {hm}"
+    if days == 1:
+        return f"вчера {hm}"
+    return time.strftime("%d.%m %H:%M", t)
+
+
+def disk():
+    u = shutil.disk_usage("/")
+    return u.free, u.total, u.used / u.total if u.total else 0
+
+
+def memory():
+    info = {}
+    for line in (read("/proc/meminfo") or "").splitlines():
+        k, _, v = line.partition(":")
+        try:
+            info[k] = int(v.split()[0]) * 1024
+        except (ValueError, IndexError):
+            pass
+    total, avail = info.get("MemTotal", 0), info.get("MemAvailable", 0)
+    return total - avail, total, (total - avail) / total if total else 0
+
+
+def battery():
+    cap = read(os.path.join(SYS_BAT, "capacity"))
+    if cap is None:
+        return None
+    st = read(os.path.join(SYS_BAT, "status")) or ""
+    return int(cap), {"Charging": "заряжается", "Discharging": "от батареи", "Full": "заряжена",
+                      "Not charging": "не заряжается"}.get(st, st.lower())
+
+
+TEMP_NAMES = {"NAND Flash Temperature": "SSD", "Battery Hotspot": "АКБ",
+              "Charge Regulator Temp": "заряд", "WiFi/BT Module Temp": "Wi-Fi"}
+TEMP_FULL = {"SSD": "накопитель (NAND)", "АКБ": "батарея", "заряд": "контроллер заряда", "Wi-Fi": "модуль Wi-Fi/BT"}
+
+
+def temperatures():
+    """Все датчики hwmon (на M1 под Asahi нет датчика ЦП — macsmc_hwmon: накопитель, батарея, заряд, Wi-Fi)."""
+    out = []
+    base = "/sys/class/hwmon"
+    for hw in sorted(os.listdir(base)) if os.path.isdir(base) else []:
+        d = os.path.join(base, hw)
+        name = read(os.path.join(d, "name")) or hw
+        for f in sorted(os.listdir(d)):
+            if f.startswith("temp") and f.endswith("_input"):
+                v = read(os.path.join(d, f))
+                label = read(os.path.join(d, f.replace("_input", "_label"))) or name
+                try:
+                    c = int(v) / 1000
+                except (TypeError, ValueError):
+                    continue
+                if -20 < c < 150:
+                    out.append((TEMP_NAMES.get(label, label), c))
+    return out
+
+
+def gb(b):
+    return f"{b / 1024 ** 3:.1f}".replace(".", ",") + " ГБ"
+
+
+# ---------- меню ----------
+class SystemMenu:
+    def __init__(self, panel, body):
+        self.panel, self.app = panel, panel.app
+        self.closed = False
+        if hasattr(panel, "css"):
+            panel.add_css(CSS)
+        else:
+            panel.extra_css.append(CSS)        # из build() провайдера ещё нет — setup_css() подхватит
+        self.app.connect("shutdown", lambda *_: setattr(self, "closed", True))
+        self.snaps = {}
+        self.upd_list = None                   # кеш списка пакетов (подстраница)
+
+        panel.set_subtitle(subtitle())
+        GLib.timeout_add_seconds(20, self.tick_subtitle)
+
+        # ОБНОВЛЕНИЯ
+        body.append(yp.section("ОБНОВЛЕНИЯ"))
+        body.append(self.make_updates())
+        body.append(self.make_action("update", "primary"))
+
+        # СНИМКИ BTRFS
+        body.append(yp.section("СНИМКИ BTRFS"))
+        body.append(self.make_snapshots())
+        self.snap_btn = yp.action_button("󰄄  Сделать снимок сейчас", lambda *_: self.make_snapshot(), "plain")
+        body.append(self.snap_btn)
+
+        # ОФОРМЛЕНИЕ
+        body.append(yp.section("ОФОРМЛЕНИЕ"))
+        body.append(self.tiles([("wallpaper", 0, 0, 3), ("animations", 3, 0, 3),   # без «Экран блокировки»: запускал настоящий hyprlock
+                                ("waybar", 0, 1, 3), ("accent", 3, 1, 3)]))
+
+        # СИСТЕМА
+        body.append(yp.section("СИСТЕМА"))
+        body.append(self.make_stats())
+        body.append(self.tiles([("btop", 0, 0, 2), ("wiki", 2, 0, 2), ("keys", 4, 0, 2)]))
+
+        self.dry_rev = yp.revealer(Gtk.Label(xalign=0, wrap=True, max_width_chars=1, css_classes=["ysy-dry"]))
+        body.append(self.dry_rev)
+
+        self.refresh_stats()
+        GLib.timeout_add_seconds(5, self.refresh_stats)
+        threading.Thread(target=self.load_snapshots, daemon=True).start()
+
+        page = os.environ.get("YP_SYS_PAGE")
+        if page == "updates":
+            GLib.timeout_add(300, lambda: self.open_updates() and False)
+        elif page == "snapshots":
+            GLib.timeout_add(600, lambda: self.open_snapshots() and False)
+        act = os.environ.get("YP_SYS_ACT")
+        if act and DRY:
+            GLib.timeout_add(800, lambda: (self.make_snapshot() if act == "snapshot" else self.launch(act)) and False)
+
+    # ---------- элементы ----------
+    def row(self, icon, text, cb, meta="", chevron=False):
+        box = Gtk.Box(spacing=12)
+        box.append(Gtk.Label(label=icon, css_classes=["yp-row-icon"]))
+        box.append(Gtk.Label(label=text, xalign=0, hexpand=True, ellipsize=Pango.EllipsizeMode.END, max_width_chars=1))
+        if meta:
+            box.append(Gtk.Label(label=meta, valign=Gtk.Align.CENTER, css_classes=["ysy-key"]))
+        if chevron:
+            box.append(Gtk.Label(label="󰅂", css_classes=["ysy-chev"]))
+        b = Gtk.Button(child=box, css_classes=["yp-row", "ysy-row"])
+        b.connect("clicked", cb)
+        return b
+
+    def tiles(self, layout):
+        """Плитки-переходы в сетке 6 колонок: [(действие, колонка, ряд, ширина)]."""
+        grid = Gtk.Grid(column_spacing=6, row_spacing=6, column_homogeneous=True)
+        for k, col, row, span in layout:
+            icon, text, cmd, _ = ACTIONS[k]
+            box = Gtk.Box(spacing=8, halign=Gtk.Align.CENTER)
+            box.append(Gtk.Label(label=icon, css_classes=["ysy-tile-icon"]))
+            box.append(Gtk.Label(label=TILE_TEXT.get(k, text), justify=Gtk.Justification.LEFT, xalign=0,
+                                 css_classes=["ysy-tile-text"]))
+            tip = text + (f" — {KEYS_HINT[k]}" if k in KEYS_HINT else "")
+            b = Gtk.Button(child=box, css_classes=["ysy-tile"], tooltip_text=tip, hexpand=True)
+            b.connect("clicked", lambda *_, k=k: self.launch(k))
+            grid.attach(b, col, row, span, 1)
+        return grid
+
+    def make_action(self, key, kind):
+        icon, text, _cmd, _ = ACTIONS[key]
+        return yp.action_button(f"{icon}  {text}", lambda *_: self.launch(key), kind)
+
+    def make_updates(self):
+        box = Gtk.Box(spacing=12)
+        self.upd_num = Gtk.Label(css_classes=["ysy-upd-num"], xalign=0.5)
+        box.append(self.upd_num)
+        texts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER, hexpand=True)
+        self.upd_title = Gtk.Label(xalign=0, css_classes=["ysy-upd-title"], ellipsize=Pango.EllipsizeMode.END, max_width_chars=1)
+        self.upd_sub = Gtk.Label(xalign=0, css_classes=["ysy-upd-sub"], ellipsize=Pango.EllipsizeMode.END, max_width_chars=1)
+        texts.append(self.upd_title)
+        texts.append(self.upd_sub)
+        box.append(texts)
+        box.append(Gtk.Label(label="󰅂", css_classes=["ysy-chev"]))
+        b = Gtk.Button(child=box, css_classes=["yp-row", "ysy-upd"], tooltip_text="Список пакетов")
+        b.connect("clicked", lambda *_: self.open_updates())
+        self.show_counts(cached_updates())
+        return b
+
+    def show_counts(self, recs):
+        if recs is None:
+            self.upd_num.set_label("?")
+            self.upd_title.set_label("Нет данных")
+            self.upd_sub.set_label("нажмите, чтобы проверить")
+            return
+        total = sum(c for _, c in recs)
+        self.upd_num.set_label(str(total))
+        (self.upd_num.add_css_class if total == 0 else self.upd_num.remove_css_class)("zero")
+        self.upd_title.set_label("Система обновлена" if total == 0 else
+                                 plural(total, "обновление", "обновления", "обновлений") + " доступно")
+        self.upd_sub.set_label(" · ".join(f"{MGR_NAME.get(n, n)} {c}" for n, c in recs) or "менеджеров нет")
+
+    def make_snapshots(self):
+        self.snap_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, hexpand=True)
+        self.snap_box.append(Gtk.Label(label="Загружаю…", xalign=0, css_classes=["ysy-snap-time"]))
+        outer = Gtk.Box(spacing=12)
+        outer.append(self.snap_box)
+        outer.append(Gtk.Label(label="󰅂", css_classes=["ysy-chev"], valign=Gtk.Align.CENTER))
+        b = Gtk.Button(child=outer, css_classes=["yp-row", "ysy-snap"], tooltip_text="Все снимки")
+        b.connect("clicked", lambda *_: self.open_snapshots())
+        return b
+
+    def snap_line(self, tag, item, with_sub=False):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        line = Gtk.Box(spacing=8, css_classes=["ysy-snap-line"])
+        line.append(Gtk.Label(label=tag, css_classes=["ysy-snap-tag"]))
+        line.append(Gtk.Label(label=item["desc"], xalign=0, hexpand=True, ellipsize=Pango.EllipsizeMode.END,
+                              max_width_chars=1, css_classes=["ysy-snap-desc"]))
+        line.append(Gtk.Label(label=when(item["date"]), css_classes=["ysy-snap-time"]))
+        box.append(line)
+        if with_sub and item["sub"]:
+            box.append(Gtk.Label(label=item["sub"], xalign=0, ellipsize=Pango.EllipsizeMode.END,
+                                 max_width_chars=1, css_classes=["ysy-snap-sub"]))
+        return box
+
+    def load_snapshots(self):
+        snaps = snapper_list()
+        GLib.idle_add(self.show_snapshots, snaps)
+
+    def show_snapshots(self, snaps):
+        if self.closed:
+            return False
+        self.snaps = snaps
+        while (c := self.snap_box.get_first_child()):
+            self.snap_box.remove(c)
+        if not snaps:
+            self.snap_box.append(Gtk.Label(label="snapper не настроен — запустите setup-snapshots", xalign=0,
+                                           wrap=True, max_width_chars=1, css_classes=["ysy-snap-time"]))
+            return False
+        for cfg, tag in (("root", "/"), ("home", "home")):
+            items = snaps.get(cfg) or []
+            if items:
+                self.snap_box.append(self.snap_line(tag, items[0]))
+        total = sum(len(v) for v in snaps.values())
+        self.snap_box.append(Gtk.Label(label=f"Всего {total} {plural(total, 'снимок', 'снимка', 'снимков')} · "
+                                       + " · ".join(f"{'/' if c == 'root' else c} {len(v)}" for c, v in sorted(snaps.items(), key=lambda x: x[0] != "root")),
+                                       xalign=0, css_classes=["ysy-snap-sub"]))
+        return False
+
+    def make_stats(self):
+        grid = Gtk.Grid(column_spacing=6, row_spacing=6, column_homogeneous=True, css_classes=["ysy-stats"])
+        self.stats = {}
+        for i, (key, icon, name) in enumerate((("disk", "󰋊", "Свободно на /"), ("mem", "󰘚", "Память"),
+                                               ("bat", "󰁹", "Батарея"), ("temp", "󰔏", "Температура"))):
+            card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, css_classes=["ysy-stat"])
+            top = Gtk.Box(spacing=8)
+            ic = Gtk.Label(label=icon, css_classes=["ysy-stat-icon"])
+            top.append(ic)
+            tb = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True)
+            tb.append(Gtk.Label(label=name, xalign=0, css_classes=["ysy-stat-key"]))
+            val = Gtk.Label(xalign=0, css_classes=["ysy-stat-val"], ellipsize=Pango.EllipsizeMode.END, max_width_chars=1)
+            tb.append(val)
+            top.append(tb)
+            card.append(top)
+            bar = Gtk.ProgressBar(css_classes=["ysy-bar"])
+            card.append(bar)
+            grid.attach(card, i % 2, i // 2, 1, 1)
+            self.stats[key] = (card, ic, val, bar)
+        return grid
+
+    def set_stat(self, key, text, frac, level="", icon=None, tooltip=None):
+        card, ic, val, bar = self.stats[key]
+        val.set_label(text)
+        bar.set_fraction(max(0.0, min(frac, 1.0)))
+        for c in ("warn", "crit", "good"):
+            (card.add_css_class if c == level else card.remove_css_class)(c)
+        if icon:
+            ic.set_label(icon)
+        card.set_tooltip_text(tooltip)
+
+    def refresh_stats(self):
+        if self.closed:
+            return False
+        free, total, used = disk()
+        self.set_stat("disk", f"{free / 1024 ** 3:.0f} из {total / 1024 ** 3:.0f} ГБ", 1 - free / total if total else 0,
+                      "crit" if used > 0.92 else "warn" if used > 0.8 else "",
+                      tooltip=f"Занято {gb(total - free)} из {gb(total)} ({used:.0%})")
+        mu, mt, mf = memory()
+        self.set_stat("mem", f"{gb(mu)} из {gb(mt)}".replace(" ГБ из", " из"), mf,
+                      "crit" if mf > 0.9 else "warn" if mf > 0.75 else "")
+        b = battery()
+        if b:
+            pct, st = b
+            charging = st in ("заряжается", "заряжена")
+            icons = "󰢜󰂆󰂇󰂈󰢝󰂉󰢞󰂊󰂋󰂅" if charging else "󰁺󰁻󰁼󰁽󰁾󰁿󰂀󰂁󰂂󰁹"
+            self.set_stat("bat", f"{pct}% · {st}", pct / 100,
+                          "good" if charging else "crit" if pct <= 10 else "warn" if pct <= 20 else "",
+                          icon=icons[min(pct // 10, 9)])
+        else:
+            self.set_stat("bat", "нет батареи", 0)
+        temps = temperatures()
+        if temps:
+            name, c = max(temps, key=lambda t: t[1])
+            self.set_stat("temp", f"{c:.0f} °C · {name}", c / 100,
+                          "crit" if c >= 80 else "warn" if c >= 65 else "",
+                          tooltip="\n".join(f"{TEMP_FULL.get(n, n)}: {v:.0f} °C" for n, v in sorted(temps, key=lambda t: -t[1])))
+        else:
+            self.set_stat("temp", "нет датчиков", 0)
+        return True
+
+    def tick_subtitle(self):
+        if self.closed:
+            return False
+        if not self.panel.pages:
+            self.panel.set_subtitle(subtitle(), live=True)
+        return True
+
+    # ---------- подстраницы ----------
+    def open_updates(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        content.append(yp.spinner_row("Проверяю обновления…"))
+        sw = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, propagate_natural_height=True,
+                                max_content_height=round(560 * self.panel.k))
+        sw.set_child(content)
+        box.append(sw)
+        box.append(self.make_action("update", "primary"))
+        self.panel.push("󰮯  Обновления", box, "pacman, AUR и flatpak")
+
+        def fill(data):
+            if self.closed:
+                return False
+            self.upd_list = data
+            while (c := content.get_first_child()):
+                content.remove(c)
+            recs = [(n, len(v)) for n, v in data.items()]
+            self.show_counts(recs)
+            total = sum(c for _, c in recs)
+            self.panel.set_subtitle(f"{total} {plural(total, 'пакет', 'пакета', 'пакетов')} к обновлению" if total
+                                    else "Всё обновлено", live=True)
+            if not total:
+                content.append(yp.hint("Новых версий нет. Система обновлена."))
+            for name, pkgs in data.items():
+                if not pkgs:
+                    continue
+                content.append(yp.section(f"{MGR_NAME.get(name, name).upper()} · {len(pkgs)}"))
+                lst = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, css_classes=["ysy-list"])
+                for pkg, old, new in pkgs:
+                    r = Gtk.Box(spacing=8, css_classes=["ysy-pkg"])
+                    r.append(Gtk.Label(label=pkg, xalign=0, hexpand=True, ellipsize=Pango.EllipsizeMode.END,
+                                       max_width_chars=1, css_classes=["ysy-pkg-name"]))
+                    ver = f"{old} → {new}" if old else new
+                    r.append(Gtk.Label(label=ver, ellipsize=Pango.EllipsizeMode.START, max_width_chars=22,
+                                       css_classes=["ysy-pkg-ver"]))
+                    lst.append(r)
+                content.append(lst)
+            return False
+
+        if self.upd_list is not None:
+            fill(self.upd_list)
+        else:
+            threading.Thread(target=lambda: GLib.idle_add(fill, list_updates()), daemon=True).start()
+        self.panel.busy += 1          # пока страница открыта и идёт проверка — не закрывать при уходе мыши
+        GLib.timeout_add(1500, lambda: setattr(self.panel, "busy", max(0, self.panel.busy - 1)) or False)
+
+    def open_snapshots(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        for cfg, title, tag in (("root", "СИСТЕМА  /", "/"), ("home", "ДОМАШНЯЯ ПАПКА  /home", "home")):
+            items = (self.snaps.get(cfg) or [])[:6]
+            if not items:
+                continue
+            box.append(yp.section(title))
+            lst = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, css_classes=["ysy-list"])
+            for it in items:
+                line = self.snap_line(f"№{it['num']}", it, with_sub=True)
+                line.set_tooltip_text(it["sub"] or None)
+                lst.append(line)
+            box.append(lst)
+        box.append(yp.hint("Откат обновления: sudo snapper -c root undochange ДО..ПОСЛЕ. "
+                           "Корень — снимок до и после каждого pacman; /home — каждый час."))
+        sw = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, propagate_natural_height=True,
+                                max_content_height=round(560 * self.panel.k))
+        sw.set_child(box)
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        page.append(sw)
+        page.append(yp.action_button("󰄄  Сделать снимок сейчас", lambda *_: self.make_snapshot(), "primary"))
+        total = sum(len(v) for v in self.snaps.values())
+        self.panel.push("󰋊  Снимки btrfs", page, f"snapper · {total} {plural(total, 'снимок', 'снимка', 'снимков')}")
+
+    # ---------- действия ----------
+    def launch(self, key):
+        _icon, text, cmd, changes = ACTIONS[key]
+        if DRY:
+            print(f"yumi-menu-system [dry-run] {text}: {shlex.join(cmd)}", file=sys.stderr, flush=True)
+            self.panel.toast(f"Имитация: {text}", hold=3)
+            self.dry_rev.get_child().set_label(f"Пробный режим, команда не выполнена:\n{shlex.join(cmd)}")
+            self.dry_rev.set_reveal_child(True)
+            return
+        self.panel.set_visible(False)
+        if changes:
+            yp.do(*cmd, background=True)   # меняет систему (перезапуск Waybar, перекраска)
+        else:
+            yp.spawn(*cmd)                 # каркас убирает LD_PRELOAD у дочерних программ
+        self.app.quit()
+
+    def make_snapshot(self):
+        if getattr(self, "snapping", False):
+            return
+        self.snapping = True
+        self.snap_btn.set_sensitive(False)
+        self.panel.busy += 1
+        self.panel.toast("Делаю снимки / и /home…", hold=10)
+
+        def work():
+            res = []
+            for cfg in ("root", "home"):
+                ok, out = yp.do("snapper", "-c", cfg, "create", "--cleanup-algorithm", "number",
+                                "--description", SNAP_DESC, timeout=60)
+                res.append((cfg, ok, out))
+            snaps = snapper_list()
+            GLib.idle_add(done, res, snaps)
+
+        def done(res, snaps):
+            if self.closed:
+                return False
+            self.snapping = False
+            self.snap_btn.set_sensitive(True)
+            self.panel.busy = max(0, self.panel.busy - 1)
+            bad = [f"{c}: {o}" for c, ok, o in res if not ok]
+            if bad:
+                self.panel.toast("Ошибка: " + "; ".join(bad)[:80], error=True, hold=6)
+            else:
+                self.panel.toast("Имитация: снимки / и /home" if DRY else "Снимки / и /home сделаны", hold=4)
+            if DRY:
+                self.dry_rev.get_child().set_label("Пробный режим, не выполнено: snapper -c root|home create")
+                self.dry_rev.set_reveal_child(True)
+            self.show_snapshots(snaps)
+            return False
+
+        threading.Thread(target=work, daemon=True).start()
+
+
+if __name__ == "__main__":
+    app = yp.PanelApp("org.yumi.panel.system", "Arch Linux", "󰣇", lambda panel, body: SystemMenu(panel, body))
+    sys.exit(app.run(sys.argv))

@@ -1,0 +1,4 @@
+#!/bin/sh
+# yumi-tone: hypr в тоне обоев (см. ~/.local/lib/yumi-tone/tone.py; откат — yumi-tone-uninstall)
+[ -f "$HOME/.local/lib/yumi-tone/tone.py" ] || exit 0
+exec timeout 10 python3 "$HOME/.local/lib/yumi-tone/tone.py" hypr

@@ -1,0 +1,13 @@
+[Unit]
+Description=yumi-tray: StatusNotifierWatcher/Host для одноцветного трея Waybar
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/yumi-tray daemon
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

@@ -1,0 +1,31 @@
+${XDG_CONFIG_HOME:-$HOME/.config}/rofi/yumi/colors.rasi
+/* rofi-yumi: цвета из обоев (wallbash), как у GTK-меню yumi-panel.
+   Файл генерируется — правьте шаблон ~/.config/hyde/wallbash/always/rofi-yumi.dcol */
+* {
+    yr-bg:        <wallbash_pry1_rgba(0.94)>;
+    yr-border:    <wallbash_1xa5_rgba(1)>;
+    yr-fg:        <wallbash_txt1_rgba(1)>;
+    yr-fg2:       <wallbash_1xa9_rgba(1)>;
+    yr-fg2-dim:   <wallbash_1xa9_rgba(0.7)>;
+    yr-accent:    <wallbash_1xa7_rgba(1)>;
+    yr-btn:       <wallbash_1xa2_rgba(0.55)>;
+    yr-hover:     <wallbash_1xa4_rgba(0.8)>;
+    yr-sel:       <wallbash_1xa7_rgba(0.22)>;
+    yr-sel-br:    <wallbash_1xa7_rgba(0.6)>;
+    yr-entry-br:  <wallbash_1xa7_rgba(0.35)>;
+    yr-on-acc:    <wallbash_pry1_rgba(1)>;
+    yr-none:      <wallbash_pry1_rgba(0)>;
+    /* запасной акцент; живой акцент yumi-accent (~/.cache/yumi-accent/accent.rasi)
+       подключает обёртка ~/.local/bin/rofi, если файл есть */
+    yumi-acc:     <wallbash_1xa7_rgba(1)>;
+    yumi-acc5:    <wallbash_1xa5_rgba(1)>;
+    yumi-acc2:    <wallbash_1xa2_rgba(1)>;
+    yumi-deep:    <wallbash_pry1_rgba(0.94)>;
+    yumi-bg:      <wallbash_pry1_rgba(0.9)>;
+    yumi-btn:     <wallbash_1xa2_rgba(0.55)>;
+    yumi-hover:   <wallbash_1xa4_rgba(0.8)>;
+}
+/* затемнение шапки: обои → цвет окна (при живом акценте обёртка заменит на тон yumi-deep) */
+shade {
+    background-image: linear-gradient(to bottom, <wallbash_pry1_rgba(0)>, <wallbash_pry1_rgba(0.15)>, <wallbash_pry1_rgba(0.94)>);
+}

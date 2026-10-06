@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Круглая обложка для пилюли плеера в Waybar (модуль image#player-cover, вызывается раз в секунду).
+# Печатает путь к готовому PNG или пустую строку (ничего не играет → модуль скрыт).
+# Играет — тонкое кольцо цвета акцента вокруг обложки; пауза — без кольца и тусклее.
+# Нет обложки — круг цвета акцента (wallbash 1xa7) со значком 󰝚. Waybar (GTK3) не умеет обрезать
+# картинку стилями, поэтому круг рисуется заранее (magick) и кэшируется по artUrl + цвету.
+# Откат: yumi-player-uninstall
+export LANG=C.UTF-8 LC_ALL=C.UTF-8   # playerctl ломается на кириллице и «—» без UTF-8
+c="${XDG_CACHE_HOME:-$HOME/.cache}/yumi-player/pill"
+mkdir -p "$c"
+S=64                                  # размер PNG; Waybar уменьшает до "size" (запас под HiDPI)
+
+IFS=$'\t' read -r st art < <(playerctl -p playerctld metadata --format $'{{status}}\t{{mpris:artUrl}}' 2>/dev/null)
+[ -n "$st" ] || IFS=$'\t' read -r st art < <(playerctl metadata --format $'{{status}}\t{{mpris:artUrl}}' 2>/dev/null)
+case "$st" in Playing|Paused) ;; *) echo ""; exit 0 ;; esac
+
+acc=$(awk '{print $7}' "$HOME/.cache/yumi-accent/accent.txt" 2>/dev/null)   # живой акцент (yumi-accent)
+[ -n "$acc" ] || acc=$(awk '/^\$wallbash_1xa7 /{print $3; exit}' "$HOME/.config/hypr/themes/colors.conf" 2>/dev/null)
+bg=$(awk '/^\$wallbash_pry1 /{print $3; exit}' "$HOME/.config/hypr/themes/colors.conf" 2>/dev/null)
+acc="#${acc:-B19AE6}"; bg="#${bg:-140C26}"
+font="$HOME/.local/share/fonts/JetBrainsMono/JetBrainsMonoNerdFont-Regular.ttf"
+
+# Квадратная основа (S×S): обложка трека или заглушка цвета акцента
+base=""
+if [ -n "$art" ]; then
+    key=$(printf '%s' "$art" | md5sum | cut -c1-12)
+    base="$c/base-$key.png"
+    if [ ! -s "$base" ]; then
+        case "$art" in
+            file://*)   # Firefox удаляет файл при смене трека — читаем сразу
+                f="${art#file://}"; f="$(printf '%b' "${f//%/\\x}")"
+                magick "$f[0]" -resize "${S}x${S}^" -gravity center -extent "${S}x${S}" "$base.tmp.png" 2>/dev/null &&
+                    mv "$base.tmp.png" "$base" ;;
+            http*)      # качаем в фоне, пока — заглушка
+                if [ ! -e "$base.dl" ]; then
+                    touch "$base.dl"
+                    ( curl -fsSL --max-time 6 "$art" -o "$base.raw" &&
+                      magick "$base.raw[0]" -resize "${S}x${S}^" -gravity center -extent "${S}x${S}" "$base.tmp.png" &&
+                      mv "$base.tmp.png" "$base"; rm -f "$base.raw" "$base.dl" ) >/dev/null 2>&1 &
+                fi ;;
+        esac
+        find "$c" -name '*.png' -mmin +1440 -delete 2>/dev/null
+    fi
+    [ -s "$base" ] || base=""
+fi
+if [ -z "$base" ]; then
+    key="ph-${acc#\#}"
+    base="$c/base-$key.png"
+    [ -s "$base" ] || magick -size "${S}x${S}" "xc:$acc" -font "$font" -pointsize 34 -fill "$bg" \
+        -gravity center -annotate +0+1 '󰝚' "$base" 2>/dev/null
+fi
+
+# Готовый круг: играет — кольцо акцента; пауза — тусклее, без кольца
+if [ "$st" = Playing ]; then out="$c/play-$key-${acc#\#}.png"; else out="$c/pause-$key.png"; fi
+if [ ! -s "$out" ]; then
+    cx="$(( (S - 1) / 2 )).5"; in=$((S - 14)); ic="$(( (in - 1) / 2 )).5"   # центры пикселей
+    if [ "$st" = Playing ]; then
+        magick -size "${S}x${S}" xc:none -fill none -stroke "$acc" -strokewidth 4 \
+            -draw "circle $cx,$cx $cx,2.5" \
+            \( "$base" -alpha set -resize "${in}x${in}" \( -size "${in}x${in}" xc:none -fill white -draw "circle $ic,$ic $ic,0" \) \
+               -compose DstIn -composite \) -gravity center -compose Over -composite "$out.tmp.png" 2>/dev/null
+    else
+        magick -size "${S}x${S}" xc:none \
+            \( "$base" -alpha set -resize "${in}x${in}" -modulate 60,70 \( -size "${in}x${in}" xc:none -fill white -draw "circle $ic,$ic $ic,0" \) \
+               -compose DstIn -composite \) -gravity center -compose Over -composite "$out.tmp.png" 2>/dev/null
+    fi
+    mv "$out.tmp.png" "$out" 2>/dev/null
+fi
+[ -s "$out" ] && echo "$out" || echo ""

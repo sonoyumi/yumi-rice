@@ -1,0 +1,342 @@
+#!/usr/bin/env python3
+"""yumi-menu-session — меню «Питание системы» на GTK (каркас yumi-panel, замена rofi powermenu).
+  yumi-menu-session [--bar|--center]   открыть / закрыть (--bar — под пилюлей ⏻, --center — по центру, для бинда)
+  yumi-menu-session --close            закрыть открытое меню
+  yumi-menu-session --commands         показать, какие команды выполнит каждое действие (ничего не запускает)
+Блокировка и сон — сразу; выход, перезагрузка и выключение — после отсчёта 5 с (кнопки «Сейчас»/«Отмена»).
+Клавиши: L/Д блокировка, S/Ы сон, E/У выход, R/К перезагрузка, P/З выключение,
+Enter (или та же клавиша ещё раз) — «Сейчас», Esc — отмена отсчёта / закрыть.
+YP_DRYRUN=1 — ничего не выполняется: команда пишется в stderr, меню показывает имитацию.
+Для проверки: YP_SESSION_ASK=reboot|logout|poweroff — сразу начать отсчёт;
+YP_SESSION_KEYS="r,Escape,…" — прогнать клавиши через обработчик (без настоящей клавиатуры).
+Откат: yumi-panel-uninstall"""
+import math
+import os
+import pwd
+import shlex
+import shutil
+import subprocess
+import sys
+
+DRY = os.environ.get("YP_DRYRUN") == "1"
+COUNTDOWN_S = 5
+
+
+def logout_cmd():
+    """Сессия запущена через uwsm (sddm → uwsm start … hyprland.desktop): выход — `uwsm stop`,
+    он корректно гасит графическую сессию systemd. Без uwsm — выход из Hyprland напрямую."""
+    if shutil.which("uwsm"):
+        try:
+            if subprocess.run(["uwsm", "check", "is-active"], capture_output=True, timeout=3).returncode == 0:
+                return ["uwsm", "stop"]
+        except Exception:
+            pass
+    return ["hyprctl", "dispatch", "exit"]
+
+
+# действие → (значок, название, клавиши, опасное?, команда — список аргументов или строка для sh -c)
+ACTIONS = {
+    "lock":     ("󰌾", "Блокировка",   ("l", "Cyrillic_de"),   False, ["loginctl", "lock-session"]),
+    # сначала экран блокировки (hypridle → hyprlock), через секунду — сон; как в старом powermenu
+    "suspend":  ("󰤄", "Сон",          ("s", "Cyrillic_yeru"), False,
+                 "loginctl lock-session; sleep 1; systemctl suspend"),
+    "logout":   ("󰍃", "Выход",        ("e", "Cyrillic_u"),    True, None),       # logout_cmd() в момент выхода
+    "reboot":   ("󰜉", "Перезагрузка", ("r", "Cyrillic_ka"),   True, ["systemctl", "reboot", "--no-wall"]),
+    "poweroff": ("⏻", "Выключение",   ("p", "Cyrillic_ze"),   True, ["systemctl", "poweroff", "--no-wall"]),
+}
+LAYOUT = [("lock", 0, 0, 2), ("suspend", 2, 0, 2), ("logout", 4, 0, 2),   # (действие, колонка, ряд, ширина)
+          ("reboot", 0, 1, 3), ("poweroff", 3, 1, 3)]                       # сетка 6 колонок: 3 + 2 плитки
+VERB = {"logout": "Выход", "reboot": "Перезагрузка", "poweroff": "Выключение"}
+DONE = {"lock": "экран заблокирован", "suspend": "компьютер уснул", "logout": "сеанс завершён",
+        "reboot": "перезагрузка", "poweroff": "выключение"}
+
+
+def command(action):
+    cmd = ACTIONS[action][4]
+    if action == "logout":
+        cmd = logout_cmd()
+    return ["sh", "-c", cmd] if isinstance(cmd, str) else cmd
+
+
+if "--commands" in sys.argv[1:]:          # до импорта каркаса: без окна и без layer-shell
+    for a in ACTIONS:
+        print(f"{ACTIONS[a][1]:<13} {shlex.join(command(a))}")
+    sys.exit(0)
+
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-panel"))
+import yumipanel as yp  # noqa: E402  (сам перезапускает процесс с layer-shell)
+from yumipanel import Gtk, Gdk, GLib, Pango  # noqa: E402
+import cairo  # noqa: E402
+
+EXTRA_CSS = """
+.ys-grid { margin: 2px 0 0 0; }
+.ys-tile {
+  background: @yp-btn; color: @yp-fg;
+  border-radius: 20px; border: none; box-shadow: none;
+  padding: 14px 6px 10px 6px;
+  transition: background 150ms, box-shadow 150ms;
+}
+.ys-tile:hover, .ys-tile:focus-visible { background: @yp-hover; box-shadow: inset 0 0 0 1px alpha(@yp-accent, 0.55); }
+.ys-tile-icon { font-size: 25pt; color: @yp-accent; margin-bottom: 4px; }
+.ys-tile-name { font-size: 10.5pt; font-weight: 700; }
+.ys-tile-key  {
+  font-size: 8pt; font-weight: 700; color: alpha(@yp-fg2, 0.55);
+  background: alpha(@yp-fg, 0.08); border-radius: 6px; padding: 0 5px; margin-top: 4px;
+}
+.ys-tile.danger .ys-tile-icon { color: mix(@yp-accent, #ed8796, 0.45); }
+.ys-tile.danger:hover, .ys-tile.danger:focus-visible {
+  background: mix(@yp-btn, #ed8796, 0.28); box-shadow: inset 0 0 0 1px alpha(#ed8796, 0.6);
+}
+.ys-tile.danger:hover .ys-tile-icon, .ys-tile.danger:focus-visible .ys-tile-icon { color: #ed8796; }
+.ys-tile.pending { background: mix(@yp-btn, #ed8796, 0.35); box-shadow: inset 0 0 0 2px #ed8796; }
+.ys-tile.pending .ys-tile-icon { color: #ed8796; }
+.ys-tile.done { background: alpha(@yp-accent, 0.3); box-shadow: inset 0 0 0 2px @yp-accent; }
+
+.ys-confirm { background: alpha(#ed8796, 0.10); border-radius: 20px; padding: 12px; margin-top: 2px; }
+.ys-ring { color: #ed8796; }
+.ys-ring-num { font-size: 17pt; font-weight: 800; color: #ed8796; }
+.ys-confirm-title { font-size: 12.5pt; font-weight: 800; }
+.ys-confirm-sub { font-size: 9.5pt; color: alpha(@yp-fg2, 0.75); }
+.ys-dry { font-size: 9pt; color: alpha(@yp-fg2, 0.8); background: alpha(@yp-fg, 0.06);
+          border-radius: 12px; padding: 6px 10px; }
+"""
+
+RING = 58          # диаметр кольца отсчёта, логические px (масштабируется под монитор)
+
+
+def uptime_text():
+    try:
+        with open("/proc/uptime") as f:
+            s = int(float(f.read().split()[0]))
+    except (OSError, ValueError, IndexError):
+        return ""
+    d, s = divmod(s, 86400)
+    t = f"{s // 3600:02d}:{s % 3600 // 60:02d}"
+    return f"{d} д {t}" if d else t
+
+
+def user_name():
+    try:
+        return pwd.getpwuid(os.getuid()).pw_name
+    except KeyError:
+        return os.environ.get("USER", "")
+
+
+class Session:
+    def __init__(self, panel, body):
+        self.panel, self.app = panel, panel.app
+        self.pending = None            # действие, для которого идёт отсчёт
+        self.started = 0
+        self.tick_id = 0
+        self.closed = False
+        # каркасный add_css() во время build() падает (CssProvider создаётся после build) —
+        # кладу CSS в очередь, setup_css() загрузит его вместе с основным стилем
+        if hasattr(panel, "css"):
+            panel.add_css(EXTRA_CSS)
+        else:
+            panel.extra_css.append(EXTRA_CSS)
+        self.app.connect("shutdown", lambda *_: setattr(self, "closed", True))
+
+        # своя обработка клавиш вместо каркасной (Esc сначала отменяет отсчёт)
+        ctrls = panel.observe_controllers()
+        for c in [ctrls.get_item(i) for i in range(ctrls.get_n_items())]:
+            if isinstance(c, Gtk.EventControllerKey):
+                panel.remove_controller(c)
+        keys = Gtk.EventControllerKey(propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        keys.connect("key-pressed", self.on_key)
+        panel.add_controller(keys)
+
+        self.update_subtitle()
+        GLib.timeout_add_seconds(20, self.update_subtitle)
+
+        grid = Gtk.Grid(column_spacing=8, row_spacing=8, column_homogeneous=True, css_classes=["ys-grid"])
+        self.tiles = {}
+        for action, col, row, span in LAYOUT:
+            tile = self.make_tile(action)
+            self.tiles[action] = tile
+            grid.attach(tile, col, row, span, 1)
+        body.append(grid)
+
+        self.confirm_rev = yp.revealer(self.make_confirm())
+        body.append(self.confirm_rev)
+        self.dry_rev = yp.revealer(Gtk.Label(xalign=0, wrap=True, max_width_chars=1, css_classes=["ys-dry"]))
+        body.append(self.dry_rev)
+
+        if os.environ.get("YP_SESSION_ASK") in VERB:          # для проверки/снимков
+            GLib.timeout_add(300, lambda: self.activate(os.environ["YP_SESSION_ASK"]) and False)
+        if os.environ.get("YP_SESSION_KEYS"):
+            self.fake_keys = os.environ["YP_SESSION_KEYS"].split(",")
+            GLib.timeout_add(600, self.next_fake_key)
+
+    # ---------- элементы ----------
+    def make_tile(self, action):
+        icon, name, keys, danger, _ = ACTIONS[action]
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0, halign=Gtk.Align.CENTER)
+        box.append(Gtk.Label(label=icon, css_classes=["ys-tile-icon"]))
+        box.append(Gtk.Label(label=name, css_classes=["ys-tile-name"], ellipsize=Pango.EllipsizeMode.END))
+        box.append(Gtk.Label(label=keys[0].upper(), halign=Gtk.Align.CENTER, css_classes=["ys-tile-key"]))
+        b = Gtk.Button(child=box, css_classes=["ys-tile"] + (["danger"] if danger else []),
+                       tooltip_text=f"{name} — клавиша {keys[0].upper()}")
+        b.connect("clicked", lambda *_: self.activate(action))
+        return b
+
+    def make_confirm(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, css_classes=["ys-confirm"])
+        top = Gtk.Box(spacing=12)
+        ring = Gtk.Overlay()
+        size = round(RING * self.panel.k)
+        self.ring = Gtk.DrawingArea(content_width=size, content_height=size, css_classes=["ys-ring"])
+        self.ring.set_draw_func(self.draw_ring)
+        ring.set_child(self.ring)
+        self.ring_num = Gtk.Label(css_classes=["ys-ring-num"], halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
+        ring.add_overlay(self.ring_num)
+        top.append(ring)
+        texts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, valign=Gtk.Align.CENTER, hexpand=True)
+        self.c_title = Gtk.Label(xalign=0, wrap=True, max_width_chars=1, css_classes=["ys-confirm-title"])
+        self.c_sub = Gtk.Label(xalign=0, wrap=True, max_width_chars=1, css_classes=["ys-confirm-sub"])
+        texts.append(self.c_title)
+        texts.append(self.c_sub)
+        top.append(texts)
+        box.append(top)
+        btns = Gtk.Box(spacing=8, homogeneous=True)
+        btns.append(yp.action_button("Отмена", lambda *_: self.cancel(), "plain"))
+        self.now_btn = yp.action_button("Сейчас", lambda *_: self.fire(), "danger-solid")
+        btns.append(self.now_btn)
+        box.append(btns)
+        return box
+
+    def draw_ring(self, area, cr, w, h):
+        c = area.get_color()
+        lw = max(3.0, 5 * self.panel.k)
+        r = min(w, h) / 2 - lw / 2 - 1
+        cr.set_line_width(lw)
+        cr.set_source_rgba(c.red, c.green, c.blue, 0.18)
+        cr.arc(w / 2, h / 2, r, 0, 2 * math.pi)
+        cr.stroke()
+        left = self.remaining() / COUNTDOWN_S if self.pending else 0
+        if left > 0:
+            cr.set_line_cap(cairo.LineCap.ROUND)
+            cr.set_source_rgba(c.red, c.green, c.blue, 1)
+            cr.arc(w / 2, h / 2, r, -math.pi / 2, -math.pi / 2 + 2 * math.pi * left)
+            cr.stroke()
+
+    # ---------- состояние ----------
+    def update_subtitle(self):
+        if self.closed:
+            return False
+        if not self.pending:
+            up = uptime_text()
+            self.panel.set_subtitle(f"{user_name()} · в сети {up}" if up else user_name())
+        return True
+
+    def remaining(self):
+        return max(0.0, COUNTDOWN_S - (GLib.get_monotonic_time() - self.started) / 1e6)
+
+    def activate(self, action):
+        if action == self.pending:              # та же плитка/клавиша ещё раз — «Сейчас»
+            self.fire()
+            return
+        self.dry_rev.set_reveal_child(False)
+        if not ACTIONS[action][3]:
+            self.cancel()
+            self.run(action)
+            return
+        self.cancel(quiet=True)
+        self.pending = action
+        self.started = GLib.get_monotonic_time()
+        self.panel.busy += 1                    # не закрывать окно при уходе мыши, пока идёт отсчёт
+        self.tiles[action].add_css_class("pending")
+        self.c_sub.set_label("Enter — сейчас · Esc — отмена")
+        self.confirm_rev.set_reveal_child(True)
+        self.panel.set_subtitle("Подтвердите или отмените")
+        self.tick()
+        self.tick_id = GLib.timeout_add(40, self.tick)
+
+    def tick(self):
+        if not self.pending:
+            self.tick_id = 0
+            return False
+        left = self.remaining()
+        self.c_title.set_label(f"{VERB[self.pending]} через {math.ceil(left)}…")
+        self.ring_num.set_label(str(math.ceil(left)))
+        self.ring.queue_draw()
+        if left <= 0:
+            self.tick_id = 0
+            self.fire()
+            return False
+        return True
+
+    def cancel(self, quiet=False):
+        if self.tick_id:
+            GLib.source_remove(self.tick_id)
+            self.tick_id = 0
+        if self.pending:
+            self.tiles[self.pending].remove_css_class("pending")
+            self.pending = None
+            self.panel.busy = max(0, self.panel.busy - 1)
+            self.confirm_rev.set_reveal_child(False)
+            if not quiet:
+                self.panel.toast("Отменено")
+                GLib.timeout_add(1500, lambda: (self.pending or self.update_subtitle()) and False)
+
+    def fire(self):
+        action = self.pending
+        if not action:
+            return
+        self.cancel(quiet=True)
+        self.run(action)
+
+    # ---------- выполнение ----------
+    def run(self, action):
+        cmd = command(action)
+        if DRY:
+            print(f"yumi-menu-session [dry-run] {ACTIONS[action][1]}: {shlex.join(cmd)}", file=sys.stderr, flush=True)
+            tile = self.tiles[action]
+            tile.add_css_class("done")
+            GLib.timeout_add(1200, lambda: tile.remove_css_class("done") or False)
+            self.panel.toast(f"Имитация: {DONE[action]}")
+            self.dry_rev.get_child().set_label(f"Пробный режим, команда не выполнена:\n{shlex.join(cmd)}")
+            self.dry_rev.set_reveal_child(True)
+            if not os.environ.get("YP_STAY"):
+                GLib.timeout_add(1500, lambda: self.app.quit() or False)
+            return
+        self.panel.set_visible(False)           # окно не мелькает поверх экрана блокировки
+        yp.spawn(*cmd)
+        self.app.quit()
+
+    # ---------- клавиши ----------
+    def on_key(self, _c, keyval, _code, state):
+        if state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.ALT_MASK | Gdk.ModifierType.SUPER_MASK):
+            return False
+        return self.handle_key(Gdk.keyval_name(Gdk.keyval_to_lower(keyval)) or "")
+
+    def handle_key(self, name):
+        if name == "Escape":
+            if self.pending:
+                self.cancel()
+            else:
+                self.app.quit()
+            return True
+        if name in ("Return", "KP_Enter") and self.pending:
+            self.fire()
+            return True
+        if name in ("up", "down", "left", "right", "Up", "Down", "Left", "Right") and self.panel.get_focus() is None:
+            page = self.panel.stack.get_visible_child()   # первая стрелка выделяет первую плитку (как в каркасе)
+            if page is not None and page.child_focus(Gtk.DirectionType.TAB_FORWARD):
+                return True
+        for action, a in ACTIONS.items():
+            if name in a[2]:
+                self.activate(action)
+                return True
+        return False
+
+    def next_fake_key(self):
+        if self.fake_keys and not self.closed:
+            k = self.fake_keys.pop(0)
+            print(f"yumi-menu-session [key] {k} → {self.handle_key(k)}", file=sys.stderr, flush=True)
+        return bool(self.fake_keys)
+
+
+if __name__ == "__main__":
+    app = yp.PanelApp("org.yumi.panel.session", "Питание системы", "⏻", lambda panel, body: Session(panel, body))
+    sys.exit(app.run(sys.argv))

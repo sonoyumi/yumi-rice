@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+# hyprlock-info — данные для макета экрана блокировки «Yumi Google» (yumi-google.conf)
+# hyprlock-info <weather|quote|tablo|profile|net|battery|music-head|music-title|music-bar|art>
+# Откат: hyprlock-google-uninstall
+
+export LANG=C.UTF-8 LC_ALL=C.UTF-8  # playerctl и кириллица без этого ломаются
+cache=${XDG_CACHE_HOME:-$HOME/.cache}/hyprlock-info; mkdir -p "$cache"
+CITY=Bolzano
+
+# цвет акцента из обоев (wallbash), для полосы прогресса
+acc="#$(awk '{print $7}' ~/.cache/yumi-accent/accent.txt 2>/dev/null)"; [[ $acc == "#" ]] && acc=$(awk '/^\$wallbash_1xa7 /{print "#" $3; exit}' ~/.config/hypr/themes/colors.conf 2>/dev/null)   # живой акцент (yumi-accent)
+acc=${acc:-#B19AE6}
+
+# дополнить строку пробелами до n символов
+rep() { local i o=''; for ((i = 0; i < $2; i++)); do o+=$1; done; printf '%s' "$o"; }
+pad() { local s=$1 n=$2; local l=${#s}; (( l < n )) && s+=$(printf '%*s' $((n - l)) ''); printf '%s' "$s"; }
+
+case $1 in
+weather)  # раз в 15 мин, при ошибке сети — последнее удачное значение
+    f=$cache/weather
+    if [[ ! -s $f || -n $(find "$f" -mmin +15 2>/dev/null) ]]; then
+        # обновляем в фоне: экран не ждёт сеть, сейчас показываем кеш
+        ( w=$(curl -sf --max-time 6 "https://wttr.in/$CITY?format=%t|%C&lang=it" 2>/dev/null)
+          [[ $w == *'|'* && $w != *Unknown* ]] && printf '%s' "$w" > "$f.tmp" && mv "$f.tmp" "$f" ) >/dev/null 2>&1 &
+    fi
+    [[ -s $f ]] || { echo "󰖐  $CITY"; exit; }
+    IFS='|' read -r t c < "$f"; t=${t#+}
+    case ${c,,} in
+        *temporal*|*tuon*) i=󰖓 ;; *neve*|*nevicat*) i=󰖘 ;; *piogg*|*rovesc*|*pioviggin*) i=󰖗 ;;
+        *nebbi*|*foschi*) i=󰖑 ;; *sereno*|*sole*|*soleggiat*) i=󰖙 ;; *) i=󰖐 ;;
+    esac
+    echo "$i  $CITY · $t · ${c,,}" ;;
+
+quote)  # новая цитата каждые 10 минут (и при каждой блокировке)
+    mapfile -t q < <(grep -vE '^\s*(#|$)' ~/.config/hypr/hyprlock/quotes.txt 2>/dev/null)
+    (( ${#q[@]} )) || { echo "«I use Arch, btw»"; exit; }
+    line=${q[RANDOM % ${#q[@]}]}
+    text=${line%%|*}; who=${line#*|}; [[ $line == *'|'* ]] || who=""
+    text=${text//&/&amp;}; text=${text//</&lt;}; who=${who//&/&amp;}; who=${who//</&lt;}
+    echo "<i>«$text»</i>"
+    [[ -n $who ]] && echo "<span size='65%' alpha='65%'>— $who</span>" ;;
+
+tablo)  # правая колонка табло: день / дата / аптайм, одинаковой ширины
+    days=(Воскресенье Понедельник Вторник Среда Четверг Пятница Суббота)
+    months=(января февраля марта апреля мая июня июля августа сентября октября ноября декабря)
+    d=${days[$(date +%w)]}; m=${months[$(( 10#$(date +%m) - 1 ))]}
+    sec=$(cut -d. -f1 /proc/uptime); dd=$((sec / 86400)); up=$(printf '%02d:%02d' $((sec % 86400 / 3600)) $((sec % 3600 / 60)))
+    (( dd > 0 )) && up="$dd д $up"
+    echo "<span size='145%' weight='bold'>$d</span>"
+    echo "<span alpha='70%'>$(date +%-d) $m $(date +%Y)</span>"
+    echo "<span foreground='$acc'>󰔟 в сети $up</span>" ;;
+
+profile)  # строки профиля рядом с аватаркой
+    echo "<b>$(cat /etc/hostname)</b>"
+    echo "<span foreground='$acc'>󰣇 Arch Linux</span>"
+    echo "<span alpha='70%' size='90%'>󰌽 $(uname -r | cut -d- -f1-2) · 󰏖 $(pacman -Qq | wc -l) pkg</span>" ;;
+
+net)  # без сканирования эфира: nmcli dev wifi пересканирует Wi-Fi и тормозит экран на секунды
+    act=$(nmcli -t -f NAME,TYPE connection show --active 2>/dev/null)
+    s=$(awk -F: '$2 ~ /wireless/ {print $1; exit}' <<< "$act")
+    [[ -n $s ]] && s=$(nmcli -g 802-11-wireless.ssid connection show id "$s" 2>/dev/null || echo "$s")   # имя сети, а не профиля
+    [[ -n $s ]] && w="󰖩 $s" || w="󰖪 нет Wi-Fi"
+    grep -q '^tailscale0:' <<< "$act" && w+=" · 󰒄 Tailscale"
+    echo "$w" ;;
+
+battery)
+    b=/sys/class/power_supply/macsmc-battery; c=$(cat $b/capacity); s=$(cat $b/status)
+    icons=(󰂎 󰁺 󰁻 󰁼 󰁽 󰁾 󰁿 󰂀 󰂁 󰂂 󰁹); i=${icons[c / 10]}
+    [[ $s == Charging ]] && i=󰂄
+    echo "$i $c%" ;;
+
+music-head)  # «Сейчас играет» + плеер
+    st=$(playerctl status 2>/dev/null)
+    case $st in Playing) h="󰐊 Сейчас играет" ;; Paused) h="󰏤 На паузе" ;; *) h="󰝛 Тишина" ;; esac
+    p=$(playerctl metadata --format '{{playerName}}' 2>/dev/null)
+    case ${p,,} in firefox*) p="󰈹 Firefox" ;; spotify*) p="󰓇 Spotify" ;; mpv*) p="󰐹 mpv" ;; chromium*) p=" Chromium" ;; "") p="" ;; *) p="󰝚 $p" ;; esac
+    echo "$h${p:+  ·  $p}" ;;
+
+music-title)
+    t=$(playerctl metadata --format '{{title}}' 2>/dev/null); a=$(playerctl metadata --format '{{artist}}' 2>/dev/null)
+    [[ -z $t ]] && { echo "ничего не играет"; exit; }
+    s="$t"; [[ -n $a ]] && s+=" — $a"
+    (( ${#s} > 32 )) && s="${s:0:31}…"
+    s=${s//&/&amp;}; s=${s//</&lt;}
+    echo "$s" ;;
+
+music-bar)  # полоса прогресса текстом + время
+    len=$(playerctl metadata mpris:length 2>/dev/null); pos=$(playerctl position 2>/dev/null)
+    fmt() { printf '%d:%02d' $(( $1 / 60 )) $(( $1 % 60 )); }
+    n=22
+    if [[ -n $len && $len -gt 0 && -n $pos ]]; then
+        L=$(( len / 1000000 )); P=${pos%.*}; (( P > L )) && P=$L
+        f=$(( P * n / L ))
+        bar="<span foreground='$acc'>$(rep ━ $f)</span><span alpha='25%'>$(rep ━ $((n - f)))</span>"
+        echo "$bar  <span alpha='70%' size='85%'>$(fmt $P) / $(fmt $L)</span>"
+    else
+        echo "<span alpha='25%'>$(rep ━ $n)</span>  <span alpha='70%' size='85%'>-:-- / -:--</span>"
+    fi ;;
+
+play-icon)  # значок для кнопки: пауза, если играет
+    [[ $(playerctl status 2>/dev/null) == Playing ]] && echo "󰏤" || echo "󰐊" ;;
+
+music)  # вся карточка одной надписью и одним вызовом playerctl: заголовок / трек / прогресс
+    IFS=$'\x1f' read -r st pl t a L P < <(playerctl metadata --format $'{{status}}\x1f{{playerName}}\x1f{{title}}\x1f{{artist}}\x1f{{mpris:length}}\x1f{{position}}' 2>/dev/null)
+    case $st in Playing) h="󰐊 Сейчас играет" ;; Paused) h="󰏤 На паузе" ;; *) h="󰝛 Тишина" ;; esac
+    case ${pl,,} in firefox*) pl="󰈹 Firefox" ;; spotify*) pl="󰓇 Spotify" ;; mpv*) pl="󰐹 mpv" ;; chromium*) pl=" Chromium" ;; "") ;; *) pl="󰝚 $pl" ;; esac
+    s="$t"; [[ -n $a ]] && s+=" — $a"; [[ -z $t ]] && s="ничего не играет"
+    (( ${#s} > 32 )) && s="${s:0:31}…"; s=${s//&/&amp;}; s=${s//</&lt;}
+    fmt() { printf '%d:%02d' $(( $1 / 60 )) $(( $1 % 60 )); }
+    n=22
+    if [[ $L =~ ^[0-9]+$ && $L -gt 0 && $P =~ ^[0-9]+$ ]]; then
+        L=$(( L / 1000000 )); P=$(( P / 1000000 )); (( P > L )) && P=$L; f=$(( P * n / L ))
+        bar="<span foreground='$acc'>$(rep ━ $f)</span><span alpha='25%'>$(rep ━ $((n - f)))</span>  <span alpha='70%' size='85%'>$(fmt $P) / $(fmt $L)</span>"
+    else
+        bar="<span alpha='25%'>$(rep ━ $n)</span>  <span alpha='70%' size='85%'>-:-- / -:--</span>"
+    fi
+    echo "<span size='77%' alpha='85%'>$h${pl:+  ·  $pl}</span>"
+    echo "$s"
+    echo "<span size='77%'>$bar</span>" ;;
+
+art)  # путь к обложке текущего трека (кеш), иначе заглушка
+    u=$(playerctl metadata mpris:artUrl 2>/dev/null)
+    ph=$cache/art-placeholder-${acc#\#}.png   # своя заглушка под каждый цвет обоев
+    [[ -s $ph ]] || magick -size 136x136 "xc:$acc" -font "$HOME/.local/share/fonts/JetBrainsMono/JetBrainsMonoNerdFont-Regular.ttf" -pointsize 64 -fill '#140C26' -gravity center -annotate +0+0 '󰝚' "$ph" 2>/dev/null
+    cmp -s "$ph" "$cache/art-placeholder.png" || cp -f "$ph" "$cache/art-placeholder.png"   # постоянное имя для конфига
+    [[ -z $u ]] && { echo "$ph"; exit; }
+    out=$cache/art-$(printf '%s' "$u" | md5sum | cut -c1-12).png
+    if [[ ! -s $out ]]; then
+        case $u in
+            file://*) src=${u#file://}; src=$(printf '%b' "${src//%/\\x}") ;;
+            http*)    src=$cache/art-dl; curl -sfL --max-time 5 "$u" -o "$src" || src="" ;;
+            *)        src="" ;;
+        esac
+        [[ -n $src && -s $src ]] && magick "$src" -resize 136x136^ -gravity center -extent 136x136 "$out" 2>/dev/null
+        find "$cache" -name 'art-*.png' ! -name "${ph##*/}" ! -name art-placeholder.png -mmin +1440 -delete 2>/dev/null
+    fi
+    [[ -s $out ]] && echo "$out" || echo "$ph" ;;
+
+*) echo "hyprlock-info: weather quote tablo profile net battery music music-head music-title music-bar play-icon art"; exit 1 ;;
+esac

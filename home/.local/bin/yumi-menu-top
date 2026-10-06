@@ -1,0 +1,579 @@
+#!/usr/bin/env python3
+"""yumi-menu-top — меню «Процессы» на GTK (каркас yumi-panel) вместо rofi menu-top.
+  yumi-menu-top [--bar|--center]   открыть / закрыть
+  yumi-menu-top --close            закрыть открытое меню
+Шапка: загрузка CPU и память; мини-графики CPU и RAM за последнюю минуту (раз в 1 с, /proc читается в потоке),
+температура (самый горячий датчик SMC). Ниже — самые тяжёлые приложения (по памяти или по CPU),
+клик — подстраница: PID, команда, память, CPU, время работы, «Завершить» (SIGTERM) и «Убить» (SIGKILL).
+Приложения группируются и скрываются так же, как в пилюле: ~/.local/bin/waybar-top и ~/.config/waybar/top-hide.
+
+Отладка:
+  YP_DRYRUN=1          сигналы процессам не отправляются — команда пишется в stderr
+  YP_TOP_PAGE=1        сразу открыть подстраницу первого приложения в списке
+  YP_TOP_SORT=cpu      начальная сортировка по CPU
+  YP_TOP_CONFIRM=1     на подстранице сразу показать подтверждение «Убить»
+  YP_TOP_ACT=TERM|KILL (только вместе с YP_DRYRUN=1) через 1,5 с «нажать» кнопку на подстранице
+Откат: удалить этот файл (старое меню ~/.local/bin/menu-top не тронуто)."""
+import os
+import sys
+import threading
+import time
+from importlib.machinery import SourceFileLoader
+
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-panel"))
+import yumipanel as yp  # noqa: E402  (сам перезапускает процесс с layer-shell)
+from yumipanel import Gtk, GLib, Pango  # noqa: E402
+import gi  # noqa: E402
+try:
+    gi.require_version("GioUnix", "2.0")
+    from gi.repository import GioUnix as DesktopNS  # noqa: E402
+except (ValueError, ImportError):
+    from gi.repository import Gio as DesktopNS  # noqa: E402
+
+# группировка процессов по приложениям, PSS, top-hide, защищённые — общие с пилюлей
+wt = SourceFileLoader("waybar_top", os.path.expanduser("~/.local/bin/waybar-top")).load_module()
+
+HISTORY = 60          # точек на графике (секунд)
+ROWS = 8              # строк в списке приложений
+APPS_EVERY = 2        # список приложений обновляется раз в 2 с (обход /proc/*/smaps_rollup тяжелее)
+TICK = os.sysconf("SC_CLK_TCK")
+PAGE = os.sysconf("SC_PAGE_SIZE")
+RED, ORANGE, GREEN = "#ed8796", "#f5a97f", "#a6da95"
+
+CSS = f"""
+.yp-tp-card {{ background: alpha(@yp-btn, 0.55); border-radius: 20px; padding: 10px 12px; }}
+.yp-tp-graph-box {{ background: alpha(@yp-on-acc, 0.35); border-radius: 14px; padding: 6px 8px 4px 8px; }}
+.yp-tp-graph-name {{ font-size: 9pt; font-weight: 700; color: alpha(@yp-fg2, 0.75); }}
+.yp-tp-graph-val {{ font-size: 13pt; font-weight: 800; color: @yp-accent; }}
+.yp-tp-graph-val.warn {{ color: {ORANGE}; }}
+.yp-tp-graph-val.crit {{ color: {RED}; }}
+.yp-tp-graph {{ min-height: 44px; color: @yp-accent; }}
+.yp-tp-graph.warn {{ color: {ORANGE}; }}
+.yp-tp-graph.crit {{ color: {RED}; }}
+.yp-tp-chip {{ font-size: 9.5pt; color: alpha(@yp-fg2, 0.85); }}
+.yp-tp-chip-icon {{ color: @yp-accent; }}
+.yp-tp-chip-icon.warn {{ color: {ORANGE}; }}
+.yp-tp-chip-icon.crit {{ color: {RED}; }}
+.yp-tp-row {{ padding: 6px 12px; }}
+.yp-tp-num {{ font-size: 9.5pt; color: alpha(@yp-fg2, 0.85); }}
+.yp-tp-num.lead {{ color: @yp-fg; font-weight: 700; }}
+.yp-tp-lock {{ font-size: 10pt; color: alpha(@yp-fg2, 0.55); }}
+.yp-tp-appicon {{ -gtk-icon-size: 18px; }}
+.yp-tp-glyph {{ color: @yp-accent; font-size: 13pt; }}
+.yp-tp-head-icon {{ -gtk-icon-size: 34px; }}
+.yp-tp-head-glyph {{ color: @yp-accent; font-size: 24pt; }}
+.yp-tp-head-name {{ font-size: 13pt; font-weight: 800; }}
+.yp-tp-head-sub {{ font-size: 9.5pt; color: alpha(@yp-fg2, 0.8); }}
+.yp-tp-cmd {{ font-family: "JetBrainsMono Nerd Font"; font-size: 9pt; color: alpha(@yp-fg2, 0.85);
+              background: alpha(@yp-on-acc, 0.45); border-radius: 12px; padding: 6px 10px; }}
+"""
+
+
+# ---------- данные системы ----------
+def read_cpu():
+    """(busy, total) тиков из /proc/stat."""
+    with open("/proc/stat") as f:
+        v = [int(x) for x in f.readline().split()[1:]]
+    idle = v[3] + (v[4] if len(v) > 4 else 0)
+    return sum(v) - idle, sum(v)
+
+
+def read_mem():
+    """(занято, всего) в кБ."""
+    info = {}
+    with open("/proc/meminfo") as f:
+        for line in f:
+            k, v = line.split(":", 1)
+            info[k] = int(v.split()[0])
+    total = info.get("MemTotal", 1)
+    return total - info.get("MemAvailable", total), total
+
+
+def read_temp():
+    """Самый горячий датчик из hwmon (на M1 нет датчика CPU — берём SMC/усилители): (°C, имя) или None."""
+    best = None
+    base = "/sys/class/hwmon"
+    try:
+        hw = os.listdir(base)
+    except OSError:
+        return None
+    for h in hw:
+        d = os.path.join(base, h)
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for n in names:
+            if not (n.startswith("temp") and n.endswith("_input")):
+                continue
+            try:
+                with open(os.path.join(d, n)) as f:
+                    t = int(f.read()) / 1000
+                label = n.replace("_input", "")
+                try:
+                    with open(os.path.join(d, n.replace("_input", "_label"))) as f:
+                        label = f.read().strip()
+                except OSError:
+                    with open(os.path.join(d, "name")) as f:
+                        label = f.read().strip()
+            except (OSError, ValueError):
+                continue
+            if 0 < t < 150 and (best is None or t > best[0]):
+                best = (t, label)
+    return best
+
+
+def uptime_s():
+    with open("/proc/uptime") as f:
+        return float(f.read().split()[0])
+
+
+def proc_info(pid):
+    """Команда, время старта (с от загрузки), владелец, потоки, состояние главного процесса."""
+    d = {"cmd": "", "start": None, "threads": None, "state": ""}
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            d["cmd"] = f.read().replace(b"\0", b" ").decode(errors="replace").strip()
+        with open(f"/proc/{pid}/stat") as f:
+            s = f.read()
+        fields = s[s.rindex(")") + 2:].split()
+        d["state"] = fields[0]
+        d["threads"] = int(fields[17])
+        d["start"] = int(fields[19]) / TICK
+        if not d["cmd"]:
+            d["cmd"] = "[" + s[s.index("(") + 1:s.rindex(")")] + "]"
+    except (OSError, ValueError, IndexError):
+        pass
+    return d
+
+
+def size(kb):
+    if kb >= 1048576:
+        return f"{kb / 1048576:.1f} ГБ"
+    return f"{kb / 1024:.0f} МБ"
+
+
+def gb(kb):
+    return f"{kb / 1048576:.1f}"
+
+
+def duration(sec):
+    sec = int(max(sec, 0))
+    d, r = divmod(sec, 86400)
+    h, r = divmod(r, 3600)
+    m, s = divmod(r, 60)
+    if d:
+        return f"{d} д {h} ч"
+    if h:
+        return f"{h} ч {m:02d} мин"
+    if m:
+        return f"{m} мин {s:02d} с"
+    return f"{s} с"
+
+
+def level(pct):
+    return "crit" if pct >= 90 else "warn" if pct >= 70 else ""
+
+
+# ---------- значки приложений ----------
+GLYPHS = {"firefox": "󰈹", "kitty": "󰄛", "code": "󰨞", "telegram": "", "python": "󰌠", "node": "󰎙",
+          "claude": "󰚩", "hyprland": "", "waybar": "󰕮", "pipewire": "󰕾", "wireplumber": "󰕾",
+          "solaar": "󰍽", "steam": "󰓓", "discord": "󰙯", "spotify": "󰓇", "chromium": "", "obs": "󰑋"}
+_icon_cache = {}
+
+
+def app_icon(name):
+    """Gtk.Image со значком из .desktop (если найдётся) или Nerd-глиф."""
+    key = name.lower()
+    if key not in _icon_cache:
+        gicon = None
+        for cand in (key, name, f"org.{key}.desktop", f"com.{key}"):
+            try:
+                info = DesktopNS.DesktopAppInfo.new(cand + ".desktop")
+            except TypeError:
+                info = None
+            if info and info.get_icon():
+                gicon = info.get_icon()
+                break
+        if gicon is None:
+            for group in DesktopNS.DesktopAppInfo.search(key)[:1]:
+                for did in group[:1]:
+                    info = DesktopNS.DesktopAppInfo.new(did)
+                    if info and info.get_icon() and key in (did.lower() + (info.get_executable() or "").lower()):
+                        gicon = info.get_icon()
+        _icon_cache[key] = gicon
+    gicon = _icon_cache[key]
+    if gicon is not None:
+        return Gtk.Image(gicon=gicon, css_classes=["yp-tp-appicon"])
+    glyph = next((g for k, g in GLYPHS.items() if k in key), "󰓅")
+    return Gtk.Label(label=glyph, css_classes=["yp-tp-glyph"])
+
+
+def lbl(text="", classes=(), xalign=0.0, **kw):
+    return Gtk.Label(label=text, xalign=xalign, css_classes=list(classes), **kw)
+
+
+# ---------- мини-график ----------
+class Graph(Gtk.DrawingArea):
+    """Линия + заливка за последние HISTORY секунд, 0–100 %. Цвет — CSS color (акцент / оранжевый / красный)."""
+
+    def __init__(self):
+        super().__init__(hexpand=True, css_classes=["yp-tp-graph"])
+        self.values = []
+        self.set_draw_func(self.draw)
+
+    def push(self, v):
+        self.values.append(max(0.0, min(v, 100.0)))
+        del self.values[:-HISTORY]
+        self.queue_draw()
+
+    def draw(self, _area, cr, w, h):
+        c = self.get_color()
+        # сетка 50 %
+        cr.set_source_rgba(c.red, c.green, c.blue, 0.12)
+        cr.set_line_width(1)
+        cr.move_to(0, round(h / 2) + 0.5)
+        cr.line_to(w, round(h / 2) + 0.5)
+        cr.stroke()
+        if not self.values:
+            return
+        step = w / (HISTORY - 1)
+        n = len(self.values)
+        pts = [(w - (n - 1 - i) * step, 2 + (h - 4) * (1 - v / 100)) for i, v in enumerate(self.values)]
+        if n == 1:
+            pts.insert(0, (pts[0][0] - step, pts[0][1]))
+        cr.move_to(pts[0][0], h)
+        for x, y in pts:
+            cr.line_to(x, y)
+        cr.line_to(pts[-1][0], h)
+        cr.close_path()
+        cr.set_source_rgba(c.red, c.green, c.blue, 0.22)
+        cr.fill()
+        cr.move_to(*pts[0])
+        for x, y in pts[1:]:
+            cr.line_to(x, y)
+        cr.set_source_rgba(c.red, c.green, c.blue, 1.0)
+        cr.set_line_width(2)
+        cr.set_line_join(1)   # ROUND
+        cr.stroke()
+        x, y = pts[-1]
+        cr.arc(x - 1.5, y, 2.5, 0, 6.2832)
+        cr.fill()
+
+
+class GraphBox(Gtk.Box):
+    def __init__(self, name):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True,
+                         css_classes=["yp-tp-graph-box"])
+        top = Gtk.Box(spacing=6)
+        top.append(lbl(name, ["yp-tp-graph-name"], hexpand=True, valign=Gtk.Align.CENTER))
+        self.val = lbl("…", ["yp-tp-graph-val"], 1.0)
+        top.append(self.val)
+        self.append(top)
+        self.graph = Graph()
+        self.append(self.graph)
+
+    def set(self, pct, text):
+        self.val.set_label(text)
+        lv = level(pct)
+        for w in (self.val, self.graph):
+            for c in ("warn", "crit"):
+                (w.add_css_class if c == lv else w.remove_css_class)(c)
+        self.graph.push(pct)
+
+
+# ---------- строка приложения ----------
+class AppRow(Gtk.Button):
+    def __init__(self, on_click):
+        super().__init__(css_classes=["yp-row", "yp-tp-row"])
+        self.name = None
+        self.box = Gtk.Box(spacing=10)
+        self.icon_slot = Gtk.Box(width_request=22, halign=Gtk.Align.CENTER)
+        self.box.append(self.icon_slot)
+        self.title = lbl("", (), hexpand=True, ellipsize=Pango.EllipsizeMode.END, max_width_chars=1)
+        self.box.append(self.title)
+        self.lock = lbl("󰌾", ["yp-tp-lock"], tooltip_text="Системное — закрыть из меню нельзя")
+        self.box.append(self.lock)
+        self.cpu = lbl("", ["yp-tp-num"], 1.0, width_chars=5)
+        self.mem = lbl("", ["yp-tp-num"], 1.0, width_chars=7)
+        self.box.append(self.cpu)
+        self.box.append(self.mem)
+        self.set_child(self.box)
+        self.connect("clicked", lambda *_: self.name and on_click(self.name))
+
+    def update(self, name, a, sort, protected):
+        if name != self.name:
+            self.name = name
+            while (c := self.icon_slot.get_first_child()):
+                self.icon_slot.remove(c)
+            self.icon_slot.append(app_icon(name))
+            self.title.set_label(name)
+        n = len(a["pids"])
+        self.set_tooltip_text(f"{name}: {n} проц. — подробнее")
+        self.lock.set_visible(protected)
+        self.cpu.set_label(f"{a.get('pct', 0):.0f}%")
+        self.mem.set_label(size(a["mem"]))
+        for w, lead in ((self.cpu, sort == "cpu"), (self.mem, sort == "mem")):
+            (w.add_css_class if lead else w.remove_css_class)("lead")
+
+
+class Top:
+    def __init__(self, panel, body):
+        self.panel = panel
+        self.sort = "cpu" if os.environ.get("YP_TOP_SORT") == "cpu" else "mem"
+        self.apps = {}
+        self.page = None           # открытая подстраница: dict(name, widgets…)
+        self.alive = True
+        panel.add_css(CSS)
+
+        # графики и температура
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, css_classes=["yp-tp-card"])
+        graphs = Gtk.Box(spacing=8, homogeneous=True)
+        self.g_cpu, self.g_ram = GraphBox("CPU"), GraphBox("RAM")
+        graphs.append(self.g_cpu)
+        graphs.append(self.g_ram)
+        card.append(graphs)
+        chips = Gtk.Box(spacing=14)
+        self.temp_icon, self.temp = self.chip(chips, "󰔏")
+        self.load_icon, self.load = self.chip(chips, "󰓅")
+        self.up_icon, self.up = self.chip(chips, "󰅐")
+        self.temp.get_parent().set_tooltip_text("Самый горячий датчик")
+        self.load.get_parent().set_tooltip_text("Средняя нагрузка за 1 / 5 / 15 мин")
+        self.up.get_parent().set_tooltip_text("Время работы системы")
+        card.append(chips)
+        body.append(card)
+
+        # список приложений
+        body.append(yp.section("ПРИЛОЖЕНИЯ"))
+        body.append(yp.Segmented([("mem", "󰍛", "По памяти", True), ("cpu", "󰻠", "По CPU", True)],
+                                 self.sort, self.set_sort))
+        self.list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.rows = []
+        for _ in range(ROWS):
+            r = AppRow(self.open_app)
+            r.set_visible(False)
+            self.rows.append(r)
+            self.list.append(r)
+        self.wait = yp.spinner_row("Считаю процессы…")
+        self.list.append(self.wait)
+        body.append(self.list)
+        if wt.hidden():
+            body.append(yp.hint(f"Скрыто ({len(wt.hidden())}): " + ", ".join(sorted(wt.hidden())) +
+                                " — ~/.config/waybar/top-hide"))
+        body.append(yp.row_button("󰨇", "Системный монитор (btop)", self.open_btop))
+
+        panel.set_subtitle("CPU …")
+        panel.connect("destroy", lambda *_: setattr(self, "alive", False))
+        threading.Thread(target=self.poll, daemon=True).start()
+
+    @staticmethod
+    def chip(parent, icon):
+        box = Gtk.Box(spacing=5)
+        ic = lbl(icon, ["yp-tp-chip", "yp-tp-chip-icon"])
+        t = lbl("…", ["yp-tp-chip"])
+        box.append(ic)
+        box.append(t)
+        parent.append(box)
+        return ic, t
+
+    # ---------- опрос в потоке ----------
+    def poll(self):
+        prev_cpu = read_cpu()
+        prev_apps, prev_t = None, None
+        tick = 0
+        first = True
+        while self.alive:
+            t0 = time.monotonic()
+            try:
+                busy, total = read_cpu()
+                cpu = (busy - prev_cpu[0]) / max(total - prev_cpu[1], 1) * 100
+                prev_cpu = (busy, total)
+                used, mtotal = read_mem()
+                sysd = {"cpu": cpu, "used": used, "total": mtotal, "temp": read_temp(),
+                        "load": os.getloadavg(), "up": uptime_s(), "first": first}
+                GLib.idle_add(self.apply_sys, sysd)
+                if tick % APPS_EVERY == 0:
+                    apps = wt.snapshot()
+                    now = time.monotonic()
+                    if prev_apps is not None:
+                        wt.cpu_percent(apps, prev_apps, now - prev_t)
+                        GLib.idle_add(self.apply_apps, apps)
+                    prev_apps, prev_t = {n: a["cpu"] for n, a in apps.items()}, now
+            except Exception as e:  # noqa: BLE001 — опрос не должен падать
+                print("yumi-menu-top:", e, file=sys.stderr)
+            tick += 1
+            # первый замер CPU по процессам — через 0,5 с, чтобы список появился сразу
+            delay = 0.5 if first else 1.0
+            first = False
+            if tick == 1:
+                tick = APPS_EVERY       # следующий проход сразу обновит приложения
+            time.sleep(max(delay - (time.monotonic() - t0), 0.05))
+
+    def apply_sys(self, d):
+        if d["first"]:
+            return False                 # первый замер CPU неточный (интервал 0)
+        cpu, used, total = d["cpu"], d["used"], d["total"]
+        ram = used / total * 100
+        self.g_cpu.set(cpu, f"{cpu:.0f}%")
+        self.g_ram.set(ram, f"{ram:.0f}%")
+        if not self.page:            # на подстранице в шапке — данные процесса
+            self.panel.set_subtitle(f"CPU {cpu:.0f}% · RAM {gb(used)} из {gb(total)} ГБ", live=True)
+        if d["temp"]:
+            t, name = d["temp"]
+            self.temp.set_label(f"{t:.0f} °C")
+            self.temp.get_parent().set_tooltip_text(f"Самый горячий датчик: {name}")
+            lv = "crit" if t >= 85 else "warn" if t >= 70 else ""
+            for c in ("warn", "crit"):
+                (self.temp_icon.add_css_class if c == lv else self.temp_icon.remove_css_class)(c)
+        else:
+            self.temp.set_label("—")
+        self.load.set_label(" / ".join(f"{x:.1f}" for x in d["load"]))
+        self.up.set_label(duration(d["up"]))
+        return False
+
+    def apply_apps(self, apps):
+        self.apps = apps
+        self.wait.set_visible(False)
+        self.fill_rows()
+        if self.page:
+            self.update_page()
+        if os.environ.get("YP_TOP_PAGE") and not getattr(self, "auto_opened", False):
+            self.auto_opened = True
+            first = self.rows[0].name
+            if first:
+                self.open_app(first)
+        return False
+
+    def fill_rows(self):
+        key = (lambda kv: -kv[1].get("pct", 0)) if self.sort == "cpu" else (lambda kv: -kv[1]["mem"])
+        top = sorted(self.apps.items(), key=key)[:ROWS]
+        for i, r in enumerate(self.rows):
+            if i < len(top):
+                name, a = top[i]
+                r.update(name, a, self.sort, self.protected(name, a))
+                r.set_visible(True)
+            else:
+                r.set_visible(False)
+
+    @staticmethod
+    def protected(name, a):
+        return not a["own"] or bool(wt.PROTECTED.match(name))
+
+    def set_sort(self, key):
+        self.sort = key
+        if self.apps:
+            self.fill_rows()
+
+    # ---------- подстраница приложения ----------
+    def open_app(self, name):
+        a = self.apps.get(name)
+        if not a:
+            return
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        head = Gtk.Box(spacing=12, css_classes=["yp-tp-card"])
+        ic = app_icon(name)
+        ic.add_css_class("yp-tp-head-icon" if isinstance(ic, Gtk.Image) else "yp-tp-head-glyph")
+        head.append(ic)
+        tb = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER, hexpand=True)
+        tb.append(lbl(name, ["yp-tp-head-name"], ellipsize=Pango.EllipsizeMode.END, max_width_chars=1))
+        sub = lbl("", ["yp-tp-head-sub"])
+        tb.append(sub)
+        head.append(tb)
+        box.append(head)
+
+        rows = {k: yp.info_row(t, "…") for k, t in (
+            ("pid", "PID"), ("count", "Процессов"), ("mem", "Память (PSS)"), ("cpu", "CPU"),
+            ("time", "Работает"), ("threads", "Потоков (главный)"))}
+        for r in rows.values():
+            box.append(r)
+        box.append(yp.section("КОМАНДА"))
+        cmd = lbl("", ["yp-tp-cmd"], wrap=True, max_width_chars=1, selectable=True,
+                  wrap_mode=Pango.WrapMode.CHAR, lines=4, ellipsize=Pango.EllipsizeMode.END)
+        box.append(cmd)
+
+        prot = self.protected(name, a)
+        btns = Gtk.Box(spacing=8, homogeneous=True)
+        term = yp.action_button("󰅖  Завершить", lambda *_: self.signal(name, "TERM"), "danger")
+        kill = yp.action_button("󰚌  Убить", lambda *_: self.ask_kill(), "danger-solid")
+        term.set_tooltip_text("Вежливо попросить закрыться (SIGTERM) — можно сохранить данные")
+        kill.set_tooltip_text("Остановить немедленно (SIGKILL) — несохранённое пропадёт")
+        btns.append(term)
+        btns.append(kill)
+        confirm = yp.revealer(yp.confirm_box(
+            f"Убить «{name}» ({len(a['pids'])} проц.)? Несохранённые данные пропадут.",
+            lambda: self.signal(name, "KILL"), "Убить", lambda: confirm.set_reveal_child(False)))
+        if prot:
+            term.set_sensitive(False)
+            kill.set_sensitive(False)
+            box.append(yp.hint("󰌾  Системное приложение или чужие процессы — закрывать из меню нельзя."))
+        box.append(btns)
+        box.append(confirm)
+
+        self.page = {"name": name, "rows": rows, "cmd": cmd, "sub": sub, "confirm": confirm,
+                     "btns": (term, kill), "prot": prot}
+        self.panel.push(name, box, "", on_leave=lambda: setattr(self, "page", None))
+        self.update_page()
+        if os.environ.get("YP_TOP_CONFIRM"):
+            GLib.timeout_add(300, lambda: self.ask_kill() or False)
+        if os.environ.get("YP_TOP_ACT") in ("TERM", "KILL") and yp.DRY:   # проверка: «нажать» кнопку
+            GLib.timeout_add(1500, lambda: self.signal(name, os.environ["YP_TOP_ACT"]) or False)
+
+    def update_page(self):
+        p = self.page
+        a = self.apps.get(p["name"])
+        if not a:
+            p["sub"].set_label("процесс завершился")
+            for b in p["btns"]:
+                b.set_sensitive(False)
+            self.panel.set_subtitle("Завершено", live=True)
+            return
+        pids = sorted(a["pids"])
+        infos = {pid: proc_info(pid) for pid in pids}
+        # главный процесс — самый старый (обычно родитель остальных)
+        main = min(pids, key=lambda p_: infos[p_]["start"] if infos[p_]["start"] is not None else 1e18)
+        mi = infos[main]
+        r = p["rows"]
+        r["pid"].value.set_label(str(main) + (f"  +{len(pids) - 1}" if len(pids) > 1 else ""))
+        r["pid"].value.set_tooltip_text(", ".join(map(str, pids[:40])) + (" …" if len(pids) > 40 else ""))
+        r["count"].value.set_label(str(len(pids)))
+        r["mem"].value.set_label(size(a["mem"]))
+        r["cpu"].value.set_label(f"{a.get('pct', 0):.1f}%")
+        r["time"].value.set_label(duration(uptime_s() - mi["start"]) if mi["start"] is not None else "—")
+        r["threads"].value.set_label(str(mi["threads"] or "—"))
+        p["cmd"].set_label(mi["cmd"] or "—")
+        p["sub"].set_label(("системное · " if p["prot"] else "") + f"{len(pids)} проц. · {size(a['mem'])}")
+        self.panel.set_subtitle(f"PID {main} · CPU {a.get('pct', 0):.0f}% · {size(a['mem'])}", live=True)
+
+    def ask_kill(self):
+        if self.page and not self.page["prot"]:
+            self.page["confirm"].set_reveal_child(True)
+
+    def signal(self, name, sig):
+        a = wt.snapshot().get(name)        # свежий список PID — не убить чужой процесс со старым номером
+        if not a:
+            self.panel.toast(f"«{name}» уже не запущено", hold=3)
+            return
+        if self.protected(name, a):
+            self.panel.toast("Системное — закрывать нельзя", error=True, hold=3)
+            return
+        me = {os.getpid(), os.getppid()}
+        pids = [str(p) for p in a["pids"] if p not in me]
+        ok, msg = yp.do("kill", f"-{sig}", *pids)
+        if self.page:
+            self.page["confirm"].set_reveal_child(False)
+        word = "Отправлен сигнал закрытия" if sig == "TERM" else "Убито"
+        if ok:
+            self.panel.toast(f"{word}: {name} ({len(pids)} проц.)" + (" — dry-run" if yp.DRY else ""), hold=3)
+            yp.do("pkill", "-RTMIN+12", "-x", "waybar")   # обновить пилюлю
+        else:
+            self.panel.toast(f"Не удалось: {msg[:60]}", error=True, hold=4)
+
+    def open_btop(self, *_):
+        yp.do("env", "-u", "LD_PRELOAD", "kitty", "--class", "btop", "-e", "btop", background=True)
+        if not yp.DRY:
+            self.panel.app.quit()
+
+
+if __name__ == "__main__":
+    app = yp.PanelApp("org.yumi.panel.top", "Система", "󰍛", lambda panel, body: Top(panel, body))
+    sys.exit(app.run(sys.argv))

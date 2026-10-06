@@ -11,7 +11,7 @@
   "control-center-margin-right": 10,
   "control-center-margin-left": 0,
   "control-center-width": 360,
-  "control-center-height": 640,
+  "control-center-height": 740,
   "fit-to-screen": false,
   "notification-window-width": 360,
   "notification-icon-size": 40,
@@ -36,17 +36,18 @@
   "widgets": [
     "buttons-grid",
     "title",
+    "dnd",
     "notifications"
   ],
   "widget-config": {
     "label": {
-      "text": ".",
+      "text": "Центр управления",
       "max-lines": 1
     },
     "title": {
-      "text": "Notifications",
+      "text": "УВЕДОМЛЕНИЯ",
       "clear-all-button": true,
-      "button-text": "󰎟  Clear"
+      "button-text": "󰎟  Очистить"
     },
     "buttons-grid": {
       "buttons-per-row": 4,
@@ -89,8 +90,12 @@
     "mpris": {
       "image-size": 56,
       "image-radius": 14
+    },
+    "dnd": {
+      "text": "󰂛   Не беспокоить"
     }
   },
   "control-center-positionX": "right",
-  "control-center-positionY": "top"
+  "control-center-positionY": "top",
+  "text-empty": "Нет уведомлений"
 }

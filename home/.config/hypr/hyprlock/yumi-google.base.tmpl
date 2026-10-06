@@ -1,0 +1,383 @@
+# ┌──────────────────────────────────────────────────────────────┐
+# │ Yumi Google — экран блокировки в стиле Google (вариант «Табло») │
+# │ Данные: ~/.local/bin/hyprlock-info, цитаты: quotes.txt          │
+# │ Цвета — из обоев (wallbash), как в layout20                     │
+# │ Центр привязан к центру экрана, уголки — к краям: одинаково на  │
+# │ ШАБЛОН: правь этот файл, затем hyprlock-google-build            │
+# │ (соберёт yumi-google.conf: eDP-1 ×1.0, DP-1 ×0.8)               │
+# └──────────────────────────────────────────────────────────────┘
+
+source = @HOME@/.config/hypr/themes/colors.conf
+source = @HOME@/.cache/yumi-accent/accent.conf   # живой акцент из обоев (yumi-accent)
+
+$accent = $yumi_acc
+$on_acc = $wallbash_pry1_rgba
+$text   = $wallbash_txt1_rgba
+$card   = $yumi_card   # тёмный тон обоев (yumi-accent)
+$mono   = JetBrainsMono Nerd Font Propo
+$info   = @HOME@/.local/bin/hyprlock-info
+
+general {
+    immediate_render = true
+    hide_cursor = false
+    fractional_scaling = 2   # буфер = физическое разрешение монитора
+    ignore_empty_input = true
+}
+
+animations {
+    enabled = true
+    # плавное проявление ~0,8 с: надписи (hyprlock готовит их по одной, до ~1 с) «доплывают» вместе с экраном
+    bezier = yumiSoft, 0.22, 1, 0.36, 1
+    animation = fadeIn, 1, 8, yumiSoft
+    animation = fadeOut, 0
+}
+
+background {
+    monitor =
+    path = @HOME@/.cache/hyde/hyprlock-bg.png
+    blur_passes = 2
+    blur_size = 5
+    zindex = 0
+}
+
+# ── Профиль: Соник + ник + Arch ─────────────────────────────────
+shape {
+    monitor =
+    size = 360, 88
+    color = $card
+    rounding = 18
+    position = 24, -24
+    halign = left
+    valign = top
+    zindex = 1
+    box = left, top, 24, 24, 326, 88
+}
+
+image {
+    monitor =
+    path = @HOME@/.config/hypr/hyprlock/avatar.jpg
+    size = 64
+    rounding = 14
+    border_size = 0
+    position = 36, -36
+    halign = left
+    valign = top
+    zindex = 2
+}
+
+label {
+    monitor =
+    text = cmd[update:600000] $info profile
+    color = $text
+    font_size = 11
+    font_family = $mono
+    text_align = left
+    position = 112, -36
+    halign = left
+    valign = top
+    zindex = 2
+}
+
+label {
+    monitor =
+    text = 󰣇
+    color = $accent
+    font_size = 26
+    font_family = $mono
+    position = 318, -40
+    halign = left
+    valign = top
+    zindex = 2
+    box = left, top, 309, 24, 29, 88
+}
+
+# ── Погода (Bolzano) ────────────────────────────────────────────
+shape {
+    monitor =
+    size = 320, 36
+    color = $card
+    rounding = 18
+    position = 0, -24
+    halign = center
+    valign = top
+    zindex = 1
+}
+
+label {
+    monitor =
+    text = cmd[update:900000] $info weather
+    color = $text
+    font_size = 13
+    font_family = $mono
+    position = 0, -31
+    halign = center
+    valign = top
+    zindex = 3
+}
+
+# ── Табло: время | день · дата · аптайм ─────────────────────────
+shape {
+    monitor =
+    size = 570, 170
+    color = $card
+    rounding = 28
+    position = 0, 145
+    halign = center
+    valign = center
+    zindex = 1
+}
+
+label {
+    monitor =
+    text = $TIME
+    color = $text
+    font_size = 72
+    font_family = SF Pro Display Bold
+    position = 28, 145
+    halign = center
+    valign = center
+    zindex = 2
+    pin = right
+}
+
+shape {
+    monitor =
+    size = 4, 110
+    color = $accent
+    rounding = 2
+    position = 56, 145
+    halign = center
+    valign = center
+    zindex = 2
+}
+
+label {
+    monitor =
+    text = cmd[update:60000] $info tablo
+    color = $text
+    font_size = 13
+    font_family = $mono
+    text_align = left
+    position = 84, 145
+    halign = center
+    valign = center
+    zindex = 2
+    pin = left
+}
+
+# ── Цитата про Linux / Arch ─────────────────────────────────────
+label {
+    monitor =
+    text = cmd[update:600000] $info quote
+    color = $text
+    font_size = 18
+    font_family = SF Pro Display
+    text_align = center
+    position = 0, 18
+    halign = center
+    valign = center
+    zindex = 3
+}
+
+# ── Пароль + раскладка ─────────────────────────────────────────
+input-field {
+    monitor =
+    size = 400, 56
+    outline_thickness = 2
+    outer_color = $accent
+    inner_color = $card
+    font_color = $text
+    font_family = $mono
+    check_color = $accent
+    fail_color = rgba(237, 135, 150, 0.95)
+    capslock_color = rgba(245, 169, 127, 0.95)
+    dots_size = 0.22
+    dots_spacing = 0.35
+    dots_center = true
+    fade_on_empty = false
+    placeholder_text = <span alpha="55%">пароль</span>
+    fail_text = <i>неверный пароль · $ATTEMPTS</i>
+    rounding = -1
+    position = 0, -108
+    halign = center
+    valign = center
+    zindex = 2
+}
+
+label {
+    monitor =
+    text = 󰌾
+    color = $text
+    font_size = 16
+    font_family = $mono
+    position = -168, -108
+    halign = center
+    valign = center
+    zindex = 3
+}
+
+shape {
+    monitor =
+    size = 76, 32
+    color = $accent
+    rounding = 16
+    position = 150, -108
+    halign = center
+    valign = center
+    zindex = 3
+}
+
+label {
+    monitor =
+    text = <b>󰌌 $LAYOUT[EN,RU,UA]</b>
+    color = $on_acc
+    font_size = 12
+    font_family = $mono
+    position = 150, -108
+    halign = center
+    valign = center
+    zindex = 4
+}
+
+# ── Музыка: обложка + трек + прогресс ───────────────────────────
+shape {
+    monitor =
+    size = 620, 100
+    color = $card
+    rounding = 20
+    position = 0, -260
+    halign = center
+    valign = center
+    zindex = 1
+}
+
+image {
+    monitor =
+    path = @HOME@/.cache/hyprlock-info/art-placeholder.png
+    reload_time = 2
+    reload_cmd = @HOME@/.local/bin/hyprlock-info art
+    size = 68
+    rounding = 12
+    border_size = 0
+    position = -260, -260
+    halign = center
+    valign = center
+    zindex = 2
+}
+
+
+label {
+    monitor =
+    text = cmd[update:1000] $info music
+    color = $text
+    font_size = 13
+    font_family = $mono
+    text_align = center
+    position = -30, -258
+    halign = center
+    valign = center
+    zindex = 5
+}
+
+
+# ── Кнопки управления музыкой (клик мышью; F7–F9 тоже работают) ──
+label {
+    monitor =
+    text = 󰒮
+    color = $text
+    font_size = 16
+    font_family = $mono
+    onclick = playerctl previous
+    position = 190, -260
+    halign = center
+    valign = center
+    zindex = 5
+}
+
+shape {
+    monitor =
+    size = 44, 44
+    color = $accent
+    rounding = -1
+    position = 238, -260
+    halign = center
+    valign = center
+    zindex = 2
+}
+
+label {
+    monitor =
+    text = cmd[update:1000] $info play-icon
+    color = $on_acc
+    font_size = 16
+    font_family = $mono
+    onclick = playerctl play-pause
+    position = 238, -260
+    halign = center
+    valign = center
+    zindex = 5
+}
+
+label {
+    monitor =
+    text = 󰒭
+    color = $text
+    font_size = 16
+    font_family = $mono
+    onclick = playerctl next
+    position = 286, -260
+    halign = center
+    valign = center
+    zindex = 5
+}
+
+# ── Таблетки внизу: сеть слева, батарея справа ──────────────────
+shape {
+    monitor =
+    size = 300, 36
+    color = $card
+    rounding = 18
+    position = 24, 24
+    halign = left
+    valign = bottom
+    zindex = 1
+    box = left, bottom, 24, 24, 380, 36
+}
+
+label {
+    monitor =
+    text = cmd[update:30000] $info net
+    color = $text
+    font_size = 11
+    font_family = $mono
+    position = 40, 33
+    halign = left
+    valign = bottom
+    zindex = 3
+    box = left, bottom, 24, 24, 380, 36
+}
+
+shape {
+    monitor =
+    size = 112, 36
+    color = $card
+    rounding = 18
+    position = -24, 24
+    halign = right
+    valign = bottom
+    zindex = 1
+    box = right, bottom, 24, 24, 84, 36
+}
+
+label {
+    monitor =
+    text = cmd[update:30000] $info battery
+    color = $text
+    font_size = 11
+    font_family = $mono
+    position = -42, 33
+    halign = right
+    valign = bottom
+    zindex = 3
+    box = right, bottom, 24, 24, 84, 36
+}

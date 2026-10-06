@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+# Откат yumi-player: вернуть rofi-плеер (menu-player), custom/player в Waybar и карточку MPRIS в swaync.
+# Правки снимаются точечно (другие изменения в этих файлах остаются). Если файл успели переделать
+# так, что нужный кусок не найден, — скрипт скажет об этом; исходники лежат в бэкапе.
+set -euo pipefail
+B="$HOME/.local/share/yumi-player-backup"
+[ -f "$B/created_at" ] || { echo "Бэкап не найден: $B"; exit 1; }
+pkill -f "$HOME/.local/bin/yumi-player( |$)" 2>/dev/null || true
+pkill -f "$HOME/.local/bin/waybar-player-(pill|cover)" 2>/dev/null || true
+
+python3 - "$HOME" <<'PY'
+import json, os, sys
+H = sys.argv[1]
+RL = f"{H}/.config/rice-local/home"
+missed = []
+
+def swap(path, pairs):
+    if not os.path.exists(path):
+        return
+    s = open(path).read()
+    for new, old in pairs:
+        if new in s:
+            s = s.replace(new, old)
+        elif old not in s:
+            missed.append(f"{path}: {new.splitlines()[0][:60]}")
+    open(path, "w").write(s)
+
+BIND_NEW = '''-- Плеер yumi-player (GTK4 + layer-shell): SUPER+M — по центру, повторно — закрыть
+hl.bind("SUPER + M", hl.dsp.exec_cmd("@HOME@/.local/bin/yumi-player toggle --center"), {description = "[Media] player"})
+
+-- Размытие под окном плеера (как у центра управления)
+hl.layer_rule({
+  name = "yumi_player_blur",
+  match = { namespace = "^yumi-player$" },
+  blur = true,
+  ignore_alpha = 0.5,
+})
+'''.replace("@HOME@", H)
+BIND_OLD = '''-- Плеер
+hl.bind("SUPER + M", hl.dsp.exec_cmd("@HOME@/.local/bin/menu-player --center"), {description = "[Media] player"})
+'''.replace("@HOME@", H)
+for p in (f"{H}/.config/hypr/hyprland.lua", f"{RL}/.config/hypr/hyprland.lua"):
+    swap(p, [(BIND_NEW, BIND_OLD)])
+
+# Waybar: модуль mpris → custom/player
+for p in (f"{H}/.config/waybar/layouts/yumi.jsonc", f"{RL}/.config/waybar/layouts/yumi.jsonc"):
+    if not os.path.exists(p):
+        continue
+    s = open(p).read()
+    if '"custom/player": {' in s:      # уже откатано
+        continue
+    i = s.find("    // Плеер: встроенный модуль")
+    j = s.find("\n    },\n", s.find('"mpris": {', i)) + len("\n    },\n") if i >= 0 else -1
+    if i < 0:   # пилюля «обложка + текст» (image#player-cover + custom/player-text)
+        i = s.find("    // Плеер: одна пилюля из двух модулей")
+        j = s.find("\n    },\n", s.find('"custom/player-text": {', i)) + len("\n    },\n") if i >= 0 else -1
+    if i >= 0:
+        s = s[:i] + '''    "custom/player": {
+        "exec": "@HOME@/.local/bin/waybar-player",
+        "restart-interval": 3,
+        "return-type": "json",
+        "format": "{}",
+        "on-click": "@HOME@/.local/bin/menu-player",
+        "on-click-middle": "playerctl play-pause"
+    },
+'''.replace("@HOME@", H) + s[j:]
+    else:
+        missed.append(f"{p}: блок mpris")
+    s = s.replace('"modules-center": ["mpris"],', '"modules-center": ["custom/player"],')
+    g = s.find('"modules-center": ["group/pill#player"],')
+    if g >= 0:
+        ge = s.find("\n    },", s.find('"group/pill#player": {', g)) + len("\n    },")
+        s = s[:g] + '"modules-center": ["custom/player"],' + s[ge:]
+    open(p, "w").write(s)
+
+for p in (f"{H}/.config/waybar/user-style.css", f"{RL}/.config/waybar/user-style.css"):
+    if not os.path.exists(p):
+        continue
+    s = open(p).read()
+    if "#custom-player {" in s:         # уже откатано
+        continue
+    i = s.find("/* Плеер — отдельная пилюля ровно по центру бара (встроенный mpris")
+    if i >= 0:
+        end = "#mpris.paused { opacity: 0.6; }\n"
+        j = s.find(end, i) + len(end)
+        alpha = s[i:j].split("alpha(@main-bg, ")[1].split(")")[0]
+    else:       # пилюля «обложка + текст»: прозрачность фона — как у остальных пилюль (#pill)
+        i = s.find("/* Плеер — пилюля group/pill#player")
+        if i < 0:
+            missed.append(f"{p}: стиль плеера")
+            continue
+        end = "#custom-player-text.paused { opacity: 0.6; }\n"
+        j = s.find(end, i) + len(end)
+        pill = s.find("#pill {")
+        alpha = s[pill:].split("alpha(@main-bg, ")[1].split(")")[0] if pill >= 0 else "0.7"
+    s = s[:i] + f'''/* Плеер — отдельная пилюля ровно по центру бара */
+#custom-player {{
+  background: alpha(@main-bg, {alpha});
+  border-radius: 14px;
+  padding: 0 14px;
+  margin: 4px 0;
+}}
+''' + s[j:]
+    k = s.find("#custom-vpn.connecting")
+    k = s.find("\n", k) + 1
+    s = s[:k] + "#custom-player         { padding: 0 8px; }\n#custom-player.paused  { opacity: 0.6; }\n" + s[k:]
+    open(p, "w").write(s)
+
+# swaync: вернуть карточку MPRIS
+p = f"{H}/.config/swaync/cc-compact.json"
+d = json.load(open(p))
+if "mpris" not in d["widgets"]:
+    w = d["widgets"]
+    w.insert(w.index("title") if "title" in w else len(w), "mpris")
+if "mpris" not in d["widget-config"]:   # на прежнее место — перед slider#vol
+    wc = {}
+    for k, v in d["widget-config"].items():
+        if k == "slider#vol":
+            wc["mpris"] = {"image-size": 56, "image-radius": 14}
+        wc[k] = v
+    wc.setdefault("mpris", {"image-size": 56, "image-radius": 14})
+    d["widget-config"] = wc
+open(p, "w").write(json.dumps(d, ensure_ascii=False, indent=2) + "\n")
+
+p = f"{H}/.config/swaync/user-style.css"
+s = open(p).read()
+if ".widget-mpris" not in s:
+    block = "/* Плеер */\n.widget-mpris {\n  margin: 6px 0;\n  border-radius: 20px;\n}\n\n"
+    k = s.find("/* Заголовок уведомлений")
+    s = s[:k] + block + s[k:] if k >= 0 else s + "\n" + block
+    open(p, "w").write(s)
+
+if missed:
+    print("Не найдено (проверь вручную, исходники в ~/.local/share/yumi-player-backup/files):")
+    for m in missed:
+        print("  -", m)
+PY
+
+cp "$HOME/.config/waybar/layouts/yumi.jsonc" "$HOME/.config/waybar/config.jsonc"
+rm -f  "$HOME/.local/bin/yumi-player" "$HOME/.config/hyde/wallbash/always/yumi-player.dcol" \
+       "$HOME/.local/bin/waybar-player-pill" "$HOME/.local/bin/waybar-player-cover"
+rm -rf "$HOME/.config/yumi-player" "${XDG_CACHE_HOME:-$HOME/.cache}/yumi-player"
+"$HOME/.local/bin/cc-build" compact || true
+pkill -x swaync || true                                # поднимется через D-Bus с прежним виджетом
+systemctl --user restart hyde-Hyprland-bar.service     # перезапуск, не SIGUSR2 (утечка памяти)
+echo "Готово: прежний плеер возвращён (бэкап от $(cat "$B/created_at"))."
+echo "Не забудь откатить изменения в ~/Projects/yumi-rice, иначе ./rice push вернёт новый плеер."
