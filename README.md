@@ -5,7 +5,7 @@
   <img alt="HyDE" src="https://img.shields.io/badge/HyDE-dotfiles-c6a0f6">
   <img alt="Asahi Linux" src="https://img.shields.io/badge/Asahi-Arch%20Linux%20ARM-1793D1?logo=archlinux&logoColor=white">
   <img alt="ARM64" src="https://img.shields.io/badge/aarch64-16K%20pages-f5a97f">
-  <img alt="Version" src="https://img.shields.io/badge/version-2.0-ed8796">
+  <img alt="Version" src="https://img.shields.io/badge/version-2.1-ed8796">
   <img alt="Waybar" src="https://img.shields.io/badge/Waybar-swaync%20·%20GTK4%20·%20rofi-a6da95">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-green">
 </p>
@@ -14,7 +14,7 @@
 
 ![Desktop](assets/screenshots/v2/desktop.jpg)
 
-<p align="center"><b>2.0</b> — GTK4 menus, accent from the wallpaper, new lock screen · <a href="https://github.com/sonoyumi/yumi-rice/releases/tag/v1.0">1.0</a> — rofi menus, HyDE themes</p>
+<p align="center"><b>2.1</b> — lighter: events instead of polling, monitors in one file · <a href="https://github.com/sonoyumi/yumi-rice/releases/tag/v2.0">2.0</a> — GTK4 menus, accent from the wallpaper, new lock screen · <a href="https://github.com/sonoyumi/yumi-rice/releases/tag/v1.0">1.0</a> — rofi menus, HyDE themes</p>
 
 ---
 
@@ -36,17 +36,53 @@ repository and the system in step, with a backup of every file it touches.
 | Lock / idle / wallpaper | hyprlock · hypridle · awww |
 | Terminal / font | kitty · JetBrainsMono Nerd Font |
 
-### What's new in 2.0
+### What's new in 2.1
 
 > [!IMPORTANT]
 > **Built and tested only on my own machine:** MacBook Pro M1 (2560×1600, scale 1.666667) + MSI G27C3F
-> (1920×1080 @ 180 Hz, scale 1). Version 2.0 contains a lot of fine-tuning for exactly these two monitors and their
+> (1920×1080 @ 180 Hz, scale 1). Versions 2.0–2.1 contain a lot of fine-tuning for exactly these two monitors and their
 > scales — menu and rofi sizes, lock-screen fonts per monitor, panel heights. I don't know how the build behaves on
 > another configuration: treat it as an example and adjust it to your hardware. Since 2.1 monitor names, interface
 > scale and rofi DPI live in one file, `~/.config/yumi/monitors.conf` (a monitor that is not listed gets 1.0); only `yumi-panel/style.css`, `waybar/user-style.css` and the lock-screen template still have per-monitor values.
 > Version 1.0 (rofi menus, HyDE themes) is still available: [`v1.0`](https://github.com/sonoyumi/yumi-rice/releases/tag/v1.0).
 >
 > **Coming next:** I will keep checking performance and functionality and fix things where needed. In the next few days I'll add lock-screen screenshots and two more things that are already done but not published yet.
+
+Measured on my machine (MacBook Pro M1, 8 GB, Firefox, Telegram and terminals open).
+
+**Simpler**
+- **Monitors in one file.** `~/.config/yumi/monitors.conf` holds each output's interface scale, rofi DPI and name
+  (plus size and scale for building the lock screen while a monitor is unplugged). It is read by the menus
+  (`yumipanel.py` through `yumimon.py`), `yumi-player`, `yumi-menu-workspaces`, `hyprlock-google-build`, `rofi` and
+  `rofi-panel` — before, these values were hard-coded in six scripts. A monitor that is not listed gets 1.0, so a new
+  machine works without edits. Per-monitor values remain only in CSS and in the lock-screen template.
+- **Public and private parts in one file.** Private blocks are marked `yumi:private-begin/-end`, single lines
+  `yumi:private-line`, public-only lines `yumi:public:`. `./rice pull` builds the public copy by itself
+  (`tools/publicize`), no more maintaining two versions by hand.
+- **Old rofi menus removed** — 13 files (they live on in [`v1.0`](https://github.com/sonoyumi/yumi-rice/releases/tag/v1.0)); `menu-workflows`, `rofi-panel` and
+  `player-cover` stay. `hyde-patches.sh` lost two patches that `hyprland.lua` now does itself.
+- **New `rice` commands:** `./rice check` — syntax of every file, personal paths, secrets, leftover markers, references
+  to scripts that are not in the repository; `--install-hook` runs it before every commit. `./rice gc` — clean-up of
+  `__pycache__` and old backups (shows first, deletes with `--apply`). `./rice doctor` now also shows the yumi services,
+  failed units, faillock count, Waybar errors and memory pressure.
+
+**Lighter**
+
+| | 2.0 | 2.1 |
+|---|---|---|
+| Waybar script runs | ~100 a minute, 12.4 % of a core | ~12 a minute, 1.4 % |
+| Wi-Fi / Bluetooth / VPN pill after a change in a menu | up to 5 s | right away |
+| Mouse pill | ~1.7 s (Solaar), no DPI | 40 ms (kernel `hidpp_battery`), DPI shown |
+| `nm-applet` + blueman tray icon | ~48 MB | off |
+
+- **Pills on events:** the `yumi-bar-events` service (~9 MB) listens to NetworkManager, BlueZ and power-profiles-daemon
+  on D-Bus and signals Waybar; timers stay only as a safety net (30–120 s).
+- **Mouse:** battery and charging come from the kernel; DPI and polling rate from a cache that Solaar refreshes at most
+  every 30 minutes (the mouse menu clears it after a change). `blueman-applet` stays as the pairing agent (PIN dialog).
+- **Memory, honestly:** a GTK menu takes ~60 MB while it is open (a rofi menu took ~12 MB) and frees it on close; in the
+  background the whole shell (Waybar, swaync, tray, Solaar…) is ~170 MB — about 2 % of 8 GB.
+
+### What's new in 2.0
 
 - **GTK4 menus instead of rofi in the bar (`yumi-panel`):** one framework (`~/.local/lib/yumi-panel`) — a layer-shell
   window with blur, wallpaper colors, keyboard navigation. Menus: Wi-Fi, Bluetooth, sound, VPN (ExpressVPN / Tailscale),
@@ -61,10 +97,6 @@ repository and the system in step, with a backup of every file it touches.
 - **Also:** calendar reminders (systemd timer), a tray without duplicate applets, a Telegram theme in wallpaper colors,
   hiding unneeded app launchers (`yumi-app-hide`), `SUPER+K` switches the layout on all keyboards at once, and the lock
   screen always opens with the English layout. Every add-on has its own `*-uninstall` script.
-- **2.1 — lighter:** Waybar pills update on system events (`yumi-bar-events`: NetworkManager, BlueZ, power profiles)
-  instead of polling every 2–5 s (~100 script runs a minute → ~12); the mouse battery comes from the kernel (40 ms instead
-  of ~1.7 s through Solaar); `nm-applet` and the blueman tray icon are off; private parts of the configs are marked
-  `yumi:private` and the public copy is built automatically on `./rice pull`.
 
 ### Features
 
@@ -200,9 +232,11 @@ git clone https://github.com/sonoyumi/yumi-rice.git ~/Projects/yumi-rice
 cd ~/Projects/yumi-rice
 ./rice diff            # see what will change
 ./rice push            # copy the files into ~ (old versions go to ~/.local/state/rice-bak/)
-systemctl --user enable --now hyprlock-bg.service yumi-calendar-remind.timer yumi-tray.service
-yumi-accent            # 2.0: accent colors for Waybar, swaync, rofi, kitty, GTK (re-run after a wallpaper change is automatic)
-hyprlock-google-build  # 2.0: build the lock screen for your monitors (edit MONITORS / DPR at the top first)
+systemctl --user enable --now hyprlock-bg.service yumi-calendar-remind.timer yumi-tray.service yumi-bar-events.service
+$EDITOR ~/.config/yumi/monitors.conf   # your monitors: interface scale, rofi DPI, name
+yumi-accent            # accent colors for Waybar, swaync, rofi, kitty, GTK (then automatic on every wallpaper change)
+hyprlock-google-build  # build the lock screen for the monitors from monitors.conf
+./rice check --install-hook   # if you keep your own fork: check before every commit
 ./rice reload
 ./rice push-system     # optional: /etc, one file at a time with confirmation
 ```
@@ -245,13 +279,16 @@ yumi-rice/
 │   ├── .config/waybar/     # yumi.jsonc layout and styles
 │   ├── .config/swaync/     # control center layouts and style
 │   ├── .config/systemd/    # wallpaper sync service, firefox.slice, dev.slice
+│   ├── .config/yumi/       # monitors.conf — monitors in one file
+│   ├── .local/lib/         # yumi-panel (GTK menus, yumimon), yumi-tray, yumi-calendar
 │   └── .local/bin/         # menus, Waybar modules, control center, tools
 ├── system/etc/             # GRUB, SDDM, zram, sysctl, earlyoom, BlueZ, faillock
 ├── assets/screenshots/
 ├── manifest.txt            # tracked files from ~
 ├── system-manifest.txt     # tracked files from /etc
 ├── rice                    # sync script
-└── hyde-patches.sh         # patches to HyDE files
+├── hyde-patches.sh         # patches to HyDE files
+└── tools/                  # publicize (public copy from private), check (pre-commit check)
 ```
 
 ### Gotchas: Hyprland 0.56 Lua and Asahi
@@ -326,17 +363,53 @@ repository e sistema, con un backup di ogni file che tocca.
 | Blocco / inattività / sfondo | hyprlock · hypridle · awww |
 | Terminale / font | kitty · JetBrainsMono Nerd Font |
 
-### Novità della 2.0
+### Novità della 2.1
 
 > [!IMPORTANT]
 > **Costruita e provata solo sulla mia macchina:** MacBook Pro M1 (2560×1600, scala 1.666667) + MSI G27C3F
-> (1920×1080 @ 180 Hz, scala 1). La versione 2.0 contiene molte regolazioni fatte proprio per questi due monitor e le
+> (1920×1080 @ 180 Hz, scala 1). Le versioni 2.0–2.1 contengono molte regolazioni fatte proprio per questi due monitor e le
 > loro scale — dimensioni dei menu e di rofi, font della schermata di blocco per ogni monitor, altezze dei pannelli.
 > Non so come si comporti su un'altra configurazione: usala come esempio e adattala al tuo hardware. Dalla 2.1 nomi dei
 > monitor, scala dell'interfaccia e DPI di rofi stanno in un solo file, `~/.config/yumi/monitors.conf` (un monitor non elencato usa 1.0); valori per monitor restano solo in `yumi-panel/style.css`, `waybar/user-style.css` e nel template della schermata di blocco.
 > La versione 1.0 (menu rofi, temi HyDE) resta disponibile: [`v1.0`](https://github.com/sonoyumi/yumi-rice/releases/tag/v1.0).
 >
 > **Prossimamente:** continuerò a verificare ottimizzazione e funzionalità e, se serve, farò correzioni. Nei prossimi giorni aggiungerò gli screenshot della schermata di blocco e altre due cose già pronte ma non ancora pubblicate.
+
+Misurato sulla mia macchina (MacBook Pro M1, 8 GB, con Firefox, Telegram e terminali aperti).
+
+**Più semplice**
+- **Monitor in un solo file.** `~/.config/yumi/monitors.conf` contiene per ogni uscita scala dell'interfaccia, DPI di
+  rofi e nome (più dimensioni e scala per costruire la schermata di blocco quando il monitor è scollegato). Lo leggono i
+  menu (`yumipanel.py` tramite `yumimon.py`), `yumi-player`, `yumi-menu-workspaces`, `hyprlock-google-build`, `rofi` e
+  `rofi-panel` — prima questi valori erano scritti in sei script. Un monitor non elencato usa 1.0, quindi su un'altra
+  macchina funziona senza modifiche. Valori per monitor restano solo nel CSS e nel template della schermata di blocco.
+- **Parti pubbliche e private in un solo file.** I blocchi privati sono marcati `yumi:private-begin/-end`, le singole
+  righe `yumi:private-line`, le righe solo pubbliche `yumi:public:`. `./rice pull` crea da solo la copia pubblica
+  (`tools/publicize`): niente più due versioni da tenere a mano.
+- **Rimossi i vecchi menu rofi** — 13 file (restano in [`v1.0`](https://github.com/sonoyumi/yumi-rice/releases/tag/v1.0)); `menu-workflows`, `rofi-panel` e `player-cover`
+  restano. `hyde-patches.sh` ha perso due modifiche che ora fa direttamente `hyprland.lua`.
+- **Nuovi comandi `rice`:** `./rice check` — sintassi di ogni file, percorsi personali, segreti, marcatori rimasti,
+  riferimenti a script non presenti nel repository; `--install-hook` lo esegue prima di ogni commit. `./rice gc` —
+  pulizia di `__pycache__` e vecchi backup (prima mostra, cancella con `--apply`). `./rice doctor` ora mostra anche i
+  servizi yumi, le unità fallite, il contatore di faillock, gli errori di Waybar e la pressione della memoria.
+
+**Più leggera**
+
+| | 2.0 | 2.1 |
+|---|---|---|
+| Script lanciati da Waybar | ~100 al minuto, 12,4 % di un core | ~12 al minuto, 1,4 % |
+| Pillola Wi-Fi / Bluetooth / VPN dopo una modifica dal menu | fino a 5 s | subito |
+| Pillola del mouse | ~1,7 s (Solaar), senza DPI | 40 ms (kernel `hidpp_battery`), con DPI |
+| `nm-applet` + icona di blueman | ~48 MB | spenti |
+
+- **Pillole sugli eventi:** il servizio `yumi-bar-events` (~9 MB) ascolta NetworkManager, BlueZ e power-profiles-daemon
+  su D-Bus e avvisa Waybar; i timer restano solo di sicurezza (30–120 s).
+- **Mouse:** batteria e ricarica arrivano dal kernel; DPI e frequenza da una cache che Solaar aggiorna al massimo ogni
+  30 minuti (il menu del mouse la cancella dopo una modifica). `blueman-applet` resta come agente di abbinamento (PIN).
+- **Memoria, onestamente:** un menu GTK occupa ~60 MB mentre è aperto (un menu rofi ~12 MB) e li libera alla chiusura;
+  in background tutta la shell (Waybar, swaync, tray, Solaar…) occupa ~170 MB — circa il 2 % di 8 GB.
+
+### Novità della 2.0
 
 - **Menu GTK4 al posto di rofi nella barra (`yumi-panel`):** un unico framework (`~/.local/lib/yumi-panel`) — finestra
   layer-shell con sfocatura, colori dello sfondo, navigazione da tastiera. Menu: Wi-Fi, Bluetooth, audio, VPN
@@ -352,10 +425,6 @@ repository e sistema, con un backup di ogni file che tocca.
 - **Inoltre:** promemoria del calendario (timer systemd), tray senza applet doppie, tema Telegram nei colori dello
   sfondo, launcher inutili nascosti (`yumi-app-hide`), `SUPER+K` cambia layout su tutte le tastiere insieme e la
   schermata di blocco si apre sempre con il layout inglese. Ogni aggiunta ha il proprio script `*-uninstall`.
-- **2.1 — più leggera:** le pillole di Waybar si aggiornano sugli eventi di sistema (`yumi-bar-events`: NetworkManager,
-  BlueZ, profili energetici) invece di interrogare ogni 2–5 s (~100 script al minuto → ~12); la batteria del mouse arriva
-  dal kernel (40 ms invece di ~1,7 s con Solaar); `nm-applet` e l'icona di blueman sono spenti; le parti private dei
-  config sono marcate `yumi:private` e la copia pubblica si crea da sola con `./rice pull`.
 
 ### Funzionalità
 
@@ -454,9 +523,11 @@ git clone https://github.com/sonoyumi/yumi-rice.git ~/Projects/yumi-rice
 cd ~/Projects/yumi-rice
 ./rice diff            # cosa cambierà
 ./rice push            # copia i file in ~ (le vecchie versioni vanno in ~/.local/state/rice-bak/)
-systemctl --user enable --now hyprlock-bg.service yumi-calendar-remind.timer yumi-tray.service
-yumi-accent            # 2.0: accent colors for Waybar, swaync, rofi, kitty, GTK (re-run after a wallpaper change is automatic)
-hyprlock-google-build  # 2.0: build the lock screen for your monitors (edit MONITORS / DPR at the top first)
+systemctl --user enable --now hyprlock-bg.service yumi-calendar-remind.timer yumi-tray.service yumi-bar-events.service
+$EDITOR ~/.config/yumi/monitors.conf   # i tuoi monitor: scala dell'interfaccia, DPI di rofi, nome
+yumi-accent            # colori d'accento per Waybar, swaync, rofi, kitty, GTK (poi automatico a ogni cambio di sfondo)
+hyprlock-google-build  # costruisce la schermata di blocco per i monitor di monitors.conf
+./rice check --install-hook   # se tieni un tuo fork: controllo prima di ogni commit
 ./rice reload
 ./rice push-system     # facoltativo: /etc, un file alla volta con conferma
 ```
@@ -499,13 +570,16 @@ yumi-rice/
 │   ├── .config/waybar/     # layout yumi.jsonc e stili
 │   ├── .config/swaync/     # layout e stile del centro di controllo
 │   ├── .config/systemd/    # servizio di sincronizzazione sfondo, firefox.slice, dev.slice
+│   ├── .config/yumi/       # monitors.conf — monitor in un solo file
+│   ├── .local/lib/         # yumi-panel (menu GTK, yumimon), yumi-tray, yumi-calendar
 │   └── .local/bin/         # menu, moduli Waybar, centro di controllo, strumenti
 ├── system/etc/             # GRUB, SDDM, zram, sysctl, earlyoom, BlueZ, faillock
 ├── assets/screenshots/
 ├── manifest.txt            # file tracciati da ~
 ├── system-manifest.txt     # file tracciati da /etc
 ├── rice                    # script di sincronizzazione
-└── hyde-patches.sh         # modifiche ai file di HyDE
+├── hyde-patches.sh         # modifiche ai file di HyDE
+└── tools/                  # publicize (copia pubblica da quella privata), check (controllo prima del commit)
 ```
 
 ### Insidie: Hyprland 0.56 Lua e Asahi
@@ -581,17 +655,53 @@ MIT, vedi [LICENSE](LICENSE).
 | Блокування / простій / шпалери | hyprlock · hypridle · awww |
 | Термінал / шрифт | kitty · JetBrainsMono Nerd Font |
 
-### Що нового у 2.0
+### Що нового у 2.1
 
 > [!IMPORTANT]
 > **Зібрано й перевірено лише на моїй машині:** MacBook Pro M1 (2560×1600, масштаб 1.666667) + MSI G27C3F
-> (1920×1080 @ 180 Гц, масштаб 1). У версії 2.0 багато підгонки саме під ці два монітори та їхні масштаби — розміри
+> (1920×1080 @ 180 Гц, масштаб 1). У версіях 2.0–2.1 багато підгонки саме під ці два монітори та їхні масштаби — розміри
 > меню й rofi, шрифти екрана блокування для кожного монітора, висоти панелей. Я не знаю, як збірка поведеться на
 > іншій конфігурації: використовуйте її як приклад і підлаштовуйте під своє залізо. З 2.1 назви моніторів,
 > масштаб інтерфейсу й DPI rofi зібрані в одному файлі `~/.config/yumi/monitors.conf` (монітор, якого там немає, отримує 1.0); значення для окремих моніторів лишилися тільки в `yumi-panel/style.css`, `waybar/user-style.css` і шаблоні екрана блокування.
 > Версія 1.0 (меню rofi, теми HyDE) лишається доступною: [`v1.0`](https://github.com/sonoyumi/yumi-rice/releases/tag/v1.0).
 >
 > **Далі:** я ще перевірятиму оптимізацію та функціональність і за потреби вноситиму правки. Найближчими днями додам скриншоти екрана блокування та ще дві речі, які вже зроблені, але поки не опубліковані.
+
+Виміряно на моїй машині (MacBook Pro M1, 8 ГБ, відкриті Firefox, Telegram і термінали).
+
+**Простіше**
+- **Монітори в одному файлі.** `~/.config/yumi/monitors.conf` містить для кожного виходу масштаб інтерфейсу, DPI rofi
+  й назву (плюс розмір і масштаб для збирання екрана блокування, коли монітор від'єднано). Його читають меню
+  (`yumipanel.py` через `yumimon.py`), `yumi-player`, `yumi-menu-workspaces`, `hyprlock-google-build`, `rofi` і
+  `rofi-panel` — раніше ці значення були прописані в шести скриптах. Монітор, якого немає у файлі, отримує 1.0, тож на
+  іншій машині все працює без правок. Значення для окремих моніторів лишилися тільки в CSS і шаблоні екрана блокування.
+- **Публічне й особисте в одному файлі.** Особисті блоки позначені `yumi:private-begin/-end`, окремі рядки —
+  `yumi:private-line`, рядки лише для публічної версії — `yumi:public:`. `./rice pull` сам збирає публічну копію
+  (`tools/publicize`): більше не треба тримати дві версії вручну.
+- **Старі меню rofi прибрано** — 13 файлів (вони є у [`v1.0`](https://github.com/sonoyumi/yumi-rice/releases/tag/v1.0)); `menu-workflows`, `rofi-panel` і `player-cover`
+  лишилися. З `hyde-patches.sh` прибрано дві правки, які тепер робить сам `hyprland.lua`.
+- **Нові команди `rice`:** `./rice check` — синтаксис кожного файлу, особисті шляхи, секрети, забуті мітки, посилання на
+  скрипти, яких немає в репозиторії; `--install-hook` запускає її перед кожним комітом. `./rice gc` — прибирання
+  `__pycache__` і старих бекапів (спершу показує, видаляє з `--apply`). `./rice doctor` тепер показує ще служби yumi,
+  збійні юніти, лічильник faillock, помилки Waybar і тиск на пам'ять.
+
+**Легше**
+
+| | 2.0 | 2.1 |
+|---|---|---|
+| Запуски скриптів Waybar | ~100 за хвилину, 12,4 % ядра | ~12 за хвилину, 1,4 % |
+| Пігулка Wi-Fi / Bluetooth / VPN після зміни в меню | до 5 с | одразу |
+| Пігулка миші | ~1,7 с (Solaar), без DPI | 40 мс (ядро, `hidpp_battery`), з DPI |
+| `nm-applet` + значок blueman | ~48 МБ | вимкнено |
+
+- **Пігулки за подіями:** служба `yumi-bar-events` (~9 МБ) слухає NetworkManager, BlueZ і power-profiles-daemon через
+  D-Bus і подає сигнал Waybar; таймери лишилися тільки як страховка (30–120 с).
+- **Миша:** заряд і зарядка — з ядра; DPI й частота — з кешу, який Solaar оновлює не частіше ніж раз на 30 хвилин (меню
+  миші очищає його після зміни). `blueman-applet` лишається агентом сполучення (вікно PIN).
+- **Пам'ять чесно:** GTK-меню займає ~60 МБ, поки відкрите (меню rofi — ~12 МБ), і звільняє їх після закриття; у фоні
+  вся оболонка (Waybar, swaync, трей, Solaar…) — ~170 МБ, приблизно 2 % від 8 ГБ.
+
+### Що нового у 2.0
 
 - **Меню на GTK4 замість rofi на панелі (`yumi-panel`):** один каркас (`~/.local/lib/yumi-panel`) — вікно layer-shell
   з розмиттям, кольорами шпалер і керуванням з клавіатури. Меню: Wi-Fi, Bluetooth, звук, VPN (ExpressVPN / Tailscale),
@@ -606,10 +716,6 @@ MIT, vedi [LICENSE](LICENSE).
 - **А ще:** нагадування календаря (таймер systemd), трей без дубльованих аплетів, тема Telegram у кольорах шпалер,
   приховані зайві ярлики (`yumi-app-hide`), `SUPER+K` перемикає розкладку одразу на всіх клавіатурах, а екран
   блокування завжди відкривається з англійською розкладкою. Кожне доповнення має власний скрипт `*-uninstall`.
-- **2.1 — легша:** пігулки Waybar оновлюються за системними подіями (`yumi-bar-events`: NetworkManager, BlueZ, профілі
-  живлення) замість опитування кожні 2–5 с (~100 запусків скриптів за хвилину → ~12); заряд миші — з ядра (40 мс замість
-  ~1,7 с через Solaar); `nm-applet` і значок blueman вимкнено; особисті частини конфігів позначені `yumi:private`,
-  а публічна копія збирається сама під час `./rice pull`.
 
 ### Можливості
 
@@ -705,9 +811,11 @@ git clone https://github.com/sonoyumi/yumi-rice.git ~/Projects/yumi-rice
 cd ~/Projects/yumi-rice
 ./rice diff            # що зміниться
 ./rice push            # розкласти файли в ~ (старі версії — в ~/.local/state/rice-bak/)
-systemctl --user enable --now hyprlock-bg.service yumi-calendar-remind.timer yumi-tray.service
-yumi-accent            # 2.0: accent colors for Waybar, swaync, rofi, kitty, GTK (re-run after a wallpaper change is automatic)
-hyprlock-google-build  # 2.0: build the lock screen for your monitors (edit MONITORS / DPR at the top first)
+systemctl --user enable --now hyprlock-bg.service yumi-calendar-remind.timer yumi-tray.service yumi-bar-events.service
+$EDITOR ~/.config/yumi/monitors.conf   # ваші монітори: масштаб інтерфейсу, DPI rofi, назва
+yumi-accent            # акцентні кольори для Waybar, swaync, rofi, kitty, GTK (далі — сам при кожній зміні шпалер)
+hyprlock-google-build  # зібрати екран блокування для моніторів із monitors.conf
+./rice check --install-hook   # якщо ведете свій форк: перевірка перед кожним комітом
 ./rice reload
 ./rice push-system     # за бажанням: /etc, по одному файлу з підтвердженням
 ```
@@ -750,13 +858,16 @@ yumi-rice/
 │   ├── .config/waybar/     # лейаут yumi.jsonc і стилі
 │   ├── .config/swaync/     # розкладки й стиль центру керування
 │   ├── .config/systemd/    # служба синхронізації шпалер, firefox.slice, dev.slice
+│   ├── .config/yumi/       # monitors.conf — монітори в одному файлі
+│   ├── .local/lib/         # yumi-panel (GTK-меню, yumimon), yumi-tray, yumi-calendar
 │   └── .local/bin/         # меню, модулі Waybar, центр керування, утиліти
 ├── system/etc/             # GRUB, SDDM, zram, sysctl, earlyoom, BlueZ, faillock
 ├── assets/screenshots/
 ├── manifest.txt            # які файли з ~ відстежуються
 ├── system-manifest.txt     # які файли з /etc відстежуються
 ├── rice                    # скрипт синхронізації
-└── hyde-patches.sh         # правки до файлів HyDE
+├── hyde-patches.sh         # правки до файлів HyDE
+└── tools/                  # publicize (публічна копія з особистої), check (перевірка перед комітом)
 ```
 
 ### Підводні камені: Hyprland 0.56 Lua та Asahi
@@ -832,17 +943,54 @@ MIT — див. [LICENSE](LICENSE).
 | Блокировка / простой / обои | hyprlock · hypridle · awww |
 | Терминал / шрифт | kitty · JetBrainsMono Nerd Font |
 
-### Что нового в 2.0
+### Что нового в 2.1
 
 > [!IMPORTANT]
 > **Собрано и проверено только на моей машине:** MacBook Pro M1 (2560×1600, масштаб 1.666667) + MSI G27C3F
-> (1920×1080 @ 180 Гц, масштаб 1). В версии 2.0 много подгонки именно под эти два монитора и их масштабы — размеры
+> (1920×1080 @ 180 Гц, масштаб 1). В версиях 2.0–2.1 много подгонки именно под эти два монитора и их масштабы — размеры
 > меню и rofi, шрифты экрана блокировки для каждого монитора, высоты панелей. Я не знаю, как сборка поведёт себя на
 > другой конфигурации: используйте её как пример и подстраивайте под своё железо. С 2.1 имена мониторов,
 > масштаб интерфейса и DPI rofi собраны в одном файле `~/.config/yumi/monitors.conf` (монитор, которого там нет, получает 1.0); значения для отдельных мониторов остались только в `yumi-panel/style.css`, `waybar/user-style.css` и шаблоне экрана блокировки.
 > Версия 1.0 (меню rofi, темы HyDE) остаётся доступной: [`v1.0`](https://github.com/sonoyumi/yumi-rice/releases/tag/v1.0).
 >
 > **Дальше:** я ещё проверю оптимизацию и функциональность и при необходимости внесу правки. В ближайшие дни добавлю скриншоты экрана блокировки и ещё две вещи, которые уже сделал, но пока не опубликовал.
+
+Замерено на моей машине (MacBook Pro M1, 8 ГБ, открыты Firefox, Telegram и терминалы).
+
+**Проще**
+- **Мониторы в одном файле.** `~/.config/yumi/monitors.conf` хранит для каждого выхода масштаб интерфейса, DPI rofi и
+  название (плюс размер и масштаб для сборки экрана блокировки, когда монитор отключён). Его читают меню
+  (`yumipanel.py` через `yumimon.py`), `yumi-player`, `yumi-menu-workspaces`, `hyprlock-google-build`, `rofi` и
+  `rofi-panel` — раньше эти значения были прописаны в шести скриптах. Монитор, которого нет в файле, получает 1.0, так
+  что на другой машине всё работает без правок. Значения для отдельных мониторов остались только в CSS и шаблоне экрана
+  блокировки.
+- **Публичное и личное в одном файле.** Личные блоки помечены `yumi:private-begin/-end`, отдельные строки —
+  `yumi:private-line`, строки только для публичной версии — `yumi:public:`. `./rice pull` сам собирает публичную копию
+  (`tools/publicize`): больше не нужно вести две версии вручную.
+- **Старые меню rofi убраны** — 13 файлов (они есть в [`v1.0`](https://github.com/sonoyumi/yumi-rice/releases/tag/v1.0)); `menu-workflows`, `rofi-panel` и `player-cover`
+  остались. Из `hyde-patches.sh` убраны две правки, которые теперь делает сам `hyprland.lua`.
+- **Новые команды `rice`:** `./rice check` — синтаксис каждого файла, личные пути, секреты, забытые метки, ссылки на
+  скрипты, которых нет в репозитории; `--install-hook` запускает её перед каждым коммитом. `./rice gc` — уборка
+  `__pycache__` и старых бэкапов (сначала показывает, удаляет с `--apply`). `./rice doctor` теперь показывает ещё службы
+  yumi, упавшие юниты, счётчик faillock, ошибки Waybar и давление на память.
+
+**Легче**
+
+| | 2.0 | 2.1 |
+|---|---|---|
+| Запуски скриптов Waybar | ~100 в минуту, 12,4 % ядра | ~12 в минуту, 1,4 % |
+| Пилюля Wi-Fi / Bluetooth / VPN после изменения в меню | до 5 с | сразу |
+| Пилюля мыши | ~1,7 с (Solaar), без DPI | 40 мс (ядро, `hidpp_battery`), с DPI |
+| `nm-applet` + значок blueman | ~48 МБ | отключены |
+
+- **Пилюли по событиям:** служба `yumi-bar-events` (~9 МБ) слушает NetworkManager, BlueZ и power-profiles-daemon через
+  D-Bus и подаёт сигнал Waybar; таймеры остались только как страховка (30–120 с).
+- **Мышь:** заряд и зарядка — из ядра; DPI и частота — из кеша, который Solaar обновляет не чаще раза в 30 минут (меню
+  мыши очищает его после изменения). `blueman-applet` остаётся агентом сопряжения (окно PIN).
+- **Память честно:** GTK-меню занимает ~60 МБ, пока открыто (меню rofi — ~12 МБ), и освобождает их при закрытии; в фоне
+  вся оболочка (Waybar, swaync, трей, Solaar…) — ~170 МБ, примерно 2 % от 8 ГБ.
+
+### Что нового в 2.0
 
 - **Меню на GTK4 вместо rofi на панели (`yumi-panel`):** один каркас (`~/.local/lib/yumi-panel`) — окно layer-shell
   с размытием, цветами обоев и управлением с клавиатуры. Меню: Wi-Fi, Bluetooth, звук, VPN (ExpressVPN / Tailscale),
@@ -857,10 +1005,6 @@ MIT — див. [LICENSE](LICENSE).
 - **А ещё:** напоминания календаря (таймер systemd), трей без дублирующихся апплетов, тема Telegram в цветах обоев,
   скрытие лишних ярлыков (`yumi-app-hide`), `SUPER+K` переключает раскладку сразу на всех клавиатурах, а экран
   блокировки всегда открывается с английской раскладкой. У каждой доработки свой скрипт `*-uninstall`.
-- **2.1 — легче:** пилюли Waybar обновляются по системным событиям (`yumi-bar-events`: NetworkManager, BlueZ, профили
-  питания) вместо опроса каждые 2–5 с (~100 запусков скриптов в минуту → ~12); заряд мыши — из ядра (40 мс вместо
-  ~1,7 с через Solaar); `nm-applet` и значок blueman отключены; личные части конфигов помечены `yumi:private`,
-  а публичная копия собирается сама при `./rice pull`.
 
 ### Возможности
 
@@ -956,9 +1100,11 @@ git clone https://github.com/sonoyumi/yumi-rice.git ~/Projects/yumi-rice
 cd ~/Projects/yumi-rice
 ./rice diff            # что изменится
 ./rice push            # разложить файлы по ~ (старые версии — в ~/.local/state/rice-bak/)
-systemctl --user enable --now hyprlock-bg.service yumi-calendar-remind.timer yumi-tray.service
-yumi-accent            # 2.0: accent colors for Waybar, swaync, rofi, kitty, GTK (re-run after a wallpaper change is automatic)
-hyprlock-google-build  # 2.0: build the lock screen for your monitors (edit MONITORS / DPR at the top first)
+systemctl --user enable --now hyprlock-bg.service yumi-calendar-remind.timer yumi-tray.service yumi-bar-events.service
+$EDITOR ~/.config/yumi/monitors.conf   # ваши мониторы: масштаб интерфейса, DPI rofi, название
+yumi-accent            # акцентные цвета для Waybar, swaync, rofi, kitty, GTK (дальше — сам при каждой смене обоев)
+hyprlock-google-build  # собрать экран блокировки для мониторов из monitors.conf
+./rice check --install-hook   # если ведёте свой форк: проверка перед каждым коммитом
 ./rice reload
 ./rice push-system     # по желанию: /etc, по одному файлу с подтверждением
 ```
@@ -1001,13 +1147,16 @@ yumi-rice/
 │   ├── .config/waybar/     # лейаут yumi.jsonc и стили
 │   ├── .config/swaync/     # раскладки и стиль центра управления
 │   ├── .config/systemd/    # служба синхронизации обоев, firefox.slice, dev.slice
+│   ├── .config/yumi/       # monitors.conf — мониторы в одном файле
+│   ├── .local/lib/         # yumi-panel (GTK-меню, yumimon), yumi-tray, yumi-calendar
 │   └── .local/bin/         # меню, модули Waybar, центр управления, утилиты
 ├── system/etc/             # GRUB, SDDM, zram, sysctl, earlyoom, BlueZ, faillock
 ├── assets/screenshots/
 ├── manifest.txt            # какие файлы из ~ отслеживаются
 ├── system-manifest.txt     # какие файлы из /etc отслеживаются
 ├── rice                    # скрипт синхронизации
-└── hyde-patches.sh         # правки к файлам HyDE
+├── hyde-patches.sh         # правки к файлам HyDE
+└── tools/                  # publicize (публичная копия из личной), check (проверка перед коммитом)
 ```
 
 ### Грабли: Hyprland 0.56 Lua и Asahi
