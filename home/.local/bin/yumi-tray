@@ -4,7 +4,7 @@
   yumi-tray bar               бесконечный JSON для custom/tray (через waybar-iconwrap)
   yumi-tray activate [N|ИМЯ]  показать окно программы (по умолчанию — требующую внимания или первую)
   yumi-tray list [--all]      список элементов (проверка)
-Меню со списком — yumi-menu-tray. Проверка без действий: YP_DRYRUN=1. Откат: yumi-tray-uninstall"""
+Меню со списком — yumi-menu-tray. Проверка без действий: YP_DRYRUN=1. Откат: yumi-uninstall tray"""
 import json
 import os
 import sys

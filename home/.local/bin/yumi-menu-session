@@ -9,7 +9,7 @@ Enter (или та же клавиша ещё раз) — «Сейчас», Esc 
 YP_DRYRUN=1 — ничего не выполняется: команда пишется в stderr, меню показывает имитацию.
 Для проверки: YP_SESSION_ASK=reboot|logout|poweroff — сразу начать отсчёт;
 YP_SESSION_KEYS="r,Escape,…" — прогнать клавиши через обработчик (без настоящей клавиатуры).
-Откат: yumi-panel-uninstall"""
+Откат: yumi-uninstall panel"""
 import math
 import os
 import pwd

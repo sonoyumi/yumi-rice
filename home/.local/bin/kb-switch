@@ -2,7 +2,7 @@
 # kb-switch — следующая раскладка СРАЗУ на всех клавиатурах (замена HyDE keyboardswitch.sh на SUPER+K)
 # HyDE переключал только «текущую» клавиатуру (switchxkblayout current), а у Logitech два устройства
 # и у каждой клавиатуры своя раскладка — поэтому иногда язык «не менялся», особенно на экране блокировки.
-# kb-switch [next|en|ru|ua]   KB_SWITCH_QUIET=1 — без уведомления. Откат: kb-switch-uninstall
+# kb-switch [next|en|ru|ua]   KB_SWITCH_QUIET=1 — без уведомления. Откат: yumi-uninstall kb-switch
 
 names=(EN RU UA)
 idx=$(hyprctl devices -j | jq -r '[.keyboards[] | select(.main)][0].active_layout_index // 0')

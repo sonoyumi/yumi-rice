@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # hyprlock-info — данные для макета экрана блокировки «Yumi Google» (yumi-google.conf)
 # hyprlock-info <weather|quote|tablo|profile|net|battery|music-head|music-title|music-bar|art>
-# Откат: hyprlock-google-uninstall
+# Откат: yumi-uninstall hyprlock-google
 
 export LANG=C.UTF-8 LC_ALL=C.UTF-8  # playerctl и кириллица без этого ломаются
 cache=${XDG_CACHE_HOME:-$HOME/.cache}/hyprlock-info; mkdir -p "$cache"
@@ -25,11 +25,16 @@ weather)  # раз в 15 мин, при ошибке сети — последн
     fi
     [[ -s $f ]] || { echo "󰖐  $CITY"; exit; }
     IFS='|' read -r t c < "$f"; t=${t#+}
+    # значок + короткое слово: длинные описания wttr («pioviggine leggera a tratti nelle vicinanze»)
+    # не влезают в пилюлю экрана блокировки
     case ${c,,} in
-        *temporal*|*tuon*) i=󰖓 ;; *neve*|*nevicat*) i=󰖘 ;; *piogg*|*rovesc*|*pioviggin*) i=󰖗 ;;
-        *nebbi*|*foschi*) i=󰖑 ;; *sereno*|*sole*|*soleggiat*) i=󰖙 ;; *) i=󰖐 ;;
+        *temporal*|*tuon*) i=󰖓 w=temporale ;; *neve*|*nevicat*) i=󰖘 w=neve ;;
+        *piogg*|*rovesc*|*pioviggin*) i=󰖗 w=pioggia ;; *nebbi*|*foschi*) i=󰖑 w=nebbia ;;
+        *sereno*|*sole*|*soleggiat*) i=󰖙 w=sereno ;; *parzial*) i=󰖐 w=variabile ;;
+        *copert*) i=󰖐 w=coperto ;; *nuvol*) i=󰖐 w=nuvoloso ;;
+        *) i=󰖐; w=${c,,}; (( ${#w} > 10 )) && w=variabile ;;
     esac
-    echo "$i  $CITY · $t · ${c,,}" ;;
+    echo "$i  $CITY · $t · $w" ;;
 
 quote)  # новая цитата каждые 10 минут (и при каждой блокировке)
     mapfile -t q < <(grep -vE '^\s*(#|$)' ~/.config/hypr/hyprlock/quotes.txt 2>/dev/null)
@@ -73,7 +78,7 @@ music-head)  # «Сейчас играет» + плеер
     st=$(playerctl status 2>/dev/null)
     case $st in Playing) h="󰐊 Сейчас играет" ;; Paused) h="󰏤 На паузе" ;; *) h="󰝛 Тишина" ;; esac
     p=$(playerctl metadata --format '{{playerName}}' 2>/dev/null)
-    case ${p,,} in firefox*) p="󰈹 Firefox" ;; spotify*) p="󰓇 Spotify" ;; mpv*) p="󰐹 mpv" ;; chromium*) p=" Chromium" ;; "") p="" ;; *) p="󰝚 $p" ;; esac
+    case ${p,,} in zen*) p="󰖟 Zen" ;; firefox*) p="󰈹 Firefox" ;; spotify*) p="󰓇 Spotify" ;; mpv*) p="󰐹 mpv" ;; chromium*) p=" Chromium" ;; "") p="" ;; *) p="󰝚 $p" ;; esac
     echo "$h${p:+  ·  $p}" ;;
 
 music-title)
@@ -103,7 +108,7 @@ play-icon)  # значок для кнопки: пауза, если играе�
 music)  # вся карточка одной надписью и одним вызовом playerctl: заголовок / трек / прогресс
     IFS=$'\x1f' read -r st pl t a L P < <(playerctl metadata --format $'{{status}}\x1f{{playerName}}\x1f{{title}}\x1f{{artist}}\x1f{{mpris:length}}\x1f{{position}}' 2>/dev/null)
     case $st in Playing) h="󰐊 Сейчас играет" ;; Paused) h="󰏤 На паузе" ;; *) h="󰝛 Тишина" ;; esac
-    case ${pl,,} in firefox*) pl="󰈹 Firefox" ;; spotify*) pl="󰓇 Spotify" ;; mpv*) pl="󰐹 mpv" ;; chromium*) pl=" Chromium" ;; "") ;; *) pl="󰝚 $pl" ;; esac
+    case ${pl,,} in zen*) pl="󰖟 Zen" ;; firefox*) pl="󰈹 Firefox" ;; spotify*) pl="󰓇 Spotify" ;; mpv*) pl="󰐹 mpv" ;; chromium*) pl=" Chromium" ;; "") ;; *) pl="󰝚 $pl" ;; esac
     s="$t"; [[ -n $a ]] && s+=" — $a"; [[ -z $t ]] && s="ничего не играет"
     (( ${#s} > 32 )) && s="${s:0:31}…"; s=${s//&/&amp;}; s=${s//</&lt;}
     fmt() { printf '%d:%02d' $(( $1 / 60 )) $(( $1 % 60 )); }

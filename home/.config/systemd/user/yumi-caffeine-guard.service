@@ -1,0 +1,6 @@
+[Unit]
+Description=☕ Не засыпать — выключить при низкой батарее без зарядки
+
+[Service]
+Type=oneshot
+ExecStart=@HOME@/.local/bin/yumi-caffeine guard

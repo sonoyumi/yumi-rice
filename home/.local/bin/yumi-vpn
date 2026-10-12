@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# yumi-vpn — VPN через WireGuard-подключения NetworkManager с именем «VPN …» (Cloudflare WARP, Proton Free).
+#   yumi-vpn list          все локации (по строке)
+#   yumi-vpn state         включённая локация (пусто — VPN выключен)
+#   yumi-vpn up [ИМЯ]      включить (без имени — последняя, по умолчанию «VPN WARP»); другая локация отключается
+#   yumi-vpn down          выключить
+#   yumi-vpn toggle        вкл/выкл последней локации
+# Добавить локацию: nmcli connection import type wireguard file X.conf; nmcli connection modify X connection.id "VPN …" connection.autoconnect no
+# Откат: ~/.local/share/yumi-archive/home/.local/share/yumi-vpn-backup
+last_file="${XDG_STATE_HOME:-$HOME/.local/state}/yumi-vpn-last"
+
+list()  { nmcli -t -f NAME,TYPE connection show | awk -F: '$2=="wireguard" && $1 ~ /^VPN / {print $1}'; }
+state() { nmcli -t -f NAME,TYPE connection show --active | awk -F: '$2=="wireguard" && $1 ~ /^VPN / {print $1; exit}'; }
+last()  { local l; l="$(cat "$last_file" 2>/dev/null)"; list | grep -qxF "$l" && echo "$l" || echo "VPN WARP"; }
+bar()   { pkill -RTMIN+10 waybar 2>/dev/null; true; }
+
+down() { local c; c="$(state)"; [ -n "$c" ] && nmcli connection down "$c" >/dev/null; bar; }
+up() {
+    local name="${1:-$(last)}" cur
+    cur="$(state)"
+    [ -n "$cur" ] && [ "$cur" != "$name" ] && nmcli connection down "$cur" >/dev/null
+    mkdir -p "$(dirname "$last_file")"; echo "$name" > "$last_file"
+    nmcli connection up "$name" >/dev/null; local rc=$?
+    bar; return $rc
+}
+
+case "$1" in
+    list)   list ;;
+    state)  state ;;
+    up)     up "$2" ;;
+    down)   down ;;
+    toggle) if [ -n "$(state)" ]; then down; else up; fi ;;
+    *)      sed -n '2,8p' "$0" | sed 's/^# \?//'; exit 1 ;;
+esac

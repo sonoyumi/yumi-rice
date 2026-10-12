@@ -10,7 +10,7 @@
 # тем HyDE style_10 / clipboard / notification / steam_deck / gamelauncher_* (и selector
 # для «выбора лаунчера»). Заголовок, подпись, подсказка поиска и сетка (эмодзи, глифы) —
 # по скрипту, который открыл меню. Размер шрифта — как у GTK-меню на этом мониторе.
-# Отключить тему (оставить только DPI): ROFI_YUMI=0. Откат всего: rofi-yumi-uninstall.
+# Отключить тему (оставить только DPI): ROFI_YUMI=0. Откат всего: yumi-uninstall rofi-yumi.
 # DPI и коэффициент — из ~/.config/yumi/monitors.conf (столбцы dpi_rofi и интерфейс)
 declare -A DPI=() UI=()
 while read -r _m _ui _dpi _; do
@@ -70,7 +70,9 @@ done
 ((use)) || exec /usr/bin/rofi "${pre[@]}" "$@"
 
 # Размеры: шрифт как у GTK-меню (11pt × множитель монитора) с поправкой на DPI rofi
-k="${UI[$mon]:-${scale:-1}}"
+# k = коэффициент меню × масштаб монитора (rofi рисует в физических px). 11.10: раньше без коэффициента брался
+# только масштаб — после ui 0.85 у eDP-1 шрифт стал вдвое мельче
+k=$(awk -v u="${UI[$mon]:-1}" -v s="${scale:-1}" 'BEGIN{printf "%.4f", u * s}')
 dpi="${DPI[$mon]:-96}"
 read -r F T S G B < <(awk -v k="$k" -v d="$dpi" 'BEGIN{
     f = 11 * k * 96 / d
@@ -147,8 +149,8 @@ fi
 
 # Положение. rofi через XWayland на мониторе с масштабом ≠ 1 центрирует окно неверно
 # (считает монитор 1920×1080, а координаты окна — в логических px при размере в физических).
-# Поэтому там ставим окно сами: ширина и высота (оценка по числу строк) в физических px,
-# смещение — в логических. W — ширина в em, hr — высота окна в размерах шрифта (замер).
+# Поэтому там ставим окно сами: ширина, высота (оценка по числу строк) и смещение — в физических px
+# (11.10.2026: смещение в логических px сдвигало меню влево-вверх в `scale` раз — проверено скриншотом). W — ширина в em, hr — высота окна в размерах шрифта (замер).
 W=21 hr=42
 case "$caller" in
     *rofilaunch*)    [[ "$mode" == filebrowser ]] && hr=49 || hr=46
@@ -166,8 +168,8 @@ if [[ "$caller" == *rofi-panel* ]]; then
 elif [[ -n "$mon" && "$scale" != 1 && "$scale" != 1.0 ]]; then
     read -r px py < <(hyprctl -j monitors 2>/dev/null | jq -r --arg m "$mon" '.[] | select(.name == $m) | "\(.width / .scale) \(.height / .scale)"' |
         awk -v f="$F" -v d="$dpi" -v s="$scale" -v w="$W" -v h="$hr" '{
-            fpx = f * d / 72; x = ($1 - w * fpx * 1.364 / s) / 2; y = ($2 - h * fpx / s) / 2
-            if (x < 0) x = 0; if (y < 48) y = 48; printf "%d %d\n", x, y }')
+            fpx = f * d / 72; x = ($1 * s - w * fpx * 1.364) / 2; y = ($2 * s - h * fpx) / 2
+            if (x < 0) x = 0; if (y < 48 * s) y = 48 * s; printf "%d %d\n", x, y }')
     pos="window {location: north west; anchor: north west; x-offset: ${px:-0}px; y-offset: ${py:-0}px;}"
 else
     pos="window {location: center; anchor: center; x-offset: 0; y-offset: 0;}"

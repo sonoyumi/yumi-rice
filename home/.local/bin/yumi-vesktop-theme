@@ -1,0 +1,49 @@
+#!/usr/bin/env python3
+"""yumi-vesktop-theme — Vesktop (Discord) в точных цветах yumi-accent.
+HyDE (wallbash) пишет ~/.var/app/dev.vencord.Vesktop/config/vesktop/settings/quickCss.css с темой
+DiscordRecolor; этот скрипт после него заменяет только блок :root {...} на цвета yumi-accent.
+Vencord подхватывает quickCss на лету. Откат: yumi-uninstall vesktop"""
+import os
+import re
+import sys
+
+HOME = os.path.expanduser("~")
+QCSS = os.path.join(HOME, ".var/app/dev.vencord.Vesktop/config/vesktop/settings/quickCss.css")
+ACC = os.path.join(HOME, ".cache/yumi-accent")
+MARK = "/* yumi-vesktop: цвета yumi-accent */"
+
+
+def rgb(h):
+    h = h.lstrip("#")
+    return f"{int(h[0:2], 16)},{int(h[2:4], 16)},{int(h[4:6], 16)}"
+
+
+def main():
+    if not os.path.exists(QCSS):
+        return 0
+    xa = open(os.path.join(ACC, "accent.txt")).read().split()
+    deep, bg, btn, _hov = open(os.path.join(ACC, "bg.txt")).read().split()[:4]
+    v = {
+        "accentcolor": rgb(xa[6]), "accentcolor2": rgb(xa[1]), "linkcolor": rgb(xa[7]),
+        "mentioncolor": rgb(xa[4]),
+        "textbrightest": "255,255,255", "textbrighter": "247,245,255", "textbright": rgb(xa[8]),
+        "textdark": "238,234,248", "textdarker": rgb(xa[5]), "textdarkest": rgb(xa[2]),
+        "backgroundaccent": rgb(xa[4]), "backgroundprimary": rgb(bg), "backgroundsecondary": rgb(deep),
+        "backgroundsecondaryalt": rgb(deep), "backgroundtertiary": rgb(deep), "backgroundfloating": rgb(btn),
+        "settingsicons": "0",
+    }
+    block = ":root {\n  " + MARK + "\n" + "".join(f"  --{k}: {c};\n" for k, c in v.items()) + "}"
+    css = open(QCSS).read()
+    new, n = re.subn(r":root\s*\{[^}]*\}", lambda _m: block, css, count=1)
+    if not n:
+        new = css.rstrip() + "\n\n" + block + "\n"
+    if new != css:
+        tmp = QCSS + ".yumi.tmp"
+        with open(tmp, "w") as f:
+            f.write(new)
+        os.replace(tmp, QCSS)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

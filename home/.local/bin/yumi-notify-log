@@ -1,0 +1,444 @@
+#!/usr/bin/env python3
+"""yumi-notify-log — журнал уведомлений для «Центра управления» yumi-panel (swaync остаётся демоном).
+
+Как работает
+  swaync владеет org.freedesktop.Notifications и не отдаёт список уведомлений наружу. Поэтому журнал
+  ПАССИВНО наблюдает сессионную шину: на отдельном соединении вызывает
+  org.freedesktop.DBus.Monitoring.BecomeMonitor и получает копии сообщений:
+    • вызовы Notify(app_name, replaces_id, app_icon, summary, body, actions, hints, expire_timeout);
+    • ответы swaync на них (reply_serial → serial вызова, в ответе — присвоенный id);
+    • сигналы NotificationClosed(id, reason) и смену владельца имени (перезапуск swaync).
+  Монитор ничего не может отправить в шину и ничего не перехватывает: swaync получает все вызовы как
+  обычно, всплывашки и его история работают без изменений. Процесс спит в главном цикле GLib и
+  просыпается только на эти сообщения (правила фильтра задаются в шине, лишнего трафика нет).
+
+История: $YNL_HISTORY (по умолчанию ~/.cache/yumi-notify/history.json), запись атомарная (tmp + rename),
+  не чаще раза в 150 мс. Картинки hint image-data — png в каталоге img/ рядом с историей.
+  Не хранятся: «прогресс»-уведомления (hint value, synchronous, x-canonical-private-synchronous,
+  x-dunst-stack-tag — громкость/яркость), hint transient=true и служебные уведомления по правилам
+  $YNL_IGNORE (~/.config/yumi-notify/ignore.json: раскладка, скриншот, обои…).
+  Удаление: NotificationClosed reason 2 (закрыл пользователь) и 3 (CloseNotification / закрыто
+  приложением). reason 1 (истёк таймер всплывашки) — остаётся, как в истории swaync.
+  Внешняя правка файла (центр убрал карточку, «Очистить всё») подхватывается: перед изменением
+  журнал перечитывает файл, если его изменил не он.
+  id у swaync после перезапуска начинаются заново — поэтому ключ записи = «уникальное имя swaync/id».
+
+Запуск
+  yumi-notify-log            демон (user-сервис yumi-notify-log.service)
+  yumi-notify-log --test     то же, но каждое событие печатается в stdout
+  yumi-notify-log --once     выйти после первого сохранённого уведомления (код 0) или через
+                             $YNL_TIMEOUT секунд (по умолчанию 30, код 2)
+  yumi-notify-log --dump     напечатать историю и выйти
+  yumi-notify-log --prune    убрать из истории всё, что подпадает под правила ignore.json
+Переменные: YNL_HISTORY — путь истории, YNL_MAX — сколько хранить (50).
+Ошибки — в stderr (journald при запуске сервисом).
+"""
+import hashlib
+import json
+import os
+import re
+import sys
+import time
+
+import gi
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import Gio, GLib, GdkPixbuf  # noqa: E402
+
+HISTORY = os.environ.get("YNL_HISTORY") or os.path.join(
+    os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "yumi-notify", "history.json")
+IMG_DIR = os.path.join(os.path.dirname(HISTORY), "img")
+MAX_ITEMS = int(os.environ.get("YNL_MAX", "50"))
+NAME = "org.freedesktop.Notifications"
+IFACE = "org.freedesktop.Notifications"
+SAVE_DELAY_MS = 150
+PENDING_TTL = 60            # с: Notify без ответа дольше этого — забыть
+PROGRESS_HINTS = ("value", "synchronous", "x-canonical-private-synchronous", "x-dunst-stack-tag")
+RULES_FILE = os.environ.get("YNL_IGNORE") or os.path.join(
+    os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")), "yumi-notify", "ignore.json")
+
+ARGS = set(sys.argv[1:])
+VERBOSE = "--test" in ARGS or "--once" in ARGS
+
+
+def log(*a):
+    print("yumi-notify-log:", *a, file=sys.stderr, flush=True)
+
+
+def say(*a):
+    if VERBOSE:
+        print(*a, flush=True)
+
+
+def _plain(v):
+    """GLib.Variant / вложенные значения → обычные типы Python."""
+    if isinstance(v, GLib.Variant):
+        v = v.unpack()
+    return v
+
+
+def _int(v, default):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+
+class Rules:
+    """Служебные уведомления, которые не нужны в журнале: $YNL_IGNORE (~/.config/yumi-notify/ignore.json).
+    {"keep": [...], "ignore": [...]}; правило — поля app/summary/body/icon (regex без учёта регистра),
+    replaces/urgency (числа); совпасть должны все. keep сильнее ignore. Файл перечитывается при изменении."""
+    TEXT = {"app": "app", "summary": "summary", "body": "body"}
+
+    def __init__(self):
+        self.sig = None
+        self.keep = self.ignore = []
+
+    def _compile(self, raw):
+        out = []
+        for r in raw or []:
+            if not isinstance(r, dict):
+                continue
+            try:
+                out.append((r.get("name") or "?", {k: (re.compile(v, re.I) if isinstance(v, str) else v)
+                                                   for k, v in r.items() if k != "name"}))
+            except re.error as e:
+                log(f"правило {r.get('name')!r} пропущено:", e)
+        return out
+
+    def reload(self):
+        try:
+            st = os.stat(RULES_FILE)
+            sig = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            sig = None
+        if sig == self.sig:
+            return
+        self.sig = sig
+        self.keep = self.ignore = []
+        if sig is None:
+            return
+        try:
+            with open(RULES_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            self.keep, self.ignore = self._compile(data.get("keep")), self._compile(data.get("ignore"))
+            say(f"правила: keep {len(self.keep)}, ignore {len(self.ignore)}")
+        except Exception as e:
+            log("не прочитать правила", RULES_FILE, e)
+
+    @staticmethod
+    def _hit(cond, item):
+        for k, v in cond.items():
+            if k == "icon":
+                val = " ".join(str(item.get(x) or "") for x in ("app_icon", "image"))
+            elif k in ("replaces", "urgency"):
+                if _int(item.get(k), None) != _int(v, -1):
+                    return False
+                continue
+            else:
+                val = str(item.get(k) or "")
+            if not hasattr(v, "search") or not v.search(val):
+                return False
+        return True
+
+    def match(self, item):
+        """Имя правила ignore, если уведомление не нужно в журнале, иначе None."""
+        self.reload()
+        if any(self._hit(c, item) for _, c in self.keep):
+            return None
+        return next((n for n, c in self.ignore if self._hit(c, item)), None)
+
+
+RULES = Rules()
+
+
+class Journal:
+    def __init__(self):
+        self.items = []
+        self.pending = {}          # (отправитель, serial) → данные Notify
+        self.server = None         # уникальное имя текущего владельца org.freedesktop.Notifications
+        self.save_id = 0
+        self.disk_sig = None       # (mtime_ns, size) файла после нашей записи
+        self.saved_once = False
+        os.makedirs(IMG_DIR, exist_ok=True)
+        self.load()
+
+    # ---------- файл ----------
+    def _stat(self):
+        try:
+            st = os.stat(HISTORY)
+            return (st.st_mtime_ns, st.st_size)
+        except OSError:
+            return None
+
+    def load(self):
+        try:
+            with open(HISTORY, encoding="utf-8") as f:
+                data = json.load(f)
+            self.items = [i for i in data.get("items", []) if isinstance(i, dict) and "key" in i]
+        except FileNotFoundError:
+            self.items = []
+        except Exception as e:
+            log("не прочитать историю, начинаю заново:", e)
+            self.items = []
+        self.disk_sig = self._stat()
+
+    def sync_from_disk(self):
+        """Файл изменил кто-то другой (центр) — взять его содержимое за основу."""
+        if self._stat() != self.disk_sig:
+            say("история изменена извне — перечитываю")
+            self.load()
+
+    def schedule_save(self):
+        if not self.save_id:
+            self.save_id = GLib.timeout_add(SAVE_DELAY_MS, self.save)
+
+    def save(self):
+        self.save_id = 0
+        self.items = self.items[:MAX_ITEMS]
+        data = {"version": 1, "updated": time.time(), "server": self.server, "items": self.items}
+        tmp = f"{HISTORY}.tmp{os.getpid()}"
+        try:
+            os.makedirs(os.path.dirname(HISTORY), exist_ok=True)
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=1)
+            os.replace(tmp, HISTORY)
+            self.disk_sig = self._stat()
+        except Exception as e:
+            log("ошибка записи истории:", e)
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        self.clean_images()
+        say(f"сохранено: {len(self.items)} шт. → {HISTORY}")
+        return False
+
+    def clean_images(self):
+        """Удалить png из кэша, на которые больше не ссылается история."""
+        used = {i.get("image") for i in self.items}
+        try:
+            for name in os.listdir(IMG_DIR):
+                p = os.path.join(IMG_DIR, name)
+                if p not in used and name.endswith(".png"):
+                    os.unlink(p)
+        except OSError:
+            pass
+
+    # ---------- разбор ----------
+    def save_image_data(self, v):
+        """hint image-data (iiibiiay) → png в кэше; вернуть путь или None."""
+        try:
+            w, h, stride, alpha, bits, _ch, data = v
+            data = bytes(data)
+            name = hashlib.sha1(data).hexdigest()[:20] + ".png"
+            path = os.path.join(IMG_DIR, name)
+            if not os.path.exists(path):
+                pb = GdkPixbuf.Pixbuf.new_from_bytes(GLib.Bytes.new(data), GdkPixbuf.Colorspace.RGB,
+                                                     bool(alpha), bits, w, h, stride)
+                # маленькая копия: в центре значок ≤ 64 px, хранить мегапиксели незачем
+                if max(w, h) > 128:
+                    k = 128 / max(w, h)
+                    pb = pb.scale_simple(max(1, int(w * k)), max(1, int(h * k)), GdkPixbuf.InterpType.BILINEAR)
+                pb.savev(path + ".part", "png", [], [])
+                os.replace(path + ".part", path)
+            return path
+        except Exception as e:
+            log("image-data не сохранить:", e)
+            return None
+
+    def on_notify(self, sender, serial, body):
+        app, replaces, icon, summary, text, actions, hints, expire = body
+        hints = {k: _plain(v) for k, v in hints.items()}
+        skip = None
+        if any(k in hints for k in PROGRESS_HINTS):
+            skip = "прогресс/синхронное"
+        elif hints.get("transient") in (True, 1):
+            skip = "transient"
+        else:
+            rule = RULES.match({"app": app, "summary": summary, "body": text, "app_icon": icon,
+                                "image": hints.get("image-path") or hints.get("image_path"),
+                                "replaces": replaces, "urgency": _int(hints.get("urgency"), 1)})
+            if rule:
+                skip = f"правило «{rule}»"
+        image = None
+        if not skip:
+            for k in ("image-data", "image_data", "icon_data"):
+                if k in hints:
+                    image = self.save_image_data(hints[k])
+                    break
+            if not image:
+                image = hints.get("image-path") or hints.get("image_path") or None
+        acts = [[actions[i], actions[i + 1]] for i in range(0, len(actions) - 1, 2)]
+        self.pending[(sender, serial)] = {
+            "skip": skip, "t": time.time(),
+            "item": {
+                "app": app, "app_icon": icon, "summary": summary, "body": text,
+                "desktop_entry": hints.get("desktop-entry") or "",
+                "urgency": _int(hints.get("urgency"), 1),
+                "category": hints.get("category") or "",
+                "image": image, "actions": acts, "expire": expire, "replaces": replaces,
+            },
+        }
+        say(f"Notify от {sender} #{serial}: [{app}] {summary!r}" + (f" — пропуск ({skip})" if skip else ""))
+        self._purge_pending()
+
+    def _purge_pending(self):
+        now = time.time()
+        for k in [k for k, v in self.pending.items() if now - v["t"] > PENDING_TTL]:
+            del self.pending[k]
+
+    def on_reply(self, server, dest, reply_serial, body):
+        p = self.pending.pop((dest, reply_serial), None)
+        if p is None:
+            return                              # ответ на что-то другое (GetServerInformation и т.п.)
+        if self.server != server:
+            self.server = server
+        if p["skip"] or not body:
+            return
+        nid = int(body[0])
+        if not nid:
+            return
+        self.sync_from_disk()
+        item = dict(p["item"], id=nid, srv=server, key=f"{server}/{nid}", time=p["t"])
+        old = next((i for i in self.items if i["key"] == item["key"]), None)
+        if old is not None:                      # replaces_id: обновление того же уведомления
+            self.items.remove(old)
+            item["first"] = old.get("first", old.get("time"))
+        self.items.insert(0, item)
+        say(f"  → id {nid} ({'обновлено' if old else 'новое'})")
+        self.schedule_save()
+        self.saved_once = True
+
+    def on_closed(self, server, nid, reason):
+        say(f"NotificationClosed id {nid} reason {reason}")
+        if reason not in (2, 3):
+            return                              # 1 — истёк таймер всплывашки: в истории остаётся
+        self.sync_from_disk()
+        key = f"{server}/{nid}"
+        n = len(self.items)
+        self.items = [i for i in self.items if i["key"] != key]
+        if len(self.items) != n:
+            self.schedule_save()
+
+    def on_owner(self, old, new):
+        say(f"владелец {NAME}: {old or '—'} → {new or '—'}")
+        if new:
+            log(f"сервер уведомлений сменился: {new} (перезапуск swaync?)")
+        self.server = new or None
+        self.pending.clear()
+
+
+def main():
+    if "--dump" in ARGS:
+        try:
+            with open(HISTORY, encoding="utf-8") as f:
+                print(json.dumps(json.load(f), ensure_ascii=False, indent=1))
+        except FileNotFoundError:
+            print("истории нет:", HISTORY)
+        return 0
+
+    if "--prune" in ARGS:
+        j = Journal()
+        before = len(j.items)
+        for i in j.items:
+            if RULES.match(i):
+                print("убрано:", f"[{i.get('app')}] {i.get('summary')!r}", f"— правило «{RULES.match(i)}»")
+        j.items = [i for i in j.items if not RULES.match(i)]
+        if len(j.items) != before:
+            j.save()
+        print(f"было {before}, осталось {len(j.items)}")
+        return 0
+
+    j = Journal()
+    loop = GLib.MainLoop()
+    rc = [0]
+
+    addr = Gio.dbus_address_get_for_bus_sync(Gio.BusType.SESSION, None)
+    conn = Gio.DBusConnection.new_for_address_sync(
+        addr, Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION,
+        None, None)
+    # текущий владелец — до BecomeMonitor (монитор не может слать вызовы)
+    try:
+        j.server = conn.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+                                  "GetNameOwner", GLib.Variant("(s)", (NAME,)), None, 0, 2000, None).unpack()[0]
+    except Exception:
+        j.server = None
+    rules = [
+        f"type='method_call',interface='{IFACE}',member='Notify'",
+        f"type='method_return',sender='{NAME}'",
+        f"type='signal',interface='{IFACE}',member='NotificationClosed'",
+        f"type='signal',sender='org.freedesktop.DBus',member='NameOwnerChanged',arg0='{NAME}'",
+    ]
+    conn.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus.Monitoring",
+                   "BecomeMonitor", GLib.Variant("(asu)", (rules, 0)), None, 0, -1, None)
+
+    def handle(kind, *a):
+        try:
+            if kind == "notify":
+                j.on_notify(*a)
+            elif kind == "reply":
+                j.on_reply(*a)
+            elif kind == "closed":
+                j.on_closed(*a)
+            elif kind == "owner":
+                j.on_owner(*a)
+            if "--once" in ARGS and j.saved_once:
+                loop.quit()
+        except Exception as e:
+            log("ошибка обработки", kind, e)
+        return False
+
+    def flt(_c, m, _incoming):
+        # вызывается в рабочем потоке GDBus: только достать данные и передать в главный цикл
+        try:
+            t = m.get_message_type()
+            body = m.get_body()
+            body = body.unpack() if body is not None else ()
+            if t == Gio.DBusMessageType.METHOD_CALL and m.get_member() == "Notify" and len(body) == 8:
+                GLib.idle_add(handle, "notify", m.get_sender(), m.get_serial(), body)
+            elif t == Gio.DBusMessageType.METHOD_RETURN:
+                GLib.idle_add(handle, "reply", m.get_sender(), m.get_destination(), m.get_reply_serial(), body)
+            elif t == Gio.DBusMessageType.SIGNAL and m.get_member() == "NotificationClosed" and len(body) == 2:
+                GLib.idle_add(handle, "closed", m.get_sender(), int(body[0]), int(body[1]))
+            elif t == Gio.DBusMessageType.SIGNAL and m.get_member() == "NameOwnerChanged" and len(body) == 3:
+                GLib.idle_add(handle, "owner", body[1], body[2])
+        except Exception as e:
+            print("yumi-notify-log: ошибка фильтра:", e, file=sys.stderr, flush=True)
+        return None            # монитор: сообщение не обрабатывать дальше (и не пытаться отвечать)
+
+    conn.add_filter(flt)
+
+    def on_closed_conn(_c, _remote, err):
+        log("соединение с шиной закрыто:", err.message if err else "")
+        rc[0] = 1
+        loop.quit()
+    conn.connect("closed", on_closed_conn)
+
+    try:                        # SIGINT / SIGTERM — сохранить и выйти
+        gi.require_version("GLibUnix", "2.0")
+        from gi.repository import GLibUnix
+        add_sig = GLibUnix.signal_add
+    except (ImportError, ValueError):
+        add_sig = GLib.unix_signal_add
+    for sig in (2, 15):
+        add_sig(GLib.PRIORITY_DEFAULT, sig, lambda *_: (loop.quit(), False)[1])
+
+    if "--once" in ARGS:
+        def timeout():
+            rc[0] = 2
+            loop.quit()
+            return False
+        GLib.timeout_add_seconds(int(os.environ.get("YNL_TIMEOUT", "30")), timeout)
+
+    if not os.path.exists(HISTORY):
+        j.save()
+    say(f"слушаю шину; сервер {j.server}; история {HISTORY}")
+    loop.run()
+    if j.save_id:
+        GLib.source_remove(j.save_id)
+        j.save()
+    return rc[0]
+
+
+if __name__ == "__main__":
+    sys.exit(main())

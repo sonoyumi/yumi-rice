@@ -1,0 +1,6 @@
+[Unit]
+Description=yumi-music: обновить yt-dlp и ytmusicapi (YouTube часто меняет защиту)
+
+[Service]
+Type=oneshot
+ExecStart=@HOME@/.local/bin/yumi-music update

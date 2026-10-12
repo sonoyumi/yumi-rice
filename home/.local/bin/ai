@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# ai — быстрый локальный помощник по коду (Qwen2.5-Coder 1.5b через Ollama).
+#   ai "вопрос"              разовый вопрос
+#   ai                       диалог (выход: /bye)
+#   cat file.py | ai "..."   передать код из файла
+# Модель меняется: AI_MODEL=qwen2.5-coder:7b ai "..."   Откат: rm ~/.local/bin/ai
+MODEL=${AI_MODEL:-qwen2.5-coder:1.5b}
+# сервер — системная служба ollama (модели в /var/lib/ollama); выключена — подсказать, а не падать
+if ! ollama list >/dev/null 2>&1; then
+    echo "Ollama не запущена. Один раз: sudo systemctl start ollama   всегда: sudo systemctl enable --now ollama" >&2
+    exit 1
+fi
+if [ -t 0 ] && [ $# -eq 0 ]; then exec ollama run "$MODEL"; fi
+prompt="$*"
+if [ ! -t 0 ]; then prompt="$(cat)
+$prompt"; fi
+ollama run "$MODEL" "$prompt"

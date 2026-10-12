@@ -1,0 +1,9 @@
+[Unit]
+Description=☕ Не засыпать — проверка батареи каждые 2 минуты
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+
+[Install]
+WantedBy=timers.target

@@ -4,7 +4,7 @@
   yumi-menu-mouse --close            закрыть открытое меню
 Logitech PRO X 2 через Solaar: заряд (мгновенно из /sys/class/power_supply/hidpp_battery_*, кеш пилюли
 ~/.cache/waybar-mouse.json — запасной), DPI (плитки 400/800/1600/3200 + точный ползунок 100–6400),
-частота опроса (500–4000 Гц), встроенный профиль мыши (onboard_profiles), «Открыть Solaar».
+частота опроса (500–8000 Гц), встроенный профиль мыши (onboard_profiles), «Открыть Solaar».
 Текущие настройки читаются `solaar config` в потоке (~1,5 с). Изменения — `solaar config …`, как в старом меню,
 затем сигнал пилюле Waybar (RTMIN+13).
 
@@ -27,7 +27,7 @@ DEVICE = "PRO X 2"
 CACHE = os.path.expanduser("~/.cache/waybar-mouse.json")
 DPIS = [400, 800, 1600, 3200]
 DPI_MIN, DPI_MAX, DPI_STEP = 100, 6400, 50
-RATES = [(500, "2ms"), (1000, "1ms"), (2000, "500us"), (4000, "250us")]   # Гц → значение Solaar
+RATES = [(500, "2ms"), (1000, "1ms"), (2000, "500us"), (4000, "250us"), (8000, "125us")]   # Гц → значение Solaar
 CHARGING = {"charging", "full"}
 # каркас подгружает libgtk4-layer-shell через LD_PRELOAD — Solaar (GTK3) с ним падает: запускать без него
 SOLAAR = ("env", "-u", "LD_PRELOAD", "solaar")
@@ -301,10 +301,20 @@ class Mouse:
 
         def work():
             ok, msg = True, ""
+            # фоновый Solaar (solaar --window=hide) перехватывает изменения из командной строки: пишет в конфиг
+            # dpi_extended: null и после сна мыши возвращает старое. Поэтому: остановить его без сохранения (-9),
+            # применить настройки, запустить снова — он прочитает уже новые значения и будет их держать.
+            bg = yp.run("pgrep", "-f", "^/usr/bin/python /usr/bin/solaar --window").strip()
+            if bg and not yp.DRY:
+                yp.do("pkill", "-9", "-f", "^/usr/bin/python /usr/bin/solaar --window")
             for args in settings:
                 ok, msg = yp.do(*SOLAAR, "config", DEVICE, *map(str, args), timeout=25)
+                if ok and "=?" in msg:                       # «key not found» Solaar возвращает с кодом 0
+                    ok = False
                 if not ok:
                     break
+            if bg and not yp.DRY:
+                yp.spawn(*SOLAAR, "--window=hide")
             if ok:
                 try:
                     os.remove(CACHE)                         # DPI/частота изменились — пилюля перечитает их у Solaar
@@ -333,7 +343,7 @@ class Mouse:
     def set_dpi(self, d):
         if d == self.st.get("dpi"):
             return
-        self.write(f"DPI {d}", "dpi", ("dpi_extended", "X", d), ("dpi_extended", "Y", d),
+        self.write(f"DPI {d}", "dpi", ("dpi_extended", "0", d), ("dpi_extended", "1", d),   # ключи 0=X, 1=Y (буквы Solaar не понимает)
                    on_ok=lambda: self.st.update(dpi=d))
 
     def pick_dpi(self, d):

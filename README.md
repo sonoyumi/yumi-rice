@@ -5,16 +5,16 @@
   <img alt="HyDE" src="https://img.shields.io/badge/HyDE-dotfiles-c6a0f6">
   <img alt="Asahi Linux" src="https://img.shields.io/badge/Asahi-Arch%20Linux%20ARM-1793D1?logo=archlinux&logoColor=white">
   <img alt="ARM64" src="https://img.shields.io/badge/aarch64-16K%20pages-f5a97f">
-  <img alt="Version" src="https://img.shields.io/badge/version-2.1-ed8796">
+  <img alt="Version" src="https://img.shields.io/badge/version-2.5-ed8796">
   <img alt="Waybar" src="https://img.shields.io/badge/Waybar-swaync%20·%20GTK4%20·%20rofi-a6da95">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-green">
 </p>
 
 **🇬🇧 [English](#en)** · **🇮🇹 [Italiano](#it)** · **🇺🇦 [Українська](#uk)** · **🇷🇺 [Русский](#ru)**
 
-![Desktop](assets/screenshots/v2/desktop.jpg)
+![Desktop](assets/screenshots/v2.5/desktop.jpg)
 
-<p align="center"><b>2.1</b> — lighter: events instead of polling, monitors in one file · <a href="https://github.com/sonoyumi/yumi-rice/releases/tag/v2.0">2.0</a> — GTK4 menus, accent from the wallpaper, new lock screen · <a href="https://github.com/sonoyumi/yumi-rice/releases/tag/v1.0">1.0</a> — rofi menus, HyDE themes</p>
+<p align="center"><b>2.5</b> — AirPods, music with lyrics, GTK4 control center, rollback archive · <b>3.0</b> — coming: entirely my own base, without HyDE<br><a href="https://github.com/sonoyumi/yumi-rice/releases/tag/v2.1">2.1</a> — lighter: events instead of polling, monitors in one file · <a href="https://github.com/sonoyumi/yumi-rice/releases/tag/v2.0">2.0</a> — GTK4 menus, accent from the wallpaper, new lock screen · <a href="https://github.com/sonoyumi/yumi-rice/releases/tag/v1.0">1.0</a> — rofi menus, HyDE themes</p>
 
 ---
 
@@ -35,6 +35,44 @@ repository and the system in step, with a backup of every file it touches.
 | Bar / notifications / menus | Waybar · swaync · GTK4 (yumi-panel) + rofi |
 | Lock / idle / wallpaper | hyprlock · hypridle · awww |
 | Terminal / font | kitty · JetBrainsMono Nerd Font |
+
+### What's new in 2.5
+
+> [!NOTE]
+> **3.0 is coming — a big update.** The next major version moves to a base that is entirely my own: my own
+> Hyprland config, systemd units, theming and scripts, **without HyDE underneath**. 2.5 is the last release built on HyDE.
+
+**New**
+- **AirPods on Linux** (`yumi-airpods` service): taking a bud out pauses the music, stem presses work, and the buds go
+  back to the iPhone when the laptop locks. Pixel-drawn AirPods icons in Waybar (`YumiIcons` font, `build-font.py`).
+- **Music** (`yumi-music`, `SUPER+SHIFT+M`): a YouTube Music + SoundCloud library with covers, playlists, queue and
+  search. SoundCloud goes through its own WARP proxy (`yumi-music-proxy`); weekly update and sync timers.
+- **Lyrics in the player:** under the card, synced line by line (YouTube Music → LRCLIB), with an offset for Bluetooth
+  delay (`lyrics.conf`). Equalizer in the player pill — `yumi-eq`, a Waybar CFFI module in C (`.local/src/yumi-eq`).
+- **Control center on GTK4** (`yumi-menu-control`): tiles, sliders, player card, "Do not disturb" and notification
+  history (`yumi-notify-log`; service noise is filtered by `ignore.json`).
+- **VPN without ExpressVPN** (`yumi-vpn`): Cloudflare WARP and Proton Free locations as NetworkManager WireGuard
+  connections — menu, Waybar pill and control-center tile.
+- **Keep awake everywhere** (☕ `yumi-caffeine` + guard timer), the lock screen goes dark while ☕ is on
+  (`yumi-idle-action`), battery charge limit (`yumi-battery-limit`).
+- **Apps in wallpaper colors** through accent hooks: Zen, Firefox, Vesktop, hyprtoolkit dialogs, Touch Bar; folder
+  icons recolored to the palette (`recolor.py`, `yumi-folders-update`).
+- `ai` — a small local code helper (Qwen2.5-Coder 1.5B via Ollama).
+
+**Cleaner**
+- `~/.local/bin`: 155 → ~90 files. 39 `*-uninstall` scripts, 27 `.bak` copies and 17 backup folders moved to
+  `~/.local/share/yumi-archive`. One command for every rollback: `yumi-uninstall` (list) and `yumi-uninstall <module>` —
+  it puts the backups back for the rollback and archives them again afterwards.
+- About 4 GB of caches freed (AUR builds, HyDE installer, cargo, pip).
+- Fixes: the VPN tile in the control center still called ExpressVPN; the music proxy check wrote to the journal
+  twice a second (now cached for 30 s).
+
+**`rice`**
+- `./rice drift` — how far the system has drifted from the repository; a daily timer (`yumi-rice-drift`) sends a
+  notification when it is time to `pull`.
+- `./rice doctor` — all yumi services, crashes in the last 24 h, `.bak` files in PATH, files missing from the manifest.
+- `./rice gc` — also moves `.bak` copies and rollbacks out of `~/.local/bin` into the archive.
+- `./rice push-system` — takes a snapper snapshot before the first change in `/etc`.
 
 ### What's new in 2.1
 
@@ -152,6 +190,20 @@ Measured on my machine (MacBook Pro M1, 8 GB, Firefox, Telegram and terminals op
 
 | | |
 |:---:|:---:|
+| ![Player with lyrics](assets/screenshots/v2.5/player-lyrics.png) | ![Control center](assets/screenshots/v2.5/control-center.png) |
+| Player with lyrics | Control center (GTK4) |
+| ![VPN](assets/screenshots/v2.5/menu-vpn.png) | ![Bluetooth](assets/screenshots/v2.5/menu-bluetooth.png) |
+| VPN: WARP / Proton + Tailscale | Bluetooth and AirPods |
+
+![Music](assets/screenshots/v2.5/music.png)
+<p align="center">Music: YouTube Music + SoundCloud, lyrics on the side</p>
+
+![Waybar 2.5](assets/screenshots/v2.5/bar.png)
+
+**2.0–2.1**
+
+| | |
+|:---:|:---:|
 | ![Control center](assets/screenshots/v2/control-center.png) | ![Sound](assets/screenshots/v2/menu-sound.png) |
 | Control center | Sound |
 | ![Wi-Fi](assets/screenshots/v2/menu-wifi.png) | ![Bluetooth](assets/screenshots/v2/menu-bluetooth.png) |
@@ -261,7 +313,8 @@ The repository is the source of truth; `rice` syncs it with the system.
 | `./rice hyde-patches` | Reapply the patches to HyDE files after a HyDE update |
 | `./rice doctor` | Quick check: config errors, processes, memory, drift |
 | `./rice check` | Repository check before a commit: syntax, private data, secrets (`--install-hook` runs it on every commit) |
-| `./rice gc [--apply]` | Clean-up: `__pycache__`, old `rice-bak` archives (without `--apply` it only shows) |
+| `./rice gc [--apply]` | Clean-up: `__pycache__`, old `rice-bak` archives, `.bak` and rollbacks from `~/.local/bin` into the archive (without `--apply` it only shows) |
+| `./rice drift [--notify [N]]` | How far the system drifted from the repository (notification above N blocks) |
 
 Personal tweaks live outside the repository in `~/.config/rice-local/` (same layout as `home/`, plus its own
 `manifest.txt`): `./rice` installs them instead of the public files, so private changes never reach GitHub.
@@ -281,6 +334,8 @@ yumi-rice/
 │   ├── .config/systemd/    # wallpaper sync service, firefox.slice, dev.slice
 │   ├── .config/yumi/       # monitors.conf — monitors in one file
 │   ├── .local/lib/         # yumi-panel (GTK menus, yumimon), yumi-tray, yumi-calendar
+│   ├── .local/src/         # yumi-eq — Waybar CFFI equalizer (C)
+│   ├── .local/share/       # yumi-archive/uninstall — rollbacks (yumi-uninstall), recolor/font scripts
 │   └── .local/bin/         # menus, Waybar modules, control center, tools
 ├── system/etc/             # GRUB, SDDM, zram, sysctl, earlyoom, BlueZ, faillock
 ├── assets/screenshots/
@@ -362,6 +417,45 @@ repository e sistema, con un backup di ogni file che tocca.
 | Barra / notifiche / menu | Waybar · swaync · rofi |
 | Blocco / inattività / sfondo | hyprlock · hypridle · awww |
 | Terminale / font | kitty · JetBrainsMono Nerd Font |
+
+### Novità della 2.5
+
+> [!NOTE]
+> **Sta arrivando la 3.0 — un grande aggiornamento.** La prossima versione passa a una base tutta mia: configurazione
+> Hyprland, unità systemd, temi e script miei, **senza HyDE sotto**. La 2.5 è l'ultima versione basata su HyDE.
+
+**Novità**
+- **AirPods su Linux** (servizio `yumi-airpods`): togliendo un auricolare la musica va in pausa, i tocchi sullo stelo
+  funzionano e gli auricolari tornano all'iPhone quando il portatile si blocca. Icone AirPods disegnate pixel per pixel
+  in Waybar (font `YumiIcons`, `build-font.py`).
+- **Musica** (`yumi-music`, `SUPER+SHIFT+M`): libreria YouTube Music + SoundCloud con copertine, playlist, coda e
+  ricerca. SoundCloud passa da un proxy WARP dedicato (`yumi-music-proxy`); timer settimanali di aggiornamento e sync.
+- **Testi nel player:** sotto la scheda, sincronizzati riga per riga (YouTube Music → LRCLIB), con correzione per il
+  ritardo Bluetooth (`lyrics.conf`). Equalizzatore nella pillola del player — `yumi-eq`, modulo CFFI di Waybar in C.
+- **Centro di controllo in GTK4** (`yumi-menu-control`): riquadri, cursori, scheda del player, "Non disturbare" e
+  cronologia delle notifiche (`yumi-notify-log`; il rumore di servizio è filtrato da `ignore.json`).
+- **VPN senza ExpressVPN** (`yumi-vpn`): località Cloudflare WARP e Proton Free come connessioni WireGuard di
+  NetworkManager — menu, pillola in Waybar e riquadro nel centro di controllo.
+- **Schermo sempre acceso ovunque** (☕ `yumi-caffeine` + timer di controllo), la schermata di blocco si spegne con ☕
+  attivo (`yumi-idle-action`), limite di carica della batteria (`yumi-battery-limit`).
+- **App nei colori dello sfondo** tramite gli hook dell'accento: Zen, Firefox, Vesktop, finestre hyprtoolkit, Touch Bar;
+  icone delle cartelle ricolorate con la palette (`recolor.py`, `yumi-folders-update`).
+- `ai` — piccolo assistente locale per il codice (Qwen2.5-Coder 1.5B tramite Ollama).
+
+**Più ordine**
+- `~/.local/bin`: da 155 a ~90 file. 39 script `*-uninstall`, 27 copie `.bak` e 17 cartelle di backup spostati in
+  `~/.local/share/yumi-archive`. Un solo comando per ogni ripristino: `yumi-uninstall` (elenco) e
+  `yumi-uninstall <modulo>` — rimette i backup al loro posto per il ripristino e poi li riarchivia.
+- Circa 4 GB di cache liberati (build AUR, installer di HyDE, cargo, pip).
+- Correzioni: il riquadro VPN nel centro di controllo chiamava ancora ExpressVPN; il controllo del proxy musicale
+  scriveva nel journal due volte al secondo (ora il risultato vale 30 s).
+
+**`rice`**
+- `./rice drift` — quanto il sistema si è allontanato dal repository; un timer giornaliero (`yumi-rice-drift`) avvisa
+  quando è ora di fare `pull`.
+- `./rice doctor` — tutti i servizi yumi, crash delle ultime 24 h, file `.bak` nel PATH, file fuori dal manifest.
+- `./rice gc` — sposta nell'archivio anche le copie `.bak` e i ripristini da `~/.local/bin`.
+- `./rice push-system` — crea uno snapshot snapper prima della prima modifica in `/etc`.
 
 ### Novità della 2.1
 
@@ -480,7 +574,7 @@ Misurato sulla mia macchina (MacBook Pro M1, 8 GB, con Firefox, Telegram e termi
 
 ### Screenshot
 
-Vedi la [galleria nella sezione inglese](#screenshots) (2.0 e, più sotto, 1.0).
+Vedi la [galleria nella sezione inglese](#screenshots) (2.5, poi 2.0–2.1 e, più sotto, 1.0).
 
 ### Tasti e gesti
 
@@ -552,7 +646,8 @@ Il repository è la fonte di verità; `rice` lo sincronizza con il sistema.
 | `./rice hyde-patches` | Riapplica le modifiche ai file di HyDE dopo un aggiornamento |
 | `./rice doctor` | Controllo rapido: errori di configurazione, processi, memoria, differenze |
 | `./rice check` | Controllo del repository prima del commit: sintassi, dati privati, segreti (`--install-hook` lo esegue a ogni commit) |
-| `./rice gc [--apply]` | Pulizia: `__pycache__`, vecchi archivi `rice-bak` (senza `--apply` mostra soltanto) |
+| `./rice gc [--apply]` | Pulizia: `__pycache__`, vecchi archivi `rice-bak`, `.bak` e ripristini da `~/.local/bin` nell'archivio (senza `--apply` mostra soltanto) |
+| `./rice drift [--notify [N]]` | Quanto il sistema si è allontanato dal repository (avviso oltre N blocchi) |
 
 Le modifiche personali stanno fuori dal repository, in `~/.config/rice-local/` (stessa struttura di `home/`, più un proprio
 `manifest.txt`): `./rice` le installa al posto dei file pubblici, così le modifiche private non finiscono su GitHub.
@@ -572,6 +667,8 @@ yumi-rice/
 │   ├── .config/systemd/    # servizio di sincronizzazione sfondo, firefox.slice, dev.slice
 │   ├── .config/yumi/       # monitors.conf — monitor in un solo file
 │   ├── .local/lib/         # yumi-panel (menu GTK, yumimon), yumi-tray, yumi-calendar
+│   ├── .local/src/         # yumi-eq — equalizzatore CFFI per Waybar (C)
+│   ├── .local/share/       # yumi-archive/uninstall — ripristini (yumi-uninstall), script colori/font
 │   └── .local/bin/         # menu, moduli Waybar, centro di controllo, strumenti
 ├── system/etc/             # GRUB, SDDM, zram, sysctl, earlyoom, BlueZ, faillock
 ├── assets/screenshots/
@@ -654,6 +751,45 @@ MIT, vedi [LICENSE](LICENSE).
 | Панель / сповіщення / меню | Waybar · swaync · rofi |
 | Блокування / простій / шпалери | hyprlock · hypridle · awww |
 | Термінал / шрифт | kitty · JetBrainsMono Nerd Font |
+
+### Що нового у 2.5
+
+> [!NOTE]
+> **Скоро 3.0 — велике оновлення.** Наступна версія переходить на повністю власну основу: свій конфіг Hyprland,
+> юніти systemd, теми й скрипти, **без HyDE в основі**. 2.5 — останній випуск на HyDE.
+
+**Нове**
+- **AirPods у Linux** (служба `yumi-airpods`): якщо вийняти навушник — музика на паузі, натискання на ніжку працюють,
+  а під час блокування ноутбука навушники повертаються на iPhone. Попіксельно намальовані значки AirPods у Waybar
+  (шрифт `YumiIcons`, `build-font.py`).
+- **Музика** (`yumi-music`, `SUPER+SHIFT+M`): медіатека YouTube Music + SoundCloud з обкладинками, плейлистами, чергою
+  й пошуком. SoundCloud іде через окремий проксі WARP (`yumi-music-proxy`); щотижневі таймери оновлення й синхронізації.
+- **Тексти пісень у плеєрі:** під карткою, з підсвічуванням рядків (YouTube Music → LRCLIB) і поправкою на затримку
+  Bluetooth (`lyrics.conf`). Еквалайзер у пігулці плеєра — `yumi-eq`, CFFI-модуль Waybar на C.
+- **Центр керування на GTK4** (`yumi-menu-control`): плитки, повзунки, картка плеєра, «Не турбувати» та журнал
+  сповіщень (`yumi-notify-log`; службовий шум відсікає `ignore.json`).
+- **VPN без ExpressVPN** (`yumi-vpn`): локації Cloudflare WARP і Proton Free як WireGuard-підключення NetworkManager —
+  меню, пігулка у Waybar і плитка в центрі керування.
+- **«Не засинати» всюди** (☕ `yumi-caffeine` + таймер-охоронець), екран блокування гасне, коли ☕ увімкнено
+  (`yumi-idle-action`), обмеження заряду батареї (`yumi-battery-limit`).
+- **Застосунки в кольорах шпалер** через хуки акценту: Zen, Firefox, Vesktop, вікна hyprtoolkit, Touch Bar; значки
+  тек перефарбовуються в палітру (`recolor.py`, `yumi-folders-update`).
+- `ai` — невеликий локальний помічник для коду (Qwen2.5-Coder 1.5B через Ollama).
+
+**Чистіше**
+- `~/.local/bin`: 155 → ~90 файлів. 39 скриптів `*-uninstall`, 27 копій `.bak` і 17 тек бекапів перенесено до
+  `~/.local/share/yumi-archive`. Одна команда для всіх відкатів: `yumi-uninstall` (список) і `yumi-uninstall <модуль>` —
+  вона повертає бекапи на місце на час відкату, а потім знову архівує.
+- Звільнено близько 4 ГБ кешів (збірки AUR, інсталятор HyDE, cargo, pip).
+- Виправлення: плитка VPN у центрі керування досі викликала ExpressVPN; перевірка музичного проксі писала в журнал
+  двічі на секунду (тепер результат пам'ятається 30 с).
+
+**`rice`**
+- `./rice drift` — наскільки система відійшла від репозиторію; щоденний таймер (`yumi-rice-drift`) нагадує, що час
+  зробити `pull`.
+- `./rice doctor` — усі служби yumi, падіння за добу, файли `.bak` у PATH, файли поза маніфестом.
+- `./rice gc` — переносить до архіву також `.bak` і відкати з `~/.local/bin`.
+- `./rice push-system` — робить знімок snapper перед першою зміною в `/etc`.
 
 ### Що нового у 2.1
 
@@ -768,7 +904,7 @@ MIT, vedi [LICENSE](LICENSE).
 
 ### Скриншоти
 
-Див. [галерею в англійському розділі](#screenshots) (2.0, а нижче — 1.0).
+Див. [галерею в англійському розділі](#screenshots) (2.5, далі 2.0–2.1, а нижче — 1.0).
 
 ### Клавіші й жести
 
@@ -840,7 +976,8 @@ hyprlock-google-build  # зібрати екран блокування для �
 | `./rice hyde-patches` | Знову застосувати правки до файлів HyDE після його оновлення |
 | `./rice doctor` | Швидка перевірка: помилки конфігу, процеси, пам'ять, розбіжності |
 | `./rice check` | Перевірка репозиторію перед комітом: синтаксис, особисте, секрети (`--install-hook` — на кожен коміт) |
-| `./rice gc [--apply]` | Прибирання: `__pycache__`, старі архіви `rice-bak` (без `--apply` лише показує) |
+| `./rice gc [--apply]` | Прибирання: `__pycache__`, старі архіви `rice-bak`, `.bak` і відкати з `~/.local/bin` до архіву (без `--apply` лише показує) |
+| `./rice drift [--notify [N]]` | Наскільки система відійшла від репозиторію (сповіщення понад N блоків) |
 
 Особисті правки лежать поза репозиторієм, у `~/.config/rice-local/` (та сама структура, що й `home/`, плюс власний
 `manifest.txt`): `./rice` ставить їх замість публічних файлів, тож приватні зміни не потрапляють на GitHub.
@@ -860,6 +997,8 @@ yumi-rice/
 │   ├── .config/systemd/    # служба синхронізації шпалер, firefox.slice, dev.slice
 │   ├── .config/yumi/       # monitors.conf — монітори в одному файлі
 │   ├── .local/lib/         # yumi-panel (GTK-меню, yumimon), yumi-tray, yumi-calendar
+│   ├── .local/src/         # yumi-eq — CFFI-еквалайзер для Waybar (C)
+│   ├── .local/share/       # yumi-archive/uninstall — відкати (yumi-uninstall), скрипти кольорів/шрифту
 │   └── .local/bin/         # меню, модулі Waybar, центр керування, утиліти
 ├── system/etc/             # GRUB, SDDM, zram, sysctl, earlyoom, BlueZ, faillock
 ├── assets/screenshots/
@@ -942,6 +1081,45 @@ MIT — див. [LICENSE](LICENSE).
 | Бар / уведомления / меню | Waybar · swaync · rofi |
 | Блокировка / простой / обои | hyprlock · hypridle · awww |
 | Терминал / шрифт | kitty · JetBrainsMono Nerd Font |
+
+### Что нового в 2.5
+
+> [!NOTE]
+> **Скоро 3.0 — крупное обновление.** Следующая версия переходит на полностью свою основу: свой конфиг Hyprland,
+> юниты systemd, темы и скрипты, **без HyDE в основе**. 2.5 — последний выпуск на HyDE.
+
+**Новое**
+- **AirPods в Linux** (служба `yumi-airpods`): вынул наушник — музыка на паузе, нажатия на ножку работают, а при
+  блокировке ноутбука наушники уходят обратно на iPhone. Попиксельно нарисованные значки AirPods в Waybar
+  (шрифт `YumiIcons`, `build-font.py`).
+- **Музыка** (`yumi-music`, `SUPER+SHIFT+M`): медиатека YouTube Music + SoundCloud с обложками, плейлистами, очередью
+  и поиском. SoundCloud идёт через отдельный прокси WARP (`yumi-music-proxy`); еженедельные таймеры обновления и синхронизации.
+- **Тексты песен в плеере:** под карточкой, с подсветкой строк (YouTube Music → LRCLIB) и поправкой на задержку
+  Bluetooth (`lyrics.conf`). Эквалайзер в пилюле плеера — `yumi-eq`, CFFI-модуль Waybar на C.
+- **Центр управления на GTK4** (`yumi-menu-control`): плитки, ползунки, карточка плеера, «Не беспокоить» и журнал
+  уведомлений (`yumi-notify-log`; служебный шум отсекает `ignore.json`).
+- **VPN без ExpressVPN** (`yumi-vpn`): локации Cloudflare WARP и Proton Free как WireGuard-подключения NetworkManager —
+  меню, пилюля в Waybar и плитка в центре управления.
+- **«Не засыпать» везде** (☕ `yumi-caffeine` + таймер-сторож), экран блокировки гаснет при включённом ☕
+  (`yumi-idle-action`), ограничение заряда батареи (`yumi-battery-limit`).
+- **Приложения в цветах обоев** через хуки акцента: Zen, Firefox, Vesktop, окна hyprtoolkit, Touch Bar; значки папок
+  перекрашиваются в палитру (`recolor.py`, `yumi-folders-update`).
+- `ai` — маленький локальный помощник по коду (Qwen2.5-Coder 1.5B через Ollama).
+
+**Чище**
+- `~/.local/bin`: 155 → ~90 файлов. 39 скриптов `*-uninstall`, 27 копий `.bak` и 17 папок бэкапов переехали в
+  `~/.local/share/yumi-archive`. Одна команда для всех откатов: `yumi-uninstall` (список) и `yumi-uninstall <модуль>` —
+  она возвращает бэкапы на место на время отката и потом снова убирает в архив.
+- Освобождено около 4 ГБ кэшей (сборки AUR, установщик HyDE, cargo, pip).
+- Исправления: плитка VPN в центре управления всё ещё вызывала ExpressVPN; проверка музыкального прокси писала в журнал
+  дважды в секунду (теперь результат помнится 30 с).
+
+**`rice`**
+- `./rice drift` — насколько система ушла от репозитория; ежедневный таймер (`yumi-rice-drift`) напоминает, что пора
+  сделать `pull`.
+- `./rice doctor` — все службы yumi, падения за сутки, файлы `.bak` в PATH, файлы вне манифеста.
+- `./rice gc` — переносит в архив ещё и `.bak` и откаты из `~/.local/bin`.
+- `./rice push-system` — делает снимок snapper перед первой правкой в `/etc`.
 
 ### Что нового в 2.1
 
@@ -1057,7 +1235,7 @@ MIT — див. [LICENSE](LICENSE).
 
 ### Скриншоты
 
-См. [галерею в английском разделе](#screenshots) (2.0, а ниже — 1.0).
+См. [галерею в английском разделе](#screenshots) (2.5, затем 2.0–2.1, а ниже — 1.0).
 
 ### Клавиши и жесты
 
@@ -1129,7 +1307,8 @@ hyprlock-google-build  # собрать экран блокировки для �
 | `./rice hyde-patches` | Заново применить правки к файлам HyDE после его обновления |
 | `./rice doctor` | Быстрая проверка: ошибки конфига, процессы, память, расхождения |
 | `./rice check` | Проверка репозитория перед коммитом: синтаксис, личное, секреты (`--install-hook` — на каждый коммит) |
-| `./rice gc [--apply]` | Уборка: `__pycache__`, старые архивы `rice-bak` (без `--apply` только показывает) |
+| `./rice gc [--apply]` | Уборка: `__pycache__`, старые архивы `rice-bak`, `.bak` и откаты из `~/.local/bin` в архив (без `--apply` только показывает) |
+| `./rice drift [--notify [N]]` | Насколько система ушла от репозитория (уведомление больше N блоков) |
 
 Личные правки лежат вне репозитория, в `~/.config/rice-local/` (та же структура, что у `home/`, плюс свой
 `manifest.txt`): `./rice` ставит их вместо публичных файлов, поэтому личные изменения не попадают на GitHub.
@@ -1149,6 +1328,8 @@ yumi-rice/
 │   ├── .config/systemd/    # служба синхронизации обоев, firefox.slice, dev.slice
 │   ├── .config/yumi/       # monitors.conf — мониторы в одном файле
 │   ├── .local/lib/         # yumi-panel (GTK-меню, yumimon), yumi-tray, yumi-calendar
+│   ├── .local/src/         # yumi-eq — CFFI-эквалайзер для Waybar (C)
+│   ├── .local/share/       # yumi-archive/uninstall — откаты (yumi-uninstall), скрипты цветов/шрифта
 │   └── .local/bin/         # меню, модули Waybar, центр управления, утилиты
 ├── system/etc/             # GRUB, SDDM, zram, sysctl, earlyoom, BlueZ, faillock
 ├── assets/screenshots/

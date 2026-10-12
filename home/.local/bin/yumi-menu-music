@@ -1,0 +1,1509 @@
+#!/usr/bin/env python3
+"""yumi-menu-music — окно «Музыка» в стиле Apple Music для yumi-music (mpv + YouTube Music + SoundCloud).
+
+  yumi-menu-music [--bar|--center]   открыть / закрыть (повторный вызов закрывает)
+  yumi-menu-music --close            закрыть
+
+Слева — поиск и разделы (Плейлисты, Очередь, Недавние, YouTube Music, SoundCloud, свои плейлисты);
+в центре — плейлисты карточками-мозаиками, страница плейлиста, списки треков (по 80 строк, «Показать ещё»);
+справа — «Текст» (синхронный, клик по строке — перемотка) и «Далее» (очередь mpv); снизу — «Сейчас играет»:
+обложка, перемешать, назад/пауза/вперёд, повтор, прогресс, эквалайзер, громкость.
+Поле поиска: фильтрует открытый список; в YouTube/SoundCloud — Enter ищет; ссылка на плейлист + Enter — импорт.
+Цвета — только из обоев: @yp-* из ~/.config/yumi-player/colors.css (wallbash) и accent.css (yumi-accent),
+меняются на лету. Свои правки стиля — ~/.config/yumi-music/menu.css.
+Эквалайзер читает уровни из $XDG_RUNTIME_DIR/yumi-eq.levels (12 байт, пишет модуль yumi-eq в Waybar).
+Проверка: YP_DRYRUN=1 (команды плееру не шлются), YP_STAY=1, YP_KEYBOARD=none, YP_MONITOR=DP-1, YM_LEVELS=файл.
+Откат: yumi-uninstall music-menu"""
+import os
+import sys
+
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-panel"))
+import yumipanel as yp  # noqa: E402  (сам перезапускает процесс с layer-shell)
+from yumipanel import Gtk, Gdk, Gio, GLib, Pango, Layer  # noqa: E402
+
+import bisect  # noqa: E402
+
+
+def track_source(t):
+    """Откуда играет трек: "sc" — SoundCloud, "yt" — YouTube (ролик без ссылки SoundCloud)."""
+    u = t.get("url") or t.get("play") or ""
+    if "soundcloud.com" in u:
+        return "sc"
+    if "youtube.com" in u or "youtu.be" in u or (t.get("id") and not u):
+        return "yt"
+    return ""
+import time as _time  # noqa: E402
+
+_SHIFT = [0.2, 0.0]
+
+
+def lyrics_shift():
+    """Сдвиг подсветки текста, как в yumi-player: 0.2 + offset − поправка на Bluetooth (~/.config/yumi-player/
+    lyrics.conf); перечитывается раз в 10 с — смена наушников/динамиков учитывается без перезапуска."""
+    now = _time.monotonic()
+    if now - _SHIFT[1] < 10:
+        return _SHIFT[0]
+    conf = {"offset": 0.0, "bluetooth": 0.1}
+    try:
+        with open(os.path.expanduser("~/.config/yumi-player/lyrics.conf")) as f:
+            for line in f:
+                k, _, v = line.partition("=")
+                if k.strip() in conf:
+                    conf[k.strip()] = float(v.split("#")[0])
+    except (OSError, ValueError):
+        pass
+    try:
+        bt = subprocess.run(["pactl", "get-default-sink"], capture_output=True, text=True,
+                            timeout=1).stdout.startswith("bluez_")
+    except Exception:
+        bt = False
+    _SHIFT[:] = [0.2 + conf["offset"] - (conf["bluetooth"] if bt else 0.0), now]
+    return _SHIFT[0]
+import json  # noqa: E402
+import re  # noqa: E402
+import socket  # noqa: E402
+import subprocess  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
+import urllib.request  # noqa: E402
+
+import cairo  # noqa: E402
+import gi  # noqa: E402
+gi.require_version("GdkPixbuf", "2.0")
+gi.require_version("Graphene", "1.0")
+from gi.repository import GdkPixbuf, Graphene  # noqa: E402
+
+import yumimon  # noqa: E402
+import yumimeta  # noqa: E402
+import yumilyrics  # noqa: E402
+
+HOME = os.path.expanduser("~")
+RUN = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+CONFIG = os.environ.get("XDG_CONFIG_HOME", os.path.join(HOME, ".config"))
+CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.join(HOME, ".cache")), "yumi-music")
+CLI = os.path.join(HOME, ".local/bin/yumi-music")
+SOCK = os.path.join(RUN, "yumi-music.sock")
+PLAYLISTS = os.path.join(CONFIG, "yumi-music/playlists.json")
+COLOR_DIR = os.path.join(CONFIG, "yumi-player")          # colors.css (wallbash) + accent.css (yumi-accent)
+MENU_CSS = os.path.join(CONFIG, "yumi-music/menu.css")    # свои правки стиля меню (необязательно)
+COVERS = os.path.join(CACHE, "covers")                    # 544×544 (их качает cover.lua плеера) и наши догрузки
+MINI = os.path.join(CACHE, "mini")                        # 120×120 от старого меню
+SCALED = os.path.join(CACHE, "menu-thumbs")               # квадратные уменьшенные копии под физические px
+RECENT = os.path.join(CACHE, "recent.json")
+LEVELS = os.environ.get("YM_LEVELS") or os.path.join(RUN, "yumi-eq.levels")
+PROXY = "http://127.0.0.1:40080"                          # yumi-music-proxy: SoundCloud режет сеть
+DRY = yp.DRY
+MAX_ROWS = 80
+W, H = 1100, 680                                          # логич. px, × коэффициент монитора
+
+FALLBACK = """
+@define-color yp-bg      rgba(27,38,41,0.92);
+@define-color yp-border  rgba(101,152,163,1);
+@define-color yp-fg      rgba(255,255,255,1);
+@define-color yp-fg2     rgba(204,233,255,1);
+@define-color yp-accent  rgba(154,216,230,1);
+@define-color yp-btn     rgba(48,65,69,0.55);
+@define-color yp-hover   rgba(71,96,102,0.8);
+@define-color yp-on-acc  rgba(17,26,28,1);
+"""
+
+# Все размеры — логические px/pt; при загрузке умножаются на коэффициент монитора. Цвета — только @yp-*.
+CSS = """
+window.ym-window, window.ym-window.background { background: transparent; box-shadow: none; }
+.ym-window * { font-family: "Inter", "Inter Display", "Cantarell", sans-serif; }
+/* два слоя @yp-bg: стекло почти непрозрачное (≈0.98), но цвет — тот же из обоев */
+.ym-frame { background-color: @yp-bg; background-image: linear-gradient(@yp-bg, @yp-bg);
+            border: 2px solid alpha(@yp-border, 0.8); border-radius: 22px; }
+
+/* боковая панель */
+.ym-side { background: alpha(shade(@yp-bg, 0.6), 0.45); border-right: 1px solid alpha(@yp-border, 0.28); padding: 16px 12px; }
+.ym-search { background: alpha(@yp-btn, 0.9); border: none; border-radius: 10px; min-height: 32px; padding: 0 8px; color: @yp-fg;
+             box-shadow: none; outline: none; }
+.ym-search text { color: @yp-fg; }
+.ym-search image { color: alpha(@yp-fg, 0.4); }
+.ym-h4 { font-size: 8pt; font-weight: 600; color: alpha(@yp-fg, 0.38); margin: 12px 0 4px 8px; letter-spacing: 1px; }
+button.ym-nav { background: none; border: none; box-shadow: none; border-radius: 8px; padding: 6px 8px; min-height: 0;
+                color: alpha(@yp-fg, 0.65); font-weight: 500; transition: background 150ms; }
+button.ym-nav:hover { background: alpha(@yp-accent, 0.09); color: @yp-fg; }
+button.ym-nav.on { background: alpha(@yp-accent, 0.16); color: @yp-fg; }
+.ym-nav-ic { color: @yp-accent; font-family: "JetBrainsMono Nerd Font"; font-size: 11pt; min-width: 18px; }
+.ym-cnt { font-size: 8pt; color: alpha(@yp-fg, 0.38); }
+.ym-mini { border-radius: 5px; }
+
+/* центр */
+.ym-main { padding: 22px 26px 18px 26px; }
+.ym-h2 { font-size: 20pt; font-weight: 800; color: @yp-fg; }
+.ym-sub { font-size: 9pt; color: alpha(@yp-fg, 0.4); }
+.ym-srcl { font-size: 10pt; font-weight: 600; color: @yp-accent; }
+button.ym-card { background: none; border: none; box-shadow: none; padding: 0; border-radius: 12px; }
+button.ym-card:hover .ym-mosaic { box-shadow: 0 10px 26px alpha(black, 0.45); }
+.ym-card-name { font-weight: 600; font-size: 10.5pt; color: @yp-fg; }
+.ym-mosaic { border-radius: 10px; background: alpha(@yp-btn, 0.9); box-shadow: 0 8px 22px alpha(black, 0.35); }
+button.ym-btn { background: @yp-accent; color: @yp-on-acc; border: none; box-shadow: none; border-radius: 9px;
+                padding: 7px 18px; font-weight: 700; min-height: 0; }
+button.ym-btn:hover { background: alpha(@yp-accent, 0.88); }
+button.ym-btn.ghost { background: alpha(@yp-btn, 0.9); color: @yp-fg; }
+button.ym-btn.ghost:hover { background: @yp-hover; }
+
+/* строки треков */
+button.ym-trk { background: none; border: none; box-shadow: none; border-radius: 8px; padding: 5px 8px; min-height: 0; }
+button.ym-trk.odd { background: alpha(@yp-fg, 0.025); }
+button.ym-trk:hover { background: alpha(@yp-accent, 0.09); }
+button.ym-trk.cur { background: alpha(@yp-accent, 0.16); }
+.ym-n { font-size: 9pt; color: alpha(@yp-fg, 0.38); }
+.ym-t { font-weight: 500; color: @yp-fg; }
+button.ym-trk.cur .ym-t { color: @yp-accent; }
+.ym-a { font-size: 9.5pt; color: alpha(@yp-fg, 0.62); }
+.ym-d { font-size: 9pt; color: alpha(@yp-fg, 0.38); }
+.ym-src-yt { color: alpha(@yp-accent, 0.85); }
+.ym-thumb { border-radius: 6px; background: alpha(@yp-btn, 0.9); }
+button.ym-more { background: none; border: none; box-shadow: none; min-height: 0; min-width: 0; padding: 2px 6px;
+                 color: alpha(@yp-fg, 0.4); font-family: "JetBrainsMono Nerd Font"; border-radius: 6px; }
+button.ym-more:hover { color: @yp-fg; background: alpha(@yp-accent, 0.12); }
+.ym-hint { color: alpha(@yp-fg, 0.4); font-size: 9.5pt; margin: 10px 8px; }
+
+/* правая панель */
+.ym-right { background: alpha(shade(@yp-bg, 0.6), 0.35); border-left: 1px solid alpha(@yp-border, 0.28); }
+.ym-bgart { filter: blur(40px) saturate(1.2); opacity: 0.35; }
+.ym-seg { background: alpha(@yp-btn, 0.9); border-radius: 9px; padding: 3px; margin: 14px 14px 6px 14px; }
+button.ym-seg-b { background: none; border: none; box-shadow: none; border-radius: 7px; padding: 5px; min-height: 0;
+                  font-weight: 600; font-size: 9.5pt; color: alpha(@yp-fg, 0.62); }
+button.ym-seg-b.on { background: alpha(@yp-fg, 0.12); color: @yp-fg; }
+.ym-lyrics, .ym-lyrics > viewport { background: transparent; }
+label.ym-ln { font-family: "Inter Display", "Inter", sans-serif; font-size: 15pt; font-weight: 800; color: @yp-fg;
+              opacity: 0.28; transition: opacity 300ms ease; }
+label.ym-ln:hover { opacity: 0.55; }
+label.ym-ln.cur { opacity: 1; color: #ffffff; text-shadow: none; }
+label.ym-ln.plain { font-size: 11pt; font-weight: 600; opacity: 0.85; }
+.ym-lmsg { color: alpha(@yp-fg, 0.5); font-size: 10.5pt; }
+.ym-lsrc { font-family: "JetBrainsMono Nerd Font"; font-size: 7.5pt; color: alpha(@yp-fg, 0.38); margin: 6px 22px 12px 22px; }
+.ym-qh { font-size: 8pt; font-weight: 600; color: alpha(@yp-fg, 0.38); margin: 8px 8px 6px 8px; letter-spacing: 1px; }
+
+/* «Сейчас играет» */
+.ym-now { border-top: 1px solid alpha(@yp-border, 0.28); background: alpha(shade(@yp-bg, 0.6), 0.55); padding: 12px 18px; }
+.ym-np-cover { border-radius: 8px; background: alpha(@yp-btn, 0.9); }
+.ym-np-t { font-weight: 600; color: @yp-fg; }
+.ym-np-a { font-size: 9.5pt; color: alpha(@yp-fg, 0.62); }
+button.ym-c { background: none; border: none; box-shadow: none; border-radius: 999px; min-width: 34px; min-height: 34px;
+              padding: 0; color: @yp-fg; font-family: "JetBrainsMono Nerd Font"; font-size: 13pt; }
+button.ym-c:hover { background: alpha(@yp-accent, 0.09); }
+button.ym-c.pp { background: @yp-accent; color: @yp-on-acc; min-width: 42px; min-height: 42px; font-size: 15pt; }
+button.ym-c.pp:hover { background: alpha(@yp-accent, 0.88); }
+button.ym-c.small { font-size: 11pt; color: alpha(@yp-fg, 0.62); }
+button.ym-c.on { color: @yp-accent; }
+button.ym-tog { background: none; border: none; box-shadow: none; border-radius: 8px; min-width: 32px; min-height: 32px; padding: 0;
+                color: alpha(@yp-fg, 0.62); font-family: "JetBrainsMono Nerd Font"; font-size: 12pt; }
+button.ym-tog:hover { background: alpha(@yp-accent, 0.09); }
+button.ym-tog.on { color: @yp-accent; background: alpha(@yp-accent, 0.16); }
+.ym-time { font-family: "JetBrainsMono Nerd Font"; font-size: 8pt; color: alpha(@yp-fg, 0.4); }
+.ym-vol-ic { font-family: "JetBrainsMono Nerd Font"; color: alpha(@yp-fg, 0.62); font-size: 11pt; }
+scale.ym-scale { padding: 6px 0; margin: 0; }
+scale.ym-scale > trough { min-height: 4px; border-radius: 2px; border: none; box-shadow: none; background: alpha(@yp-fg, 0.14); }
+scale.ym-scale > trough > highlight { min-height: 4px; border-radius: 2px; border: none; background: @yp-accent; }
+scale.ym-scale.vol > trough > highlight { background: alpha(@yp-fg, 0.62); }
+scale.ym-scale > trough > slider { min-width: 12px; min-height: 12px; margin: -4px; border-radius: 999px; border: none;
+                                  box-shadow: none; background: @yp-fg; opacity: 0; transition: opacity 150ms; }
+scale.ym-scale:hover > trough > slider { opacity: 1; }
+.ym-toast { background: alpha(shade(@yp-bg, 0.5), 0.95); color: @yp-fg; border: 1px solid alpha(@yp-border, 0.5);
+            border-radius: 10px; padding: 7px 14px; margin-bottom: 14px; font-size: 9.5pt; }
+.ym-toast.err { border-color: #e06c75; }
+"""
+
+
+# ---------- mpv и CLI ----------
+def ipc(*command):
+    if DRY and command[0] not in ("get_property",):
+        print("[dry-run] mpv", command, file=sys.stderr, flush=True)
+        return None
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as c:
+            c.settimeout(1.5)
+            c.connect(SOCK)
+            c.sendall((json.dumps({"command": list(command), "request_id": 7}) + "\n").encode())
+            buf = b""
+            while True:
+                chunk = c.recv(1 << 20)
+                if not chunk:
+                    return None
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    msg = json.loads(line or b"{}")
+                    if msg.get("request_id") == 7:
+                        return msg.get("data")
+    except Exception:
+        return None
+
+
+def cli(*args, cb=None):
+    """Команды yumi-music (сеть) — в фоне, cb(ok, вывод) в главном потоке. В YP_DRYRUN play/add/sync/import не идут."""
+    if DRY and args[0] in ("play", "add", "sync", "import"):
+        print("[dry-run] yumi-music", *args, file=sys.stderr, flush=True)
+        cb and GLib.idle_add(lambda: cb(True, "") or False)
+        return
+
+    def work():
+        try:
+            r = subprocess.run([CLI, *args], capture_output=True, text=True, timeout=120, env=yp.CHILD_ENV)
+            ok, out = r.returncode == 0, (r.stdout if r.returncode == 0 else r.stderr).strip()
+        except Exception as e:
+            ok, out = False, str(e)
+        if cb:
+            GLib.idle_add(lambda: cb(ok, out) or False)
+    threading.Thread(target=work, daemon=True).start()
+
+
+def fmt(sec):
+    sec = int(sec or 0)
+    return f"{sec // 60}:{sec % 60:02d}" if sec > 0 else "-:--"
+
+
+def key_of(url):
+    return yumimeta.key_for(url) if url else None
+
+
+def load_json(path, default):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return default
+
+
+_proxy = [0.0, False]   # время проверки, результат
+
+
+def proxy_up():
+    """Запущен ли прокси. Ответ помнится 30 с: каждая проверка — пустое соединение,
+    и wireproxy пишет его в журнал как «read request failed: EOF»."""
+    if time.monotonic() - _proxy[0] > 30:
+        try:
+            with socket.create_connection(("127.0.0.1", 40080), timeout=0.3):
+                _proxy[1] = True
+        except OSError:
+            _proxy[1] = False
+        _proxy[0] = time.monotonic()
+    return _proxy[1]
+
+
+# ---------- обложки: квадрат по центру, под физические пиксели, кэш уменьшенных копий ----------
+class Covers:
+    def __init__(self, scale):
+        self.scale = scale                 # физ. px на логич. px (масштаб монитора; k уже в logical)
+        self.tex = {}                      # (key, px) → Gdk.Texture
+        self.wait = {}                     # (key, px) → [Gtk.Picture]
+        self.todo = []
+        self.workers = 0
+        self.lock = threading.Lock()       # todo и workers меняются и из главного потока, и из загрузчиков
+        self.thumbs = {}
+        try:
+            for line in open(os.path.join(CACHE, "thumbs.tsv")):
+                k, _, url = line.rstrip("\n").partition("\t")
+                if k and url:
+                    self.thumbs[k] = url
+        except OSError:
+            pass
+
+    def px(self, logical):
+        return max(16, round(logical * self.scale))
+
+    def set(self, pic, key, logical):
+        """Поставить в Gtk.Picture обложку key размером logical (логич. px, уже с k)."""
+        if not key:
+            return
+        size = self.px(logical)
+        t = self.tex.get((key, size))
+        if t:
+            pic.set_paintable(t)
+            return
+        self.wait.setdefault((key, size), []).append(pic)
+        with self.lock:
+            if (key, size) in self.todo:
+                self.todo.remove((key, size))
+            self.todo.insert(0, (key, size))   # последние запрошенные — первыми: это то, что сейчас на экране
+            start = self.workers < 4
+            if start:
+                self.workers += 1
+        if start:
+            threading.Thread(target=self.worker, daemon=True).start()
+
+    def worker(self):
+        while True:
+            with self.lock:                  # счётчик — сразу и под замком (отложенный терял задачи)
+                if not self.todo:
+                    self.workers -= 1
+                    return
+                key, size = self.todo.pop(0)
+            try:
+                path = self.make(key, size)
+            except Exception as e:
+                path = None
+                if os.environ.get("YP_DEBUG"):
+                    print(f"cover {key[:40]} {size}: {e}", file=sys.stderr, flush=True)
+            if path:
+                GLib.idle_add(self.ready, key, size, path)
+
+    def make(self, key, size):
+        out = os.path.join(SCALED, str(size), key + ".jpg")
+        if os.path.exists(out) and os.path.getsize(out) > 0:
+            return out
+        src, letterbox = None, False
+        for p in (os.path.join(COVERS, key + ".jpg"), os.path.join(COVERS, key + ".yt.jpg"),
+                  os.path.join(MINI, key + ".jpg")):
+            if os.path.exists(p) and os.path.getsize(p) > 0:
+                src, letterbox = p, p.endswith(".yt.jpg")
+                break
+        if not src or (src.startswith(MINI) and size > 120):
+            got = self.download(key)
+            if got:
+                src, letterbox = got
+        if not src:
+            return None
+        pb = GdkPixbuf.Pixbuf.new_from_file(src)
+        w, h = pb.get_width(), pb.get_height()
+        side = min(w, h)
+        if letterbox:                      # миниатюра ролика YouTube 4:3 с чёрными полосами — центр без полос
+            side = min(side, round(w * 9 / 16))
+        sub = pb.new_subpixbuf((w - side) // 2, (h - side) // 2, side, side)
+        interp = GdkPixbuf.InterpType.HYPER if side > size else GdkPixbuf.InterpType.BILINEAR
+        sq = sub.scale_simple(size, size, interp)
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        sq.savev(out + ".tmp", "jpeg", ["quality"], ["92"])
+        os.replace(out + ".tmp", out)
+        return out
+
+    def download(self, key):
+        """Нет обложки в кэше — качаем большую (544 у YouTube Music, 500 у SoundCloud) в covers/."""
+        url, letterbox = self.thumbs.get(key), False
+        if url:
+            url = re.sub(r"=w\d+-h\d+", "=w544-h544", url).replace("-large", "-t500x500")
+        elif not key.startswith("http"):
+            url, letterbox = f"https://i.ytimg.com/vi/{key}/hqdefault.jpg", True
+        else:
+            return None
+        handler = urllib.request.ProxyHandler({"https": PROXY, "http": PROXY}) \
+            if "sndcdn.com" in url and proxy_up() else urllib.request.ProxyHandler({})
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.build_opener(handler).open(req, timeout=8) as r:
+            data = r.read()
+        os.makedirs(COVERS, exist_ok=True)
+        out = os.path.join(COVERS, key + (".yt.jpg" if letterbox else ".jpg"))   # .yt — с полосами, не для mpv
+        with open(out + ".tmp", "wb") as f:
+            f.write(data)
+        os.replace(out + ".tmp", out)
+        return out, letterbox
+
+    def ready(self, key, size, path):
+        try:
+            t = Gdk.Texture.new_from_filename(path)
+        except Exception:
+            return False
+        self.tex[(key, size)] = t
+        for pic in self.wait.pop((key, size), []):
+            pic.set_paintable(t)
+        return False
+
+
+# ---------- эквалайзер: уровни из yumi-eq ----------
+class Levels:
+    """Общий источник уровней (12 столбиков 0..1) для всех эквалайзеров окна, сглаживание — по кадрам."""
+    N = 12
+
+    def __init__(self):
+        self.target = [0.0] * self.N
+        self.disp = [0.0] * self.N
+        self.peak = [0.0] * self.N
+        self.hold = [0.0] * self.N
+        self.fade = 0.0
+        self.last_read = 0.0
+        self.last_frame = 0
+        self.playing = False
+
+    def step(self, now_us):
+        dt = min(0.05, (now_us - self.last_frame) / 1e6) if self.last_frame else 0.016
+        if now_us == self.last_frame:
+            return
+        self.last_frame = now_us
+        t = time.monotonic()
+        if t - self.last_read > 0.015:           # cava шлёт 60 кадров/с
+            self.last_read = t
+            try:
+                st = os.stat(LEVELS)
+                fresh = time.time() - st.st_mtime < 1.0
+                with open(LEVELS, "rb") as f:
+                    data = f.read(self.N)
+                self.target = ([b / 255 for b in data] + [0.0] * (self.N - len(data))) if fresh else [0.0] * self.N
+            except OSError:
+                self.target = [0.0] * self.N
+        self.fade += ((1.0 if self.playing else 0.0) - self.fade) * (1 - pow(2.718, -dt * 6))
+        for i in range(self.N):
+            tgt = self.target[i] if self.playing else 0.0
+            rate = 40.0 if tgt > self.disp[i] else 18.0         # в ритм трека
+            self.disp[i] += (tgt - self.disp[i]) * (1 - pow(2.718, -dt * rate))
+            if self.disp[i] >= self.peak[i]:
+                self.peak[i], self.hold[i] = self.disp[i], 0.35
+            else:
+                self.hold[i] -= dt
+                if self.hold[i] < 0:
+                    self.peak[i] = max(0.0, self.peak[i] - dt * 0.55)
+
+
+def rgba_of(widget, name, fallback):
+    ok, c = widget.get_style_context().lookup_color(name)
+    if not ok:
+        c = Gdk.RGBA()
+        c.parse(fallback)
+    return c
+
+
+def rounded(cr, x, y, w, h, r):
+    r = min(r, w / 2, h / 2)
+    cr.new_sub_path()
+    cr.arc(x + w - r, y + r, r, -1.5708, 0)
+    cr.arc(x + w - r, y + h - r, r, 0, 1.5708)
+    cr.arc(x + r, y + h - r, r, 1.5708, 3.14159)
+    cr.arc(x + r, y + r, r, 3.14159, 4.71239)
+    cr.close_path()
+
+
+def draw_eq(area, cr, w, h, lv, bars, bw, gap, peaks=True):
+    top = rgba_of(area, "yp-accent", "#9ad8e6")
+    bot = rgba_of(area, "yp-border", "#6598a3")
+    total = bars * bw + (bars - 1) * gap
+    x0, eh = (w - total) / 2, h - 2
+    base = (h + eh) / 2
+    a = 0.45 + 0.55 * lv.fade
+    for i in range(bars):
+        idx = i * lv.N // bars
+        d = lv.disp[idx]
+        x = x0 + i * (bw + gap)
+        hh = max(bw, pow(d, 0.75) * (eh - 3) * lv.fade + bw * (1 - lv.fade))
+        g = cairo.LinearGradient(0, base - eh, 0, base)
+        g.add_color_stop_rgba(0, min(1, top.red * 1.15), min(1, top.green * 1.15), min(1, top.blue * 1.15), a)
+        g.add_color_stop_rgba(1, bot.red, bot.green, bot.blue, a * 0.85)
+        cr.set_source(g)
+        rounded(cr, x, base - hh, bw, hh, bw / 2)
+        cr.fill()
+        p = lv.peak[idx]
+        if peaks and lv.fade > 0.05 and p > 0.04:
+            cr.set_source_rgba(top.red, top.green, top.blue, 0.9 * lv.fade)
+            rounded(cr, x, base - max(hh, pow(p, 0.75) * (eh - 3)) - 2, bw, 1.6, 0.8)
+            cr.fill()
+
+
+# ---------- окно ----------
+class MusicWindow(Gtk.ApplicationWindow):
+    def __init__(self, app, mode):
+        super().__init__(application=app, title="Музыка")
+        self.app, self.mode = app, mode
+        self.k, self.mscale = 1.0, 1.0
+        self.add_css_class("ym-window")
+        self.setup_layer()
+        self.covers = Covers(self.mscale)
+        self.lv = Levels()
+        self.view, self.pl_id, self.shown = "lists", None, MAX_ROWS
+        self.results = {"yt": [], "sc": []}
+        self.queue, self.cur_idx, self.now_key = [], -1, None
+        self.lyr_key, self.lyr_token, self.lyr_lines, self.lyr_times, self.lyr_labels = None, 0, [], [], []
+        self.lyr_synced, self.lyr_cur, self.lyr_manual, self.lyr_anim, self.lyr_anim_id = False, -1, 0, None, 0
+        self.lyr_rescroll = False
+        self.pos_base, self.playing, self.dur = (0.0, time.monotonic()), False, 0
+        self.seek_block, self.vol_block = 0, 0
+        self.right_tab = "lyr"
+        self.toast_id = 0
+        self.css_timer = 0
+        self.build()
+        self.setup_css()
+        self.refresh_queue()
+        self.update_now()
+        self.set_right("lyr")
+        self.render()
+        GLib.timeout_add(1000, self.on_second)
+        GLib.timeout_add(100, self.lyrics_tick)
+        self.eq.add_tick_callback(self.eq_tick)
+
+    # ----- layer-shell -----
+    def setup_layer(self):
+        Layer.init_for_window(self)
+        Layer.set_namespace(self, "yumi-panel")
+        Layer.set_layer(self, Layer.Layer.OVERLAY)
+        kbd = os.environ.get("YP_KEYBOARD", "exclusive")
+        Layer.set_keyboard_mode(self, Layer.KeyboardMode.NONE if kbd == "none" else Layer.KeyboardMode.EXCLUSIVE)
+        mon = self.pick_monitor()
+        if mon:
+            Layer.set_monitor(self, mon)
+            self.k = yumimon.ui_scale().get(mon.get_connector(), 1.0)
+            try:
+                self.mscale = mon.get_scale()
+            except Exception:
+                self.mscale = float(mon.get_scale_factor())
+        if self.mode == "bar":
+            Layer.set_anchor(self, Layer.Edge.TOP, True)
+            Layer.set_margin(self, Layer.Edge.TOP, 8)
+
+    def pick_monitor(self):
+        mons = yp.hypr("j/monitors") or []
+        name = next((m["name"] for m in mons if m.get("focused")), None)
+        if self.mode == "bar":
+            cur = yp.hypr("j/cursorpos") or {}
+            for m in mons:
+                if m["x"] <= cur.get("x", -1) < m["x"] + m["width"] / m["scale"] and \
+                        m["y"] <= cur.get("y", -1) < m["y"] + m["height"] / m["scale"]:
+                    name = m["name"]
+        name = os.environ.get("YP_MONITOR", name)
+        ml = Gdk.Display.get_default().get_monitors()
+        for i in range(ml.get_n_items()):
+            if ml.get_item(i).get_connector() == name:
+                return ml.get_item(i)
+        return None
+
+    def s(self, v):
+        return round(v * self.k)
+
+    # ----- стиль: wallbash + свои правки, перекраска на лету -----
+    def setup_css(self):
+        self.css = Gtk.CssProvider()
+        Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), self.css,
+                                                  Gtk.STYLE_PROVIDER_PRIORITY_USER + 2)
+        self.load_css()
+        self.monitors = []
+        for d in (COLOR_DIR, os.path.dirname(MENU_CSS)):
+            os.makedirs(d, exist_ok=True)
+            m = Gio.File.new_for_path(d).monitor_directory(Gio.FileMonitorFlags.WATCH_MOVES, None)
+            m.connect("changed", self.on_conf_changed)
+            self.monitors.append(m)
+
+    def load_css(self):
+        parts = []
+        for path, fb in ((os.path.join(COLOR_DIR, "colors.css"), FALLBACK), (os.path.join(COLOR_DIR, "accent.css"), ""),
+                         (None, CSS), (MENU_CSS, "")):
+            if path is None:
+                parts.append(fb)
+                continue
+            try:
+                with open(path) as f:
+                    parts.append(f.read())
+            except OSError:
+                parts.append(fb)
+        css = "\n".join(parts)
+        if self.k != 1.0:
+            css = re.sub(r"(\d+(?:\.\d+)?)(px|pt)\b", lambda m: f"{float(m.group(1)) * self.k:.2f}{m.group(2)}", css)
+        self.css.load_from_string(css)
+        if os.environ.get("YP_DEBUG"):
+            print(f"{time.strftime('%T')} css reloaded", file=sys.stderr, flush=True)
+
+    def on_conf_changed(self, _m, f, other, _ev):
+        names = {x.get_basename() for x in (f, other) if x}
+        if names & {"colors.css", "accent.css", os.path.basename(MENU_CSS)}:
+            if self.css_timer:
+                GLib.source_remove(self.css_timer)
+            self.css_timer = GLib.timeout_add(200, self._reload_css)
+
+    def _reload_css(self):
+        self.css_timer = 0
+        self.load_css()
+        self.eq.queue_draw()
+        return False
+
+    # ----- раскладка -----
+    def build(self):
+        s = self.s
+        overlay = Gtk.Overlay()
+        frame = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, css_classes=["ym-frame"])
+        frame.set_overflow(Gtk.Overflow.HIDDEN)
+        frame.set_size_request(s(W), s(H))            # окно постоянного размера (без шлейфа Hyprland)
+        overlay.set_child(frame)
+        self.frame = frame
+        top = Gtk.Box(vexpand=True)
+        frame.append(top)
+        top.append(self.fixed_width(self.build_side(), s(210)))
+        self.main_scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, hexpand=True)
+        self.main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=s(14), css_classes=["ym-main"])
+        self.main_scroll.set_child(self.main)
+        top.append(self.main_scroll)
+        self.right_col = self.fixed_width(self.build_right(), s(300))
+        top.append(self.right_col)
+        frame.append(self.build_now())
+        self.toast_l = Gtk.Label(css_classes=["ym-toast"], halign=Gtk.Align.CENTER, valign=Gtk.Align.END, visible=False)
+        overlay.add_overlay(self.toast_l)
+        # Окно НЕ растёт никогда: обёртка с политикой EXTERNAL не передаёт окну минимальный размер содержимого
+        # (иначе широкая страница раздувала слой, а Hyprland анимирует изменение размера — шлейф)
+        outer = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.EXTERNAL, vscrollbar_policy=Gtk.PolicyType.EXTERNAL)
+        outer.set_size_request(s(W), s(H))
+        outer.set_child(overlay)
+        self.set_child(outer)
+        keys = Gtk.EventControllerKey(propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        keys.connect("key-pressed", self.on_key)
+        self.add_controller(keys)
+
+    def fixed_width(self, child, width):
+        """Колонка ровно width: ScrolledWindow без натяжения (natural = min = width) — Gtk.Box не отдаёт ей
+        лишнее место и не растягивает под содержимое (иначе правая панель съедала центр)."""
+        sw = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.EXTERNAL, vscrollbar_policy=Gtk.PolicyType.NEVER,
+                                hexpand=False)
+        sw.set_size_request(width, -1)
+        sw.set_child(child)
+        return sw
+
+    def nav(self, icon, text, view, pid=None, cnt=None, cover=False, key=None):
+        b = Gtk.Button(css_classes=["ym-nav"])
+        box = Gtk.Box(spacing=self.s(10))
+        if cover:
+            box.append(self.square(key, 22, "ym-mini"))
+        else:
+            box.append(Gtk.Label(label=icon, css_classes=["ym-nav-ic"]))
+        box.append(Gtk.Label(label=text, xalign=0, hexpand=True, ellipsize=Pango.EllipsizeMode.END, max_width_chars=1))
+        if cnt is not None:
+            box.append(Gtk.Label(label=str(cnt), css_classes=["ym-cnt"]))
+        b.set_child(box)
+        b.connect("clicked", lambda *_: self.go(view, pid))
+        b.view, b.pid = view, pid
+        self.navs.append(b)
+        return b
+
+    def build_side(self):
+        s = self.s
+        sw = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, css_classes=["ym-side"])
+        sw.set_size_request(s(210), -1)
+        sw.set_hexpand(False)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=s(2))
+        sw.set_child(box)
+        self.search = Gtk.SearchEntry(placeholder_text="Поиск в медиатеке", css_classes=["ym-search"])
+        self.search.connect("search-changed", lambda *_: self.view not in ("yt", "sc") and self.render(keep=True))
+        self.search.connect("activate", lambda *_: self.on_enter())
+        box.append(self.search)
+        self.navs = []
+        box.append(Gtk.Label(label="МЕДИАТЕКА", xalign=0, css_classes=["ym-h4"]))
+        for ic, t, v in (("󰲸", "Плейлисты", "lists"), ("󰲹", "Очередь", "queue"), ("󰋚", "Недавние", "recent")):
+            box.append(self.nav(ic, t, v))
+        box.append(Gtk.Label(label="ПОИСК", xalign=0, css_classes=["ym-h4"]))
+        box.append(self.nav("󰗃", "YouTube Music", "yt"))
+        box.append(self.nav("󰓀", "SoundCloud", "sc"))
+        box.append(Gtk.Label(label="ПЛЕЙЛИСТЫ", xalign=0, css_classes=["ym-h4"]))
+        self.side_pls = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=s(2))
+        box.append(self.side_pls)
+        self.fill_side_playlists()
+        return sw
+
+    def fill_side_playlists(self):
+        while (c := self.side_pls.get_first_child()):
+            self.side_pls.remove(c)
+        self.navs = [n for n in self.navs if n.view != "pl"]
+        for p in self.playlists():
+            tr = p["tracks"]
+            self.side_pls.append(self.nav("", p["short"], "pl", p["id"], len(tr), True, self.first_key(tr)))
+
+    def build_right(self):
+        s = self.s
+        self.right = Gtk.Overlay(css_classes=["ym-right"])
+        self.right.set_size_request(s(300), -1)
+        self.right.set_hexpand(False)             # строки текста с hexpand иначе распирают панель
+        self.right.set_overflow(Gtk.Overflow.HIDDEN)
+        self.bgart = Gtk.Picture(content_fit=Gtk.ContentFit.COVER, can_shrink=True, css_classes=["ym-bgart"])
+        self.right.set_child(self.bgart)
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.right.add_overlay(col)
+        seg = Gtk.Box(homogeneous=True, css_classes=["ym-seg"])
+        self.seg_lyr = Gtk.Button(label="Текст", css_classes=["ym-seg-b"], focusable=False)
+        self.seg_next = Gtk.Button(label="Далее", css_classes=["ym-seg-b"], focusable=False)
+        self.seg_lyr.connect("clicked", lambda *_: self.set_right("lyr"))
+        self.seg_next.connect("clicked", lambda *_: self.set_right("next"))
+        seg.append(self.seg_lyr)
+        seg.append(self.seg_next)
+        col.append(seg)
+        self.rstack = Gtk.Stack(vexpand=True)
+        col.append(self.rstack)
+        # текст
+        lyr = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.lstack = Gtk.Stack(vexpand=True)
+        self.lscroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER,
+                                          vscrollbar_policy=Gtk.PolicyType.EXTERNAL, css_classes=["ym-lyrics"])
+        self.lbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=s(14), margin_start=s(22), margin_end=s(22),
+                            margin_top=s(110), margin_bottom=s(300))
+        self.lscroll.set_child(self.lbox)
+        wheel = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.VERTICAL)
+        wheel.connect("scroll", self.on_lyrics_wheel)
+        self.lscroll.add_controller(wheel)
+        self.lmsg = Gtk.Label(css_classes=["ym-lmsg"], wrap=True, justify=Gtk.Justification.CENTER, margin_start=s(20),
+                              margin_end=s(20))
+        self.lstack.add_named(self.lscroll, "text")
+        self.lstack.add_named(self.lmsg, "msg")
+        lyr.append(self.lstack)
+        self.lsrc = Gtk.Label(xalign=0, css_classes=["ym-lsrc"], ellipsize=Pango.EllipsizeMode.END)
+        lyr.append(self.lsrc)
+        self.rstack.add_named(lyr, "lyr")
+        # далее
+        nsw = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
+        self.nbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=s(2), margin_start=s(10), margin_end=s(10),
+                            margin_bottom=s(14))
+        nsw.set_child(self.nbox)
+        self.rstack.add_named(nsw, "next")
+        self.lyrics_msg("Ничего не играет")
+        return self.right
+
+    def build_now(self):
+        s = self.s
+        bar = Gtk.CenterBox(css_classes=["ym-now"])
+        left = Gtk.Box(spacing=s(12), valign=Gtk.Align.CENTER)
+        left.set_size_request(s(290), -1)
+        self.np_cover = self.square(None, 52, "ym-np-cover")
+        left.append(self.np_cover)
+        info = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER, hexpand=True)
+        self.np_t = Gtk.Label(xalign=0, css_classes=["ym-np-t"], ellipsize=Pango.EllipsizeMode.END, max_width_chars=1)
+        self.np_a = Gtk.Label(xalign=0, css_classes=["ym-np-a"], ellipsize=Pango.EllipsizeMode.END, max_width_chars=1)
+        info.append(self.np_t)
+        info.append(self.np_a)
+        left.append(info)
+        bar.set_start_widget(left)
+
+        mid = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=s(4), valign=Gtk.Align.CENTER)
+        mid.set_size_request(s(360), -1)
+        ctl = Gtk.Box(spacing=s(18), halign=Gtk.Align.CENTER)
+        self.b_shuf = self.cbtn("󰒝", "Перемешать очередь", self.shuffle_queue, "small")
+        self.b_prev = self.cbtn("󰒮", "Назад", lambda: self.cmd("playlist-prev"))
+        self.b_pp = self.cbtn("󰏤", "Пауза", lambda: self.cmd("cycle", "pause"), "pp")
+        self.b_next = self.cbtn("󰒭", "Вперёд", lambda: self.cmd("playlist-next"))
+        self.b_rep = self.cbtn("󰑖", "Повтор плейлиста", self.toggle_repeat, "small")
+        for b in (self.b_shuf, self.b_prev, self.b_pp, self.b_next, self.b_rep):
+            ctl.append(b)
+        mid.append(ctl)
+        prog = Gtk.Box(spacing=s(8))
+        self.t_pos = Gtk.Label(label="0:00", css_classes=["ym-time"], width_chars=5, xalign=0)
+        self.t_len = Gtk.Label(label="0:00", css_classes=["ym-time"], width_chars=5, xalign=1)
+        self.prog = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL, draw_value=False, hexpand=True,
+                              css_classes=["ym-scale"], focusable=False)
+        self.prog.set_range(0, 1)
+        self.prog.connect("change-value", self.on_seek)
+        prog.append(self.t_pos)
+        prog.append(self.prog)
+        prog.append(self.t_len)
+        mid.append(prog)
+        bar.set_center_widget(mid)
+
+        right = Gtk.Box(spacing=s(12), halign=Gtk.Align.END, valign=Gtk.Align.CENTER)
+        right.set_size_request(s(290), -1)
+        self.eq = Gtk.DrawingArea(valign=Gtk.Align.CENTER, hexpand=True, halign=Gtk.Align.END)
+        self.eq.set_size_request(s(64), s(26))
+        self.eq.set_draw_func(lambda a, cr, w, h: draw_eq(a, cr, w, h, self.lv, 12, self.k * 3, self.k * 2))
+        right.append(self.eq)
+        self.t_lyr = self.tbtn("󰉢", "Текст", lambda: self.toggle_right("lyr"))
+        self.t_next = self.tbtn("󰲸", "Далее", lambda: self.toggle_right("next"))
+        right.append(self.t_lyr)
+        right.append(self.t_next)
+        right.append(Gtk.Label(label="󰕾", css_classes=["ym-vol-ic"]))
+        self.vol = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL, draw_value=False, css_classes=["ym-scale", "vol"],
+                             focusable=False, valign=Gtk.Align.CENTER)
+        self.vol.set_range(0, 100)
+        self.vol.set_size_request(s(80), -1)
+        self.vol.connect("change-value", self.on_volume)
+        right.append(self.vol)
+        bar.set_end_widget(right)
+        return bar
+
+    def cbtn(self, icon, tip, fn, extra=None):
+        b = Gtk.Button(label=icon, tooltip_text=tip, css_classes=["ym-c"] + ([extra] if extra else []), focusable=False)
+        b.connect("clicked", lambda *_: fn())
+        return b
+
+    def tbtn(self, icon, tip, fn):
+        b = Gtk.Button(label=icon, tooltip_text=tip, css_classes=["ym-tog"], focusable=False)
+        b.connect("clicked", lambda *_: fn())
+        return b
+
+    def square(self, key, logical, cls):
+        """Квадратная обложка logical×logical (логич. px до k) со скруглением; key=None — пустая подложка."""
+        size = self.s(logical)
+        box = Gtk.Box(css_classes=[cls], halign=Gtk.Align.START, valign=Gtk.Align.CENTER)
+        box.set_hexpand(False)
+        box.set_vexpand(False)
+        box.set_overflow(Gtk.Overflow.HIDDEN)
+        box.set_size_request(size, size)
+        # без hexpand: иначе квадрат растягивается и съедает место у названия рядом
+        pic = Gtk.Picture(content_fit=Gtk.ContentFit.COVER, can_shrink=True)
+        pic.set_size_request(size, size)
+        box.append(pic)
+        box.pic = pic
+        if key:
+            self.covers.set(pic, key, size)
+        return box
+
+    def mosaic(self, keys, logical):
+        """Мозаика 2×2 из одинаковых квадратных плиток; меньше 4 обложек — повторяем; одна — на всю карточку."""
+        size = self.s(logical)
+        box = Gtk.Box(css_classes=["ym-mosaic"], halign=Gtk.Align.START, valign=Gtk.Align.START)
+        box.set_hexpand(False)      # явным вызовом (в конструкторе значение по умолчанию не ставит hexpand-set):
+        box.set_vexpand(False)      # иначе растяжение плиток раздувает карточку — зазор до названия
+        box.set_overflow(Gtk.Overflow.HIDDEN)
+        box.set_size_request(size, size)
+        keys = [k for k in keys if k][:4]
+        if len(keys) <= 1:
+            pic = Gtk.Picture(content_fit=Gtk.ContentFit.COVER, can_shrink=True, hexpand=True, vexpand=True)
+            box.append(pic)
+            if keys:
+                self.covers.set(pic, keys[0], size)
+            return self.holder(box)
+        grid = Gtk.Grid(row_homogeneous=True, column_homogeneous=True, hexpand=True, vexpand=True)
+        half = size // 2
+        for i in range(4):
+            pic = Gtk.Picture(content_fit=Gtk.ContentFit.COVER, can_shrink=True, hexpand=True, vexpand=True)
+            pic.set_size_request(half, half)
+            self.covers.set(pic, keys[i % len(keys)], half)
+            grid.attach(pic, i % 2, i // 2, 1, 1)
+        box.append(grid)
+        return self.holder(box)
+
+    def holder(self, box):
+        """Горизонтальная обёртка: высоту мозаики спрашивают при её настоящей ширине. Иначе вертикальная
+        карточка меряет её при своей ширине, плитки «по пропорции» отвечают больше — и под мозаикой зазор."""
+        h = Gtk.Box(halign=Gtk.Align.START, valign=Gtk.Align.START)
+        h.append(box)
+        return h
+
+    # ----- данные -----
+    def playlists(self):
+        out = []
+        for p in load_json(PLAYLISTS, []):
+            d = load_json(os.path.join(CACHE, f"pl-{p['id']}.json"), {})
+            name = (d.get("name") or p.get("name") or p["id"]).replace(" (SoundCloud)", "")
+            out.append({"id": p["id"], "name": name, "short": name.split("/")[0].strip(),
+                        "src": {"sc": "SoundCloud", "mix": "SoundCloud + Apple Music"}.get(p.get("src"), "YouTube Music")
+                        if not (p.get("src") == "mix" and all(x.get("type") == "apple" for x in p.get("sources", [])))
+                        else "Apple Music → SoundCloud",
+                        "tracks": d.get("tracks") or []})
+        return out
+
+    def has_cover(self, k):
+        return k and (os.path.exists(os.path.join(COVERS, k + ".jpg")) or k in self.covers.thumbs)
+
+    def first_key(self, tracks):
+        for t in tracks[:40]:
+            k = t.get("key") or t.get("id")
+            if self.has_cover(k):
+                return k
+        return (tracks[0].get("key") or tracks[0].get("id")) if tracks else None
+
+    def mosaic_keys(self, tracks):
+        """4 разные обложки из начала плейлиста (те, что уже есть в кэше или по ссылке)."""
+        keys = []
+        for t in tracks[:80]:
+            k = t.get("key") or t.get("id")
+            if self.has_cover(k) and k not in keys:
+                keys.append(k)
+            if len(keys) == 4:
+                break
+        return keys or [(t.get("key") or t.get("id")) for t in tracks[:1]]
+
+    def refresh_queue(self):
+        pl = ipc("get_property", "playlist") or []
+        q = []
+        for i, e in enumerate(pl):
+            url = e.get("filename", "")
+            m = yumimeta.lookup(url)
+            if m and m["title"]:
+                title, artist, dur = m["title"], m["artist"], m["dur"]
+            else:
+                raw = e.get("title") or os.path.basename(url)
+                artist, _, title = raw.partition(" — ") if " — " in raw else ("", "", raw)
+                dur = 0
+            q.append({"i": i, "url": url, "key": key_of(url), "title": title, "artist": artist, "dur": dur})
+            if e.get("current"):
+                self.cur_idx = i
+        self.queue = q
+
+    # ----- навигация и отрисовка центра -----
+    def go(self, view, pid=None):
+        self.view, self.shown = view, MAX_ROWS
+        if pid:
+            self.pl_id = pid
+        ph = {"yt": "Найти в YouTube Music → Enter", "sc": "Найти на SoundCloud → Enter",
+              "lists": "Поиск · ссылка на плейлист → Enter"}
+        self.search.set_placeholder_text(ph.get(view, "Поиск в медиатеке"))
+        self.render()
+
+    def clear(self):
+        while (c := self.main.get_first_child()):
+            self.main.remove(c)
+
+    def render(self, keep=False):
+        self.clear()
+        for n in self.navs:
+            (n.add_css_class if n.view == self.view and (self.view != "pl" or n.pid == self.pl_id)
+             else n.remove_css_class)("on")
+        getattr(self, "render_" + self.view)()
+        if not keep:
+            self.main_scroll.get_vadjustment().set_value(0)
+
+    def h2(self, text):
+        self.main.append(Gtk.Label(label=text, xalign=0, css_classes=["ym-h2"]))
+
+    def hint(self, text):
+        self.main.append(Gtk.Label(label=text, xalign=0, wrap=True, css_classes=["ym-hint"]))
+
+    def render_lists(self):
+        self.h2("Плейлисты")
+        q = self.search.get_text().strip().lower()
+        flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True, max_children_per_line=6,
+                           min_children_per_line=2, column_spacing=self.s(20), row_spacing=self.s(20),
+                           valign=Gtk.Align.START)
+        n = 0
+        for p in self.playlists():
+            if q and q not in p["name"].lower():
+                continue
+            b = Gtk.Button(css_classes=["ym-card"])
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=self.s(6), valign=Gtk.Align.START)
+            box.append(self.mosaic(self.mosaic_keys(p["tracks"]), 150))
+            name = Gtk.Label(label=p["short"], xalign=0, css_classes=["ym-card-name"],
+                             ellipsize=Pango.EllipsizeMode.END, max_width_chars=1)
+            name.set_size_request(self.s(150), -1)
+            box.append(name)
+            box.append(Gtk.Label(label=f"{p['src']} · {len(p['tracks'])} треков", xalign=0, css_classes=["ym-sub"]))
+            b.set_child(box)
+            b.connect("clicked", lambda *_, i=p["id"]: self.go("pl", i))
+            flow.append(b)
+            n += 1
+        self.main.append(flow)
+        if not n:
+            self.hint("Нет плейлистов. Вставьте ссылку на плейлист YouTube Music («Доступ по ссылке») или SoundCloud "
+                      "в поле поиска и нажмите Enter.")
+
+    def render_pl(self):
+        p = next((x for x in self.playlists() if x["id"] == self.pl_id), None)
+        if not p:
+            return self.go("lists")
+        s = self.s
+        head = Gtk.Box(spacing=s(22))
+        head.append(self.mosaic(self.mosaic_keys(p["tracks"]), 170))
+        meta = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=s(4), valign=Gtk.Align.END, hexpand=True)
+        meta.append(Gtk.Label(label=p["src"], xalign=0, css_classes=["ym-srcl"]))
+        meta.append(Gtk.Label(label=p["short"], xalign=0, css_classes=["ym-h2"], ellipsize=Pango.EllipsizeMode.END,
+                              max_width_chars=1))
+        total = sum(int(t.get("dur") or 0) for t in p["tracks"])
+        srcs = [track_source(t) for t in p["tracks"]]
+        by_src = " · ".join(f"{name} {srcs.count(k)}" for k, name in (("sc", "SoundCloud"), ("yt", "YouTube"))
+                            if srcs.count(k)) if len(set(srcs)) > 1 else ""
+        meta.append(Gtk.Label(label=f"{len(p['tracks'])} треков · {total // 3600} ч {total % 3600 // 60} мин"
+                              + (f"  ·  {by_src}" if by_src else ""), xalign=0, css_classes=["ym-sub"]))
+        acts = Gtk.Box(spacing=s(10), margin_top=s(10))
+        for label, cls, fn, tip in (("󰐊  Слушать", "ym-btn", lambda *_: self.play_list(p["id"], False), None),
+                                    ("󰒝", "ym-btn ghost", lambda *_: self.play_list(p["id"], True), "Перемешать и слушать"),
+                                    ("󰑐", "ym-btn ghost", lambda *_: self.sync(p["id"]), "Обновить плейлист")):
+            b = Gtk.Button(label=label, css_classes=cls.split(), tooltip_text=tip)
+            b.connect("clicked", fn)
+            acts.append(b)
+        meta.append(acts)
+        head.append(meta)
+        self.main.append(head)
+        playing = self.queue[self.cur_idx]["key"] if 0 <= self.cur_idx < len(self.queue) else None
+        rows = list(enumerate(p["tracks"]))
+        q = self.search.get_text().strip().lower()
+        if q:
+            rows = [(i, t) for i, t in rows if q in (t.get("title", "") + " " + t.get("artist", "")).lower()]
+        self.track_list([(t, i, bool(playing) and (t.get("key") or t.get("id")) == playing,
+                          lambda *_, i=i: self.play_list(p["id"], False, i),
+                          lambda *_, t=t: self.add(t.get("url") or t["id"], False)) for i, t in rows],
+                        empty="Ничего не найдено в плейлисте.")
+
+    def track_list(self, items, empty="Пусто."):
+        """items: [(трек, номер, играет?, клик, «следующим»)] — по MAX_ROWS строк, дальше «Показать ещё»."""
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        for n, (t, i, cur, cb, nxt) in enumerate(items[:self.shown]):
+            box.append(self.track_row(t, i, cur, cb, nxt, n % 2 == 0))
+        self.main.append(box)
+        if not items:
+            self.hint(empty)
+        elif len(items) > self.shown:
+            left = len(items) - self.shown
+            more = Gtk.Button(label=f"Показать ещё {min(MAX_ROWS, left)} (осталось {left})",
+                              css_classes=["ym-btn", "ghost"], halign=Gtk.Align.CENTER, margin_top=self.s(6))
+            more.connect("clicked", lambda *_: self.show_more())
+            self.main.append(more)
+
+    def show_more(self):
+        self.shown += MAX_ROWS
+        self.render(keep=True)
+
+    def track_row(self, t, i, cur, cb, nxt, odd):
+        s = self.s
+        b = Gtk.Button(css_classes=["ym-trk"] + (["odd"] if odd else []) + (["cur"] if cur else []))
+        g = Gtk.Box(spacing=s(12))
+        if cur:
+            mini = Gtk.DrawingArea(valign=Gtk.Align.CENTER)
+            mini.set_size_request(s(28), s(14))
+            mini.set_draw_func(lambda a, cr, w, h: draw_eq(a, cr, w, h, self.lv, 3, self.k * 2.5, self.k * 2, False))
+            mini.add_tick_callback(lambda w, _c: (w.queue_draw(), True)[1])
+            g.append(mini)
+        else:
+            n = Gtk.Label(label=str(i + 1), css_classes=["ym-n"], xalign=1)
+            n.set_size_request(s(28), -1)
+            g.append(n)
+        g.append(self.square(t.get("key") or t.get("id"), 36, "ym-thumb"))
+        # название и артист делят ширину (≈ 1 : 0.8, как в макете), без фиксированных колонок
+        cols = Gtk.Box(homogeneous=False, hexpand=True, spacing=s(12))
+        tl = Gtk.Label(label=t.get("title") or "Без названия", xalign=0, hexpand=True, css_classes=["ym-t"],
+                       ellipsize=Pango.EllipsizeMode.END, max_width_chars=1, width_chars=10)
+        al = Gtk.Label(label=t.get("artist") or "", xalign=0, hexpand=True, css_classes=["ym-a"],
+                       ellipsize=Pango.EllipsizeMode.END, max_width_chars=1, width_chars=8)
+        cols.append(tl)
+        cols.append(al)
+        g.append(cols)
+        src = track_source(t)
+        if src:                                   # откуда играет трек: ☁ SoundCloud или ▶ YouTube
+            g.append(Gtk.Label(label="󰓀" if src == "sc" else "󰗃", css_classes=["ym-d", "ym-src-" + src],
+                               tooltip_text="SoundCloud" if src == "sc" else "YouTube Music"))
+        g.append(Gtk.Label(label=fmt(t.get("dur")), css_classes=["ym-d"], width_chars=5, xalign=1))
+        if nxt:
+            more = Gtk.Button(label="󰐒", tooltip_text="Следующим в очередь", css_classes=["ym-more"], focusable=False)
+            more.connect("clicked", nxt)
+            g.append(more)
+        b.set_child(g)
+        b.connect("clicked", cb)
+        return b
+
+    def render_queue(self):
+        self.h2("Очередь")
+        if not self.queue:
+            return self.hint("Очередь пуста. Откройте плейлист и нажмите «Слушать».")
+        q = self.search.get_text().strip().lower()
+        if q:
+            items = [t for t in self.queue if q in (t["title"] + " " + t["artist"]).lower()]
+        else:                                    # окно вокруг играющего
+            items = self.queue[max(self.cur_idx - 3, 0):]
+        self.track_list([(t, t["i"], t["i"] == self.cur_idx, lambda *_, n=t["i"]: self.play_index(n), None)
+                         for t in items], empty="В очереди не найдено. Откройте «YouTube Music» — искать везде.")
+
+    def render_recent(self):
+        self.h2("Недавние")
+        rec = load_json(RECENT, [])
+        q = self.search.get_text().strip().lower()
+        if q:
+            rec = [t for t in rec if q in (t["title"] + " " + t["artist"]).lower()]
+        self.track_list([(t, i, False, lambda *_, u=t["url"]: self.add(u, True), lambda *_, u=t["url"]: self.add(u, False))
+                         for i, t in enumerate(rec)],
+                        empty="Здесь появятся треки, которые играли, пока было открыто это окно.")
+
+    def render_yt(self):
+        self.render_results("yt", "YouTube Music")
+
+    def render_sc(self):
+        self.render_results("sc", "SoundCloud")
+
+    def render_results(self, tab, title):
+        self.h2(title)
+        res = self.results[tab]
+        if not res:
+            return self.hint("Введите название или исполнителя в поле поиска слева и нажмите Enter.")
+        items = []
+        for i, r in enumerate(res):
+            key = r.get("key") or r["id"]
+            if r.get("thumb"):
+                self.covers.thumbs.setdefault(key, r["thumb"])
+            target = r["url"] if tab == "sc" else r["id"]
+            items.append(({"key": key, "title": r["title"], "artist": r["artist"], "dur": r["dur"]}, i, False,
+                          lambda *_, v=target: self.add(v, True), lambda *_, v=target: self.add(v, False)))
+        self.track_list(items)
+
+    # ----- действия -----
+    def on_enter(self):
+        text = self.search.get_text().strip()
+        if not text:
+            return
+        if self.view in ("yt", "sc"):
+            self.toast("Ищу…", 20)
+            tab = self.view
+            cli("search" if tab == "yt" else "search-sc", text, cb=lambda ok, out: self.on_results(tab, ok, out))
+        elif re.search(r"(list=|soundcloud\.com/.+/sets/|^https?://)", text):
+            self.toast("Загружаю плейлист…", 60)
+            cli("import", text, cb=self.on_imported)
+
+    def on_results(self, tab, ok, out):
+        if not ok:
+            return self.toast("Поиск не удался", 3, True)
+        try:
+            self.results[tab] = json.loads(out or "[]")
+        except ValueError:
+            self.results[tab] = []
+        self.toast(f"Найдено: {len(self.results[tab])}", 2)
+        if self.view == tab:
+            self.render()
+
+    def on_imported(self, ok, out):
+        if not ok:
+            return self.toast(f"Ошибка: {out[:60]}", 4, True)
+        try:
+            d = json.loads(out)
+            self.toast(f"Добавлен «{d['name']}» — {d['count']} треков", 4)
+        except ValueError:
+            self.toast("Плейлист добавлен", 3)
+        self.search.set_text("")
+        self.fill_side_playlists()
+        self.render()
+
+    def play_list(self, pid, shuffle, index=None):
+        self.toast("Загружаю плейлист…", 10)
+        args = ["play", pid] + ([str(index)] if index is not None else []) + (["--shuffle"] if shuffle else [])
+        cli(*args, cb=lambda ok, out: (self.toast("Играет" if ok else f"Ошибка: {out[:60]}", 3, not ok),
+                                       GLib.timeout_add(600, self.after_change)))
+
+    def sync(self, pid):
+        self.toast("Обновляю плейлист…", 60)
+        cli("sync", pid, cb=lambda ok, out: (self.toast((out or "Обновлено") if ok else "Не удалось обновить", 3, not ok),
+                                             self.fill_side_playlists(), self.render(keep=True)))
+
+    def add(self, target, now):
+        cli("add", target, *(["--now"] if now else []),
+            cb=lambda ok, out: (self.toast(("Включаю…" if now else "Будет следующим") if ok else "Не удалось", 3, not ok),
+                                GLib.timeout_add(600, self.after_change)))
+
+    def play_index(self, n):
+        ipc("playlist-play-index", n)
+        ipc("set_property", "pause", False)
+        GLib.timeout_add(400, self.after_change)
+
+    def after_change(self):
+        self.refresh_queue()
+        self.update_now()
+        if self.view in ("queue", "pl"):
+            self.render(keep=True)
+        return False
+
+    def cmd(self, *command):
+        ipc(*command)
+        GLib.timeout_add(250, lambda: (self.update_now(), False)[1])
+
+    def shuffle_queue(self):
+        if not self.queue:
+            return
+        ipc("playlist-shuffle")
+        ipc("playlist-play-index", 0)
+        self.toast("Очередь перемешана", 2)
+        GLib.timeout_add(400, self.after_change)
+
+    def toggle_repeat(self):
+        on = ipc("get_property", "loop-playlist") not in (False, "no", None)
+        ipc("set_property", "loop-playlist", "no" if on else "inf")
+        self.toast("Повтор выключен" if on else "Повтор плейлиста", 2)
+        GLib.timeout_add(250, lambda: (self.update_now(), False)[1])
+
+    def on_seek(self, _s, _scroll, value):
+        if self.dur:
+            t = min(max(value, 0), 1) * self.dur
+            self.seek_block = time.monotonic() + 1.0
+            self.t_pos.set_label(fmt(t))
+            ipc("seek", t, "absolute")
+            self.pos_base = (t, time.monotonic())
+        return False
+
+    def on_volume(self, _s, _scroll, value):
+        """Громкость mpv с ползунка — не чаще раза в 90 мс (последнее значение, итоговое доходит всегда):
+        поток значений при перетаскивании давал треск в Bluetooth-наушниках."""
+        self.vol_block = time.monotonic() + 1.0
+        self.vol_pending = int(min(max(value, 0), 100))
+        if not getattr(self, "vol_timer", 0):
+            self._vol_apply()
+            self.vol_timer = GLib.timeout_add(90, self._vol_apply)
+        return False
+
+    def _vol_apply(self):
+        v = getattr(self, "vol_pending", None)
+        if v is None:
+            self.vol_timer = 0
+            return False
+        self.vol_pending = None
+        # громкость ПОТОКА mpv в PipeWire — та же, что у ползунков плеера и пилюли (pactl sink-input):
+        # проценты PipeWire «слуховые» (кубическая шкала), mpv ao-volume — линейный → v% ↦ (v/100)³
+        ipc("set_property", "ao-volume", round((v / 100) ** 3 * 100, 3))
+        return True
+
+    def toast(self, text, hold=2, err=False):
+        self.toast_l.set_label(text)
+        (self.toast_l.add_css_class if err else self.toast_l.remove_css_class)("err")
+        self.toast_l.set_visible(True)
+        if self.toast_id:
+            GLib.source_remove(self.toast_id)
+        self.toast_id = GLib.timeout_add(int(hold * 1000), self._hide_toast)
+
+    def _hide_toast(self):
+        self.toast_id = 0
+        self.toast_l.set_visible(False)
+        return False
+
+    # ----- правая панель (окно размер не меняет: панель прячется внутри постоянной рамки) -----
+    def set_right(self, tab):
+        self.right_tab = tab
+        self.right_col.set_visible(True)
+        self.rstack.set_visible_child_name(tab)
+        for b, t in ((self.seg_lyr, "lyr"), (self.seg_next, "next")):
+            (b.add_css_class if t == tab else b.remove_css_class)("on")
+        (self.t_lyr.add_css_class if tab == "lyr" else self.t_lyr.remove_css_class)("on")
+        (self.t_next.add_css_class if tab == "next" else self.t_next.remove_css_class)("on")
+        if tab == "next":
+            self.fill_next()
+        self.lyr_cur = -1
+
+    def toggle_right(self, tab):
+        if self.right_col.get_visible() and self.right_tab == tab:
+            self.right_col.set_visible(False)
+            self.t_lyr.remove_css_class("on")
+            self.t_next.remove_css_class("on")
+        else:
+            self.set_right(tab)
+
+    def fill_next(self):
+        while (c := self.nbox.get_first_child()):
+            self.nbox.remove(c)
+        src = None
+        if self.queue:
+            k0 = self.queue[0]["key"]
+            src = next((p["short"] for p in self.playlists()
+                        if any((t.get("key") or t.get("id")) == k0 for t in p["tracks"][:400])), None)
+        self.nbox.append(Gtk.Label(label="ДАЛЕЕ" + (f" · ИЗ «{src.upper()}»" if src else ""), xalign=0,
+                                   css_classes=["ym-qh"], ellipsize=Pango.EllipsizeMode.END, max_width_chars=1))
+        nxt = self.queue[self.cur_idx + 1:self.cur_idx + 21] if self.cur_idx >= 0 else self.queue[:20]
+        for t in nxt:
+            b = Gtk.Button(css_classes=["ym-trk"])
+            g = Gtk.Box(spacing=self.s(10))
+            g.append(self.square(t["key"], 38, "ym-thumb"))
+            v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True, valign=Gtk.Align.CENTER)
+            v.append(Gtk.Label(label=t["title"], xalign=0, css_classes=["ym-t"], ellipsize=Pango.EllipsizeMode.END,
+                               max_width_chars=1))
+            v.append(Gtk.Label(label=t["artist"], xalign=0, css_classes=["ym-a"], ellipsize=Pango.EllipsizeMode.END,
+                               max_width_chars=1))
+            g.append(v)
+            g.append(Gtk.Label(label=fmt(t["dur"]), css_classes=["ym-d"]))
+            b.set_child(g)
+            b.connect("clicked", lambda *_, i=t["i"]: self.play_index(i))
+            self.nbox.append(b)
+        if not nxt:
+            self.nbox.append(Gtk.Label(label="Дальше ничего нет.", xalign=0, css_classes=["ym-hint"]))
+
+    # ----- «Сейчас играет» -----
+    def on_second(self):
+        old = self.cur_idx
+        self.update_now()
+        if self.cur_idx != old:
+            self.refresh_queue()
+            if self.view == "queue":
+                self.render(keep=True)
+            if self.right_col.get_visible() and self.right_tab == "next":
+                self.fill_next()
+        return True
+
+    def update_now(self):
+        path = ipc("get_property", "path")
+        pos = ipc("get_property", "playlist-pos")
+        if isinstance(pos, int) and pos >= 0:
+            self.cur_idx = pos
+        pause = ipc("get_property", "pause")
+        if not path:
+            self.np_t.set_label("Ничего не играет")
+            self.np_a.set_label("Выберите плейлист и нажмите «Слушать»")
+            self.playing = self.lv.playing = False
+            self.b_pp.set_label("󰐊")
+            self.lyrics_for(None)
+            return
+        m = yumimeta.lookup(path)
+        title = (m and m["title"]) or ipc("get_property", "media-title") or os.path.basename(path)
+        artist = (m and m["artist"]) or ""
+        self.playing = self.lv.playing = not pause
+        self.b_pp.set_label("󰏤" if self.playing else "󰐊")
+        self.b_pp.set_tooltip_text("Пауза" if self.playing else "Играть")
+        self.np_t.set_label(title)
+        self.np_a.set_label(artist)
+        key = key_of(path)
+        if key != self.now_key:
+            self.now_key = key
+            self.covers.set(self.np_cover.pic, key, self.s(52))
+            self.covers.set(self.bgart, key, self.s(64))
+            self.remember(path, key, title, artist, (m and m["dur"]) or 0)
+        self.dur = ipc("get_property", "duration") or (m and m["dur"]) or 0
+        t = ipc("get_property", "time-pos") or 0
+        self.pos_base = (t, time.monotonic())
+        if time.monotonic() > self.seek_block:
+            self.prog.set_value(t / self.dur if self.dur else 0)
+            self.t_pos.set_label(fmt(t) if t >= 1 else "0:00")
+        self.t_len.set_label(fmt(self.dur))
+        if time.monotonic() > self.vol_block:
+            v = ipc("get_property", "ao-volume")           # линейная → проценты как у pactl/плеера
+            if v is not None:
+                self.vol.set_value(round((max(v, 0) / 100) ** (1 / 3) * 100))
+        loop = ipc("get_property", "loop-playlist")
+        (self.b_rep.add_css_class if loop not in (False, "no", None) else self.b_rep.remove_css_class)("on")
+        self.lyrics_for((title, artist, self.dur, path))
+
+    def remember(self, url, key, title, artist, dur):
+        rec = [t for t in load_json(RECENT, []) if t.get("url") != url]
+        rec.insert(0, {"url": url, "key": key, "title": title, "artist": artist, "dur": dur})
+        try:
+            with open(RECENT + ".tmp", "w") as f:
+                json.dump(rec[:60], f, ensure_ascii=False)
+            os.replace(RECENT + ".tmp", RECENT)
+        except OSError:
+            pass
+
+    def eq_tick(self, w, clock):
+        self.lv.step(clock.get_frame_time())
+        w.queue_draw()
+        return True
+
+    # ----- текст песни -----
+    def lyrics_msg(self, text, src=""):
+        self.lmsg.set_label(text)
+        self.lsrc.set_label(src)
+        self.lstack.set_visible_child_name("msg")
+
+    def lyrics_for(self, meta):
+        key = meta[3] if meta else None
+        if key == self.lyr_key:
+            return
+        self.lyr_key = key
+        self.lyr_token += 1
+        self.clear_lyrics()
+        if not meta:
+            return self.lyrics_msg("Ничего не играет")
+        self.lyrics_msg("Ищу текст…")
+        tok = self.lyr_token
+
+        def work():
+            try:
+                res = yumilyrics.fetch(meta[0], meta[1], meta[2], meta[3])
+            except Exception:
+                res = None
+            GLib.idle_add(self.set_lyrics, tok, res)
+        threading.Thread(target=work, daemon=True).start()
+
+    def clear_lyrics(self):
+        for lb in self.lyr_labels:
+            self.lbox.remove(lb)
+        self.lyr_lines, self.lyr_times, self.lyr_labels, self.lyr_cur, self.lyr_synced = [], [], [], -1, False
+
+    def set_lyrics(self, tok, res):
+        if tok != self.lyr_token:
+            return False
+        self.clear_lyrics()
+        if not res or not res.get("lines"):
+            self.lyrics_msg("Текст не найден")
+            return False
+        self.lyr_synced = res["synced"]
+        self.lyr_lines = list(res["lines"])
+        self.lyr_times = [t for t, _ in self.lyr_lines]
+        for t, line in self.lyr_lines:
+            lb = Gtk.Label(label=line or "♪", xalign=0, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR, max_width_chars=1,
+                           hexpand=True, css_classes=["ym-ln"] if self.lyr_synced else ["ym-ln", "plain"])
+            if self.lyr_synced:
+                click = Gtk.GestureClick()
+                click.connect("released", lambda *_a, t=t: self.seek_line(t))
+                lb.add_controller(click)
+                lb.set_cursor_from_name("pointer")
+            self.lbox.append(lb)
+            self.lyr_labels.append(lb)
+        self.lsrc.set_label(res["source"] + ("" if self.lyr_synced else " · без таймингов"))
+        self.lstack.set_visible_child_name("text")
+        self.lscroll.get_vadjustment().set_value(0)
+        self.lyr_manual = 0
+        return False
+
+    def seek_line(self, t):
+        ipc("seek", max(t, 0), "absolute")
+        self.pos_base = (t, time.monotonic())
+        self.lyr_manual = 0
+        self.lyr_cur = -1
+
+    def on_lyrics_wheel(self, *_):
+        if self.lyr_anim_id:
+            self.lscroll.remove_tick_callback(self.lyr_anim_id)
+            self.lyr_anim_id = 0
+        self.lyr_manual = time.monotonic() + 3.0
+        self.lyr_rescroll = True
+        return False
+
+    def lyrics_tick(self):
+        if not (self.lyr_synced and self.lyr_labels and self.right_col.get_visible() and self.right_tab == "lyr"):
+            return True
+        pos, at = self.pos_base
+        if self.playing:
+            pos += time.monotonic() - at
+        i = bisect.bisect_right(self.lyr_times, pos + lyrics_shift()) - 1
+        if i != self.lyr_cur:
+            for j, lb in enumerate(self.lyr_labels):
+                (lb.add_css_class if j == i else lb.remove_css_class)("cur")
+            self.lyr_cur = i
+            self.lyr_rescroll = True
+        if self.lyr_rescroll and time.monotonic() > self.lyr_manual:
+            self.lyr_rescroll = False
+            self.scroll_lyrics(max(i, 0))
+        return True
+
+    def scroll_lyrics(self, i):
+        lb = self.lyr_labels[i]
+        ok, pt = lb.compute_point(self.lbox, Graphene.Point())
+        if not ok or lb.get_height() == 0:
+            self.lyr_rescroll = True
+            return
+        adj = self.lscroll.get_vadjustment()
+        target = self.lbox.get_margin_top() + pt.y + lb.get_height() / 2 - adj.get_page_size() / 3
+        target = min(max(target, 0), max(adj.get_upper() - adj.get_page_size(), 0))
+        self.lyr_anim = (adj.get_value(), target, None)
+        if not self.lyr_anim_id:
+            self.lyr_anim_id = self.lscroll.add_tick_callback(self._lyr_anim)
+
+    def _lyr_anim(self, _w, clock):
+        v0, v1, t0 = self.lyr_anim
+        now = clock.get_frame_time()
+        if t0 is None:
+            t0 = now
+            self.lyr_anim = (v0, v1, t0)
+        x = min(1.0, (now - t0) / 450_000)
+        self.lscroll.get_vadjustment().set_value(v0 + (v1 - v0) * (1 - (1 - x) ** 3))
+        if x >= 1.0:
+            self.lyr_anim_id = 0
+            return GLib.SOURCE_REMOVE
+        return GLib.SOURCE_CONTINUE
+
+    # ----- клавиатура -----
+    def on_key(self, _c, keyval, _code, _state):
+        if (Gdk.keyval_name(keyval) or "") == "Escape":
+            if self.search.get_text():
+                self.search.set_text("")
+            else:
+                self.app.quit()
+            return True
+        return False
+
+
+class App(Gtk.Application):
+    def __init__(self):
+        super().__init__(application_id="org.yumi.panel.music", flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE)
+        self.win = None
+
+    def click_outside(self):
+        """Щелчок мимо окна (и не по Waybar) — закрыть, как у меню yumi-panel и плеера."""
+        if self.win is None or not self.win.get_mapped():
+            return
+        cur = yp.hypr("j/cursorpos")
+        layers = yp.hypr("j/layers") or {}
+        if not cur:
+            return
+        cx, cy = cur.get("x", 0), cur.get("y", 0)
+        for mon in layers.values():
+            for lv in mon.get("levels", {}).values():
+                for lay in lv:
+                    mine = lay.get("pid") == os.getpid()
+                    if (mine or lay.get("namespace") == "waybar") and \
+                            lay["x"] <= cx <= lay["x"] + lay["w"] and lay["y"] <= cy <= lay["y"] + lay["h"]:
+                        return
+        self.quit()
+
+    def do_command_line(self, cmdline):
+        args = cmdline.get_arguments()[1:]
+        if self.win is not None or "--close" in args:
+            self.quit()
+            return 0
+        self.win = MusicWindow(self, "bar" if "--bar" in args else "center")
+        self.win.present()
+        if not os.environ.get("YP_STAY"):
+            yp.watch_mouse_clicks(self.click_outside)
+        return 0
+
+
+if __name__ == "__main__":
+    sys.exit(App().run(sys.argv))

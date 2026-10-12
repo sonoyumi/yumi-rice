@@ -1,0 +1,516 @@
+#!/usr/bin/env python3
+"""yumi-menu-control — «Центр управления» на GTK4 (каркас yumi-panel): плитки, яркость, плеер, уведомления.
+  yumi-menu-control [--bar|--center]   открыть / закрыть (повторный вызов закрывает)
+  yumi-menu-control --close            закрыть
+
+Плитки: Wi-Fi, Bluetooth, VPN, Микрофон, Экономия, ☕ Кофеин — клик переключает, правый клик (или долгое
+нажатие) открывает меню Wi-Fi / Bluetooth / Звук. Состояния читаются параллельно в фоне (окно не ждёт).
+Ползунки: яркость экрана (apple-panel-bl, не ниже 1 %) и подсветка клавиатуры (kbd_backlight); значение
+применяется не чаще раза в 40 мс и подхватывается, если яркость поменяли клавишами/тачбаром.
+Плеер — модуль yumiplayercard (если установлен), уведомления — модуль yuminotify (журнал yumi-notify-log;
+всплывающие по-прежнему показывает swaync — конфликта нет: мы только читаем историю).
+
+Оформление: ~/.config/yumi-control/variant — «a» (плитки), «b» (компакт), «c» (стекло); YCC_VARIANT перекрывает.
+Проверка: YP_DRYRUN=1 — ничего не переключать; YP_STAY=1 YP_KEYBOARD=none — не закрываться (снимки).
+Откат: yumi-uninstall control"""
+import os
+import sys
+import time
+import threading
+import subprocess
+
+T0 = time.monotonic()
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-panel"))
+import yumipanel as yp  # noqa: E402  (сам перезапускает процесс с layer-shell)
+from yumipanel import Gtk, GLib, Pango  # noqa: E402
+
+HOME = os.path.expanduser("~")
+BIN = os.path.join(HOME, ".local/bin")
+CONF = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.join(HOME, ".config")), "yumi-control")
+SCREEN_BL = "apple-panel-bl"
+KBD_BL = "kbd_backlight"
+
+
+def variant():
+    v = os.environ.get("YCC_VARIANT", "")
+    if not v:
+        try:
+            with open(os.path.join(CONF, "variant")) as f:
+                v = f.read().strip()
+        except OSError:
+            v = "a"
+    return v if v in ("a", "b", "c") else "a"
+
+
+VAR = variant()
+yp.WIDTH = 400
+yp.HEADER_H = {"a": 96, "b": 0, "c": 118}[VAR]
+
+
+def sh(*cmd, timeout=2):
+    """Команда с выводом (чтение состояний). Детям — без нашего LD_PRELOAD."""
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=yp.CHILD_ENV)
+        return r.stdout.strip()
+    except Exception:
+        return ""
+
+
+def fire(*cmd):
+    """Команда, меняющая систему: в фоне, в режиме проверки — только печать."""
+    if yp.DRY:
+        print("[dry]", " ".join(cmd), file=sys.stderr, flush=True)
+        return
+    subprocess.Popen(cmd, env=yp.CHILD_ENV, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+
+
+# ---------- плитки: состояние и переключение (те же команды, что у cc) ----------
+def st_wifi():
+    if sh("nmcli", "radio", "wifi") != "enabled":
+        return False, "Выключен"
+    # активные подключения, а не «dev wifi»: тот при устаревшем списке сам запускает поиск сетей (секунды)
+    for line in sh("nmcli", "-t", "-f", "NAME,TYPE", "con", "show", "--active").splitlines():
+        name, _, kind = line.rpartition(":")
+        if kind == "802-11-wireless":
+            return True, name.replace("\\:", ":") or "Подключено"
+    return True, "Не подключено"
+
+
+def st_bt():
+    on = "true" in sh("busctl", "get-property", "org.bluez", "/org/bluez/hci0", "org.bluez.Adapter1", "Powered")
+    if not on:
+        return False, "Выключен"
+    names = []
+    for line in sh("bluetoothctl", "devices", "Connected").splitlines():
+        parts = line.split(" ", 2)
+        if len(parts) == 3:
+            names.append(parts[2])
+    return True, (names[0] if len(names) == 1 else f"{len(names)} устр." if names else "Включён")
+
+
+def st_vpn():
+    name = sh(os.path.join(BIN, "yumi-vpn"), "state", timeout=1.5)   # имя локации «VPN …» или пусто
+    return bool(name), name.removeprefix("VPN ") if name else "Отключён"
+
+
+def st_saver():
+    on = "power-saver" in sh("powerprofilesctl", "get")
+    return on, "Включена" if on else "Выключена"
+
+
+def st_mic():
+    on = "MUTED" not in sh("wpctl", "get-volume", "@DEFAULT_AUDIO_SOURCE@")
+    return on, "Включён" if on else "Выключен"
+
+
+def st_caffeine():
+    on = sh(os.path.join(BIN, "yumi-caffeine"), "state") == "true"
+    return on, "Не засыпать" if on else "Обычный сон"
+
+
+def tg_wifi(on):
+    fire("nmcli", "radio", "wifi", "off" if on else "on")
+
+
+def tg_bt(on):
+    fire("bluetoothctl", "power", "off" if on else "on")
+
+
+def tg_vpn(on):
+    fire(os.path.join(BIN, "yumi-vpn"), "down" if on else "up")   # yumi-vpn сам обновляет пилюлю Waybar
+
+
+def tg_saver(on):
+    fire("sh", "-c", f"powerprofilesctl set {'balanced' if on else 'power-saver'}; pkill -RTMIN+8 -x waybar")
+
+
+def tg_mic(_on):
+    fire("wpctl", "set-mute", "@DEFAULT_AUDIO_SOURCE@", "toggle")
+
+
+def tg_caffeine(_on):
+    fire(os.path.join(BIN, "yumi-caffeine"), "toggle")   # сам обновляет пилюлю Waybar и шлёт уведомление
+
+
+#        ключ       значок вкл / выкл   название      состояние     переключить  меню по правому клику
+TILES = [("wifi",     "󰖩", "󰖪", "Wi-Fi",       st_wifi,     tg_wifi,     "yumi-menu-wifi"),
+         ("bt",       "󰂯", "󰂲", "Bluetooth",   st_bt,       tg_bt,       "yumi-menu-bluetooth"),
+         ("vpn",      "󰖂", "󰖂", "VPN",         st_vpn,      tg_vpn,      "yumi-menu-vpn"),
+         ("mic",      "󰍬", "󰍭", "Микрофон",    st_mic,      tg_mic,      "yumi-menu-sound"),
+         ("saver",    "󰌪", "󰌪", "Экономия",    st_saver,    tg_saver,    "yumi-menu-power"),
+         ("caffeine", "󰅶", "󰾪", "Кофеин",      st_caffeine, tg_caffeine, None)]
+
+
+class Tile:
+    """Плитка-переключатель. Вид зависит от варианта (a — крупная с подписью, b — кружок, c — карточка)."""
+
+    def __init__(self, panel, spec):
+        self.panel = panel
+        self.key, self.ic_on, self.ic_off, self.name, self.read, self.flip, self.menu = spec
+        self.on = None
+        self.busy_until = 0.0
+        compact = VAR == "b"
+        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2 if not compact else 4,
+                        halign=Gtk.Align.CENTER if compact else Gtk.Align.FILL)
+        self.icon = Gtk.Label(label=self.ic_off, css_classes=["ycc-tile-icon"],
+                              xalign=0.5 if compact else 0)
+        short = {"Bluetooth": "BT", "Микрофон": "Микр.", "Экономия": "Эконом."}   # в кружках B место узкое
+        self.title = Gtk.Label(label=short.get(self.name, self.name) if compact else self.name,
+                               css_classes=["ycc-tile-name"], xalign=0.5 if compact else 0,
+                               ellipsize=Pango.EllipsizeMode.END, max_width_chars=1, hexpand=True)
+        self.sub = Gtk.Label(label="…", css_classes=["ycc-tile-sub"], xalign=0, visible=not compact,
+                             ellipsize=Pango.EllipsizeMode.END, max_width_chars=1)
+        if compact:
+            circle = Gtk.Box(css_classes=["ycc-tile-circle"], halign=Gtk.Align.CENTER)
+            self.icon.set_hexpand(True)
+            self.icon.set_halign(Gtk.Align.CENTER)
+            circle.append(self.icon)
+            inner.append(circle)
+            inner.append(self.title)
+        else:
+            inner.append(self.icon)
+            inner.append(self.title)
+            inner.append(self.sub)
+        self.btn = Gtk.Button(child=inner, css_classes=["ycc-tile"], hexpand=True,
+                              tooltip_text=f"{self.name}: клик — вкл/выкл" + (", правый клик — меню" if self.menu else ""))
+        self.btn.connect("clicked", self.on_click)
+        if self.menu:
+            rc = Gtk.GestureClick(button=3)
+            rc.connect("pressed", lambda *_: self.open_menu())
+            self.btn.add_controller(rc)
+            lp = Gtk.GestureLongPress()
+            lp.connect("pressed", lambda *_: self.open_menu())
+            self.btn.add_controller(lp)
+
+    def refresh(self):
+        """Чтение состояния — в потоке; результат применяется в главном цикле."""
+        def work():
+            try:
+                on, sub = self.read()
+            except Exception:
+                on, sub = False, "?"
+            GLib.idle_add(self.apply, on, sub)
+        threading.Thread(target=work, daemon=True).start()
+
+    def apply(self, on, sub):
+        if time.monotonic() < self.busy_until:      # только что нажали — не перетирать мгновенный отклик
+            return False
+        self.on = on
+        self.icon.set_label(self.ic_on if on else self.ic_off)
+        self.sub.set_label(sub)
+        (self.btn.add_css_class if on else self.btn.remove_css_class)("on")
+        return False
+
+    def on_click(self, *_):
+        cur = bool(self.on)
+        self.flip(cur)
+        # мгновенный отклик, потом — реальное состояние (VPN подключается дольше)
+        self.busy_until = time.monotonic() + 0.6
+        self.on = not cur
+        self.icon.set_label(self.ic_on if self.on else self.ic_off)
+        self.sub.set_label("…")
+        (self.btn.add_css_class if self.on else self.btn.remove_css_class)("on")
+        for ms in (700, 1800, 4000):
+            GLib.timeout_add(ms, lambda: self.refresh() or False)
+
+    def open_menu(self):
+        fire(os.path.join(BIN, self.menu))
+        self.panel.app.quit()
+
+
+# ---------- ползунки яркости ----------
+class Brightness:
+    """Ползунок яркости: «толстая» полоса со значком внутри (a), тонкая с процентом (b), средняя (c).
+    Значение применяется с прореживанием (40 мс) и в конце жеста; внешние изменения подхватываются (0.5 с)."""
+
+    def __init__(self, device, icon, name, minimum=0):
+        self.dev, self.min = device, minimum
+        self.pending, self.timer, self.dragging_until = None, 0, 0.0
+        self.box = Gtk.Box(spacing=10, css_classes=["ycc-slider-row"])
+        self.scale = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL, draw_value=False, hexpand=True,
+                               valign=Gtk.Align.CENTER, css_classes=["ycc-slider"], focusable=False)
+        self.scale.set_range(0, 100)
+        self.scale.set_increments(2, 10)
+        self.scale.connect("change-value", self.on_change)
+        self.icon = Gtk.Label(label=icon, css_classes=["ycc-slider-icon"], tooltip_text=name)
+        self.pct = Gtk.Label(width_chars=4, xalign=1, css_classes=["ycc-pct"])
+        if VAR == "a":
+            # значок поверх полосы, слева внутри заливки (как в macOS)
+            ov = Gtk.Overlay(hexpand=True)
+            ov.set_child(self.scale)
+            self.icon.set_halign(Gtk.Align.START)
+            self.icon.set_valign(Gtk.Align.CENTER)
+            self.icon.set_can_target(False)
+            self.icon.add_css_class("inside")
+            ov.add_overlay(self.icon)
+            self.box.append(ov)
+            self.box.append(self.pct)
+        else:
+            self.box.append(self.icon)
+            self.box.append(self.scale)
+            self.box.append(self.pct)
+        self.read()
+
+    def read(self):
+        out = sh("brightnessctl", "-d", self.dev, "-m")      # name,class,cur,pct%,max
+        try:
+            pct = int(out.split(",")[3].rstrip("%"))
+        except Exception:
+            return
+        if time.monotonic() > self.dragging_until:
+            self.scale.set_value(pct)
+            self.pct.set_label(f"{pct}%")
+
+    def on_change(self, _s, _t, v):
+        v = int(round(min(max(v, self.min), 100)))
+        self.scale.set_value(v)
+        self.pct.set_label(f"{v}%")
+        self.pending = v
+        self.dragging_until = time.monotonic() + 0.8
+        if not self.timer:
+            self.timer = GLib.timeout_add(40, self.flush)
+        return True
+
+    def flush(self):
+        self.timer = 0
+        if self.pending is not None:
+            fire("brightnessctl", "-q", "-d", self.dev, "set", f"{self.pending}%")
+            self.pending = None
+        return False
+
+
+# ---------- оформление вариантов (цвета только @yp-*, px масштабируются каркасом) ----------
+CSS_COMMON = """
+.ycc-tile { border: none; box-shadow: none; color: @yp-fg; transition: background 160ms, box-shadow 160ms, color 160ms; }
+.ycc-tile-icon { font-size: 15pt; }
+.ycc-tile-name { font-size: 10.5pt; font-weight: 700; }
+.ycc-tile-sub  { font-size: 8.5pt; color: alpha(@yp-fg2, 0.75); }
+.ycc-tile.on .ycc-tile-sub { color: alpha(@yp-on-acc, 0.75); }
+.ycc-pct { font-size: 9.5pt; color: @yp-fg2; font-feature-settings: "tnum"; }
+.ycc-slider-icon { font-size: 13pt; color: @yp-accent; }
+.ycc-section { font-size: 9pt; font-weight: 800; letter-spacing: 1px; color: alpha(@yp-fg2, 0.7); margin: 4px 4px 0 4px; }
+.ycc-slot { color: alpha(@yp-fg2, 0.55); font-size: 9.5pt; padding: 14px; border-radius: 16px; background: alpha(@yp-btn, 0.5); }
+.ycc-scroll { background: transparent; }
+.ycc-topline { font-size: 10.5pt; color: @yp-fg2; padding: 2px 4px 4px 4px; }
+.ycc-topline .big { font-size: 20pt; font-weight: 800; color: @yp-fg; }
+"""
+
+CSS_PLAYER = """
+.ypc-title  { font-size: 10.5pt; font-weight: 800; }
+.ypc-artist { font-size: 9pt; color: alpha(@yp-fg2, 0.85); }
+.ypc-source { font-size: 8pt; color: @yp-accent; }
+.ypc-time   { font-size: 8.5pt; color: alpha(@yp-fg2, 0.8); font-feature-settings: "tnum"; }
+.ypc-art-img, .ypc-art { border-radius: 14px; }
+.ypc-progress trough { min-height: 4px; border-radius: 2px; background: alpha(@yp-fg, 0.16); }
+.ypc-progress highlight { border-radius: 2px; background: @yp-accent; }
+.ypc-progress slider { min-width: 12px; min-height: 12px; margin: -4px; border-radius: 6px; background: @yp-fg;
+                       box-shadow: 0 1px 3px alpha(black, 0.45); transition: min-width 120ms, min-height 120ms, margin 120ms; }
+.ypc-progress:hover slider { min-width: 16px; min-height: 16px; margin: -6px; border-radius: 8px; }
+.ypc-btn { min-width: 34px; min-height: 34px; padding: 0; border-radius: 17px; border: none; box-shadow: none;
+           background: transparent; color: @yp-fg; font-size: 12pt; transition: background 150ms; }
+.ypc-btn:hover { background: @yp-hover; }
+.ypc-play { background: @yp-accent; color: @yp-on-acc; min-width: 40px; min-height: 40px; border-radius: 20px; }
+.ypc-play:hover { background: shade(@yp-accent, 1.08); }
+.ypc-compact .ypc-play { min-width: 32px; min-height: 32px; border-radius: 16px; }
+.ypc-compact .ypc-btn { min-width: 28px; min-height: 28px; border-radius: 14px; }
+"""
+
+CSS_NOTIFY = """
+.ynl-title { font-size: 10.5pt; font-weight: 800; color: @yp-fg; }
+.ynl-badge { font-size: 8.5pt; font-weight: 800; padding: 0 7px; border-radius: 9px; background: @yp-accent; color: @yp-on-acc; }
+.ynl-clear { font-size: 9pt; padding: 3px 12px; min-height: 0; border-radius: 12px; border: none; box-shadow: none;
+             background: @yp-btn; color: @yp-fg2; transition: background 150ms, color 150ms; }
+.ynl-clear:hover { background: alpha(#ed8796, 0.22); color: #ed8796; }
+.ynl-card { border-radius: 16px; background: alpha(@yp-btn, 0.6); transition: background 150ms; }
+.ynl-card:hover { background: @yp-hover; }
+.ynl-dnd { padding: 4px 6px 4px 8px; }
+.ynl-dnd-icon { color: @yp-accent; font-size: 12pt; }
+.ynl-dnd-label { font-size: 10pt; }
+.ynl-dnd-switch { border-radius: 13px; background: alpha(@yp-fg, 0.18); border: none; min-height: 22px; }
+.ynl-dnd-switch:checked { background: @yp-accent; }
+.ynl-dnd-switch slider { border-radius: 11px; min-width: 18px; min-height: 18px; margin: 2px; background: @yp-fg; box-shadow: none; }
+.ynl-dnd-switch:checked slider { background: @yp-on-acc; }
+.ynl-empty-icon { font-size: 16pt; color: alpha(@yp-fg2, 0.45); }
+.ynl-empty-text { font-size: 9.5pt; color: alpha(@yp-fg2, 0.6); }
+.ynl-empty { padding: 6px 0 4px 0; }
+.ynl-card { padding: 8px 10px; }
+.ynl-app { font-size: 8.5pt; color: alpha(@yp-fg2, 0.8); }
+.ynl-time { font-size: 8pt; color: alpha(@yp-fg2, 0.6); }
+.ynl-summary { font-size: 10pt; font-weight: 800; }
+.ynl-body { font-size: 9pt; color: alpha(@yp-fg, 0.85); }
+"""
+
+CSS_A = """
+.ypc-card { background: alpha(@yp-btn, 0.45); border-radius: 20px; padding: 10px 12px; }
+/* A · Плитки: как macOS — крупные плитки, толстые ползунки со значком внутри */
+.ycc-grid { margin-top: 2px; }
+.ycc-tile { background: @yp-btn; border-radius: 18px; padding: 10px 12px; min-height: 64px; }
+.ycc-tile:hover { background: @yp-hover; }
+.ycc-tile.on { background: @yp-accent; color: @yp-on-acc; }
+.ycc-tile.on:hover { background: shade(@yp-accent, 1.06); }
+.ycc-tile.on .ycc-tile-icon { color: @yp-on-acc; }
+.ycc-tile .ycc-tile-icon { color: @yp-accent; }
+.ycc-sliders { background: alpha(@yp-btn, 0.45); border-radius: 20px; padding: 10px 12px; }
+.ycc-slider trough { min-height: 30px; border-radius: 15px; background: alpha(@yp-fg, 0.12); }
+.ycc-slider highlight { border-radius: 15px; background: linear-gradient(to right, alpha(@yp-accent, 0.75), @yp-accent); min-width: 30px; }
+.ycc-slider slider { min-width: 0; min-height: 0; margin: 0; padding: 0; background: transparent; border: none; box-shadow: none; }
+.ycc-slider-icon.inside { color: @yp-on-acc; margin-left: 10px; font-size: 12pt; }
+.ycc-pct { min-width: 38px; }
+"""
+
+CSS_B = """
+.ypc-card { background: alpha(@yp-btn, 0.35); border-radius: 18px; padding: 8px 10px; }
+/* B · Компакт: без обоев, круглые переключатели в ряд, тонкие ползунки */
+.yp-head { min-height: 0; }
+.yp-body { padding-top: 16px; }
+.ycc-tile { background: transparent; padding: 2px 0; border-radius: 14px; }
+.ycc-tile-circle { min-width: 46px; min-height: 46px; border-radius: 23px; background: @yp-btn; transition: background 160ms, box-shadow 160ms; }
+.ycc-tile-circle .ycc-tile-icon { font-size: 16pt; color: @yp-fg; }
+.ycc-tile:hover .ycc-tile-circle { background: @yp-hover; }
+.ycc-tile.on .ycc-tile-circle { background: @yp-accent; box-shadow: 0 0 10px alpha(@yp-accent, 0.45); }
+.ycc-tile.on .ycc-tile-icon { color: @yp-on-acc; }
+.ycc-tile-name { font-size: 8pt; font-weight: 600; color: @yp-fg2; }
+.ycc-slider trough { min-height: 6px; border-radius: 3px; background: alpha(@yp-fg, 0.16); }
+.ycc-slider highlight { border-radius: 3px; background: @yp-accent; }
+.ycc-slider slider { min-width: 16px; min-height: 16px; margin: -6px; border-radius: 8px; background: @yp-fg;
+                     box-shadow: 0 1px 4px alpha(black, 0.45); transition: min-width 120ms, min-height 120ms, margin 120ms; }
+.ycc-slider:hover slider { min-width: 20px; min-height: 20px; margin: -8px; border-radius: 10px; }
+"""
+
+CSS_C = """
+.ypc-card { background: transparent; padding: 0; }
+/* C · Стекло: обои в шапке, каждый блок — полупрозрачная карточка, средние ползунки со значением справа */
+.ycc-card { background: alpha(@yp-btn, 0.55); border-radius: 22px; padding: 12px; box-shadow: inset 0 1px 0 alpha(white, 0.06), inset 0 0 0 1px alpha(@yp-accent, 0.12); }
+.ycc-tile { background: alpha(@yp-on-acc, 0.35); border-radius: 16px; padding: 9px 10px; min-height: 58px; }
+.ycc-tile:hover { background: @yp-hover; }
+.ycc-tile.on { background: alpha(@yp-accent, 0.24); box-shadow: inset 0 0 0 1px alpha(@yp-accent, 0.75); }
+.ycc-tile.on .ycc-tile-sub { color: alpha(@yp-fg2, 0.85); }
+.ycc-tile .ycc-tile-icon { color: alpha(@yp-fg, 0.6); }
+.ycc-tile.on .ycc-tile-icon { color: @yp-accent; }
+.ycc-slider trough { min-height: 12px; border-radius: 6px; background: alpha(@yp-fg, 0.14); }
+.ycc-slider highlight { border-radius: 6px; background: @yp-accent; }
+.ycc-slider slider { min-width: 20px; min-height: 20px; margin: -4px; border-radius: 10px; background: @yp-fg;
+                     box-shadow: 0 1px 4px alpha(black, 0.45); transition: min-width 120ms, min-height 120ms, margin 120ms; }
+.ycc-slider:hover slider { min-width: 22px; min-height: 22px; margin: -5px; border-radius: 11px; }
+.ycc-pct { font-size: 12pt; font-weight: 800; color: @yp-fg; min-width: 44px; }
+"""
+
+DAYS = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
+MONTHS = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября",
+          "октября", "ноября", "декабря"]
+
+
+def battery():
+    try:
+        with open("/sys/class/power_supply/macsmc-battery/capacity") as f:
+            cap = int(f.read())
+        with open("/sys/class/power_supply/macsmc-ac/online") as f:
+            ac = f.read().strip() == "1"
+        return f"{'󰂄' if ac else '󰁹'} {cap}%"
+    except Exception:
+        return ""
+
+
+def subtitle_text():
+    t = time.localtime()
+    return f"{DAYS[t.tm_wday]}, {t.tm_mday} {MONTHS[t.tm_mon - 1]} · {time.strftime('%H:%M')}   {battery()}"
+
+
+def wrap(child, card):
+    """В варианте C каждый блок — карточка; в остальных — как есть."""
+    if not card:
+        return child
+    b = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, css_classes=["ycc-card"])
+    b.append(child)
+    return b
+
+
+def build(panel, body):
+    panel.add_css(CSS_COMMON + CSS_PLAYER + CSS_NOTIFY + {"a": CSS_A, "b": CSS_B, "c": CSS_C}[VAR])
+    card = VAR == "c"
+    if VAR == "b":
+        panel.frame.get_first_child().set_visible(False)       # без шапки из обоев
+        top = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, css_classes=["ycc-topline"])
+        clock = Gtk.Label(label=time.strftime("%H:%M"), xalign=0, css_classes=["big"])
+        date = Gtk.Label(xalign=0)
+        top.append(clock)
+        top.append(date)
+        body.append(top)
+
+        def tick():
+            clock.set_label(time.strftime("%H:%M"))
+            date.set_label(subtitle_text().split(" · ")[0] + "    " + battery())
+            return True
+        tick()
+        GLib.timeout_add_seconds(15, tick)
+    else:
+        panel.set_subtitle(subtitle_text())
+        GLib.timeout_add_seconds(15, lambda: panel.set_subtitle(subtitle_text(), live=True) or True)
+
+    # плитки
+    tiles = [Tile(panel, s) for s in TILES]
+    if VAR == "b":
+        grid = Gtk.Box(spacing=2, homogeneous=True, css_classes=["ycc-grid"])
+        for t in tiles:
+            grid.append(t.btn)
+    else:
+        grid = Gtk.Grid(column_spacing=8, row_spacing=8, column_homogeneous=True, css_classes=["ycc-grid"])
+        for i, t in enumerate(tiles):
+            grid.attach(t.btn, i % 3, i // 3, 1, 1)
+    body.append(wrap(grid, card))
+    for t in tiles:
+        t.refresh()
+
+    # яркость
+    sl = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8 if VAR == "a" else 6, css_classes=["ycc-sliders"])
+    screen = Brightness(SCREEN_BL, "󰃠", "Яркость экрана", minimum=1)
+    kbd = Brightness(KBD_BL, "󰌌", "Подсветка клавиатуры")
+    sl.append(screen.box)
+    sl.append(kbd.box)
+    body.append(wrap(sl, card))
+    GLib.timeout_add(500, lambda: (screen.read(), kbd.read(), True)[2])
+
+    # плеер (модуль агента; пока нет — заглушка)
+    try:
+        import yumiplayercard
+        yumiplayercard.install_css(k=panel.k)              # базовый стиль карточки (наш add_css — поверх)
+        # дыхание фона — только где у карточки свой фон (в «стекле» c она прозрачная)
+        pc = yumiplayercard.PlayerCard(art_size=56 if VAR == "b" else 72, show_source=True, compact=VAR == "b",
+                                       autohide=True, glow=VAR != "c")
+        holder = wrap(pc, card)
+        holder.set_visible(pc.props.has_player)            # ничего не играет — блока нет совсем
+        pc.connect("visibility-changed", lambda _c, has: holder.set_visible(has))
+        body.append(holder)
+    except Exception as e:
+        print(f"[ycc] плеер: {e}", file=sys.stderr, flush=True)
+        body.append(wrap(Gtk.Label(label="󰎆  плеер — модуль ещё не готов", css_classes=["ycc-slot"]), card))
+
+    # уведомления: журнал yumi-notify-log (swaync по-прежнему показывает всплывающие — мы только читаем)
+    try:
+        import yuminotify
+        try:                                                 # базовый стиль списка — через каркас: тогда px/pt
+            with open(yuminotify.CSS_PATH) as f:             # масштабируются под монитор (×0.8 на DP-1);
+                panel.extra_css.insert(0, f.read())          # наш add_css идёт после и перекрывает
+        except OSError:
+            yuminotify.load_css()
+        nl = yuminotify.NotificationList(max_items=30, compact=VAR == "b", group=False,
+                                         on_activate=lambda *_: panel.app.quit())
+        nl.scroll.set_max_content_height(round((220 if VAR == "b" else 280) * panel.k))
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.append(yuminotify.DndRow())
+        box.append(nl)
+        body.append(wrap(box, card))
+    except Exception as e:
+        print(f"[ycc] уведомления: {e}", file=sys.stderr, flush=True)
+        body.append(wrap(Gtk.Label(label="󰂚  уведомления недоступны", css_classes=["ycc-slot"]), card))
+
+    if os.environ.get("YCC_SHAPE"):          # для снимков: границы рамки внутри слоя
+        GLib.timeout_add(1200, lambda: print(f"[ycc-shape] {panel.shape}", file=sys.stderr, flush=True) or False)
+    if os.environ.get("YCC_TIMING"):
+        panel.connect("map", lambda *_: print(f"[ycc] показано через {(time.monotonic() - T0) * 1000:.0f} мс",
+                                              file=sys.stderr, flush=True))
+
+
+if __name__ == "__main__":
+    yp.PanelApp("org.yumi.control", "Центр управления", "󰒓", build).run(sys.argv)

@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# yumi-uninstall — единая точка для откатов доработок (вместо 40 отдельных *-uninstall в ~/.local/bin).
+#   yumi-uninstall                 список откатов
+#   yumi-uninstall <модуль>        откатить: yumi-uninstall lyrics  (= yumi-lyrics-uninstall)
+#   yumi-uninstall --where         где лежит архив
+# Скрипты откатов и их бэкапы живут в архиве ~/.local/share/yumi-archive:
+#   uninstall/<модуль>-uninstall   сами откаты (как были, без правок)
+#   home/<путь из ~>               бэкапы (*.bak-*, *-backup), которые раньше лежали в ~/.local/bin и ~/.local/share
+# Перед откатом бэкапы временно возвращаются на старые места (скрипты ищут их там), после — снова в архив.
+# Выполненный откат переезжает в uninstall/done/ (раньше скрипт удалял себя сам).
+set -uo pipefail
+A="${XDG_DATA_HOME:-$HOME/.local/share}/yumi-archive"
+U="$A/uninstall"
+
+list() {
+    printf 'Откаты (yumi-uninstall <модуль>):\n'
+    for f in "$U"/*-uninstall; do
+        [ -e "$f" ] || continue
+        n="$(basename "$f" -uninstall)"
+        d="$(sed -n '2,6{s/^#[[:space:]]*//p}' "$f" | grep -v '^!' | head -1 | cut -c1-90)"
+        printf '  %-22s %s\n' "${n#yumi-}" "$d"
+    done
+}
+
+case "${1:-}" in
+""|-h|--help|list) list; exit 0 ;;
+--where) echo "$A"; exit 0 ;;
+esac
+
+m="${1%-uninstall}"
+s="$U/$m-uninstall"; [ -e "$s" ] || s="$U/yumi-$m-uninstall"
+[ -e "$s" ] || { echo "нет отката «$1». Список: yumi-uninstall" >&2; exit 1; }
+
+# вернуть бэкапы на место (только те, которых там нет), запомнить, что вернули
+restored=()
+if [ -d "$A/home" ]; then
+    while IFS= read -r -d '' p; do
+        rel="${p#"$A/home/"}"
+        [ -e "$HOME/$rel" ] && continue
+        mkdir -p "$(dirname "$HOME/$rel")" && cp -a "$p" "$HOME/$rel" && restored+=("$HOME/$rel")
+    done < <(find "$A/home" -mindepth 3 -maxdepth 3 -print0)
+fi
+cleanup() {
+    for r in "${restored[@]}"; do rm -rf "$r"; done
+    # откаты, которые восстановили другие откаты (из своих *.bak), — тоже в архив
+    for f in "$HOME"/.local/bin/*-uninstall; do
+        [ -f "$f" ] && [ "$(basename "$f")" != yumi-uninstall ] && mv -f "$f" "$U/"
+    done
+}
+trap cleanup EXIT
+
+PATH="$U:$PATH" "$s"; rc=$?
+if [ $rc -eq 0 ]; then
+    mkdir -p "$U/done" && mv -f "$s" "$U/done/"
+    echo "Откат «$(basename "$s" -uninstall)» выполнен (скрипт — в $U/done/)."
+fi
+exit $rc

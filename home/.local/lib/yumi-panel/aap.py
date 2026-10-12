@@ -20,9 +20,13 @@
   0x0009 настройка <id> <d1..d4>; 0x0D режим (1 выкл, 2 шумоподавление, 3 прозрачность, 4 адаптивный),
                    0x1A маска разрешённых режимов, 0x28 восприятие разговора (01 вкл, 02 выкл)
   0x001D сведения  строки через \\0: модель A1234, прошивка x.y.z
+  0x0019 нажатие   <type> <bud>: 05 одно, 06 двойное, 07 тройное, 08 долгое; bud 01 левый, 02 правый
+                   (приходит только для нажатий, включённых настройкой 0x39 — маска 01/02/04/08; по librepods)
 Важно (из zeffd): изменение настройки часто НЕ подтверждается в той же сессии — запись прошла, но новое
 значение придёт только после переподключения. Поэтому значение показывается сразу, «ждёт подтверждения»,
-и не откатывается.  Одновременно возможна только одна AAP-сессия.
+и не откатывается.  Одновременно возможна только одна AAP-сессия — поэтому, если запущена служба
+yumi-airpods (держит канал ради нажатий ножки), Session ходит через её сокет relay_path(mac): служба
+пересылает пакеты в обе стороны и сразу отдаёт последние известные (батарея, уши, настройки, сведения).
 """
 import errno
 import json
@@ -48,11 +52,69 @@ OP_BATTERY = 0x0004
 OP_EAR = 0x0006
 OP_CONTROL = 0x0009
 OP_DEVINFO = 0x001D
+OP_STEM = 0x0019
 
 S_MODE = 0x0D            # режим шумоподавления
 S_ALLOWED = 0x1A         # маска разрешённых режимов
 S_CONVERSATION = 0x28    # восприятие разговора
+S_STEM = 0x39            # какие нажатия ножки слать пакетом 0x19 (вместо AVRCP): 01 одно, 02 двойное, 04 тройное, 08 долгое
 ON, OFF = 0x01, 0x02     # кодировка переключателей
+STEM_PRESS = {0x05: "single", 0x06: "double", 0x07: "triple", 0x08: "long"}
+
+SOL_BLUETOOTH, BT_SECURITY, BT_SECURITY_MEDIUM = 274, 4, 2   # BlueZ 5.86+ требует явный уровень для PSM 0x1001
+
+# Мультиточка (по librepods, linux/rust aacp.rs): кто «владеет» наушниками — тому идут звук и нажатия.
+OP_AUDIO_SOURCE = 0x000E      # <mac LE 6> <type: 0 нет, 1 звонок, 2 медиа>
+OP_SMART_ROUTING = 0x0010     # хост → наушники (OPACK-словари), адрес цели — 6 байт задом наперёд
+OP_SMART_ROUTING_RESP = 0x0011
+OP_CONNECTED = 0x002E         # <count> <2> + по 8 байт: <mac 6> <info1> <info2>
+S_OWNS = 0x06                 # настройка «соединением владею я»: 01 / 00
+
+
+def _mac_rev(mac):
+    return bytes(int(x, 16) for x in reversed(mac.split(":")))
+
+
+def connected_devices(data):
+    """MAC устройств из пакета 0x2E (смещения как в librepods: payload = data[4:], с кода операции)."""
+    body = data[4:]
+    if len(body) < 3:
+        return []
+    count = body[2]
+    out = []
+    for i in range(count):
+        base = 5 + i * 8
+        if base + 6 > len(body):
+            break
+        out.append(":".join(f"{b:02X}" for b in body[base:base + 6]))
+    return out
+
+
+def audio_source(data):
+    """(mac, type) из пакета 0x0E или None (payload = data[4:])."""
+    body = data[4:]
+    if len(body) < 9:
+        return None
+    return ":".join(f"{b:02X}" for b in reversed(body[2:8])), body[8]
+
+
+def media_info_packet(self_mac, target_mac, streaming=True):
+    """«Хост играет» (send_media_information из librepods, байт в байт)."""
+    b = bytearray(_mac_rev(target_mac)) + bytes([0x82, 0x00, 0x01, 0xE5, 0x4A]) + b"PlayingApp" + b"\x56" \
+        + b"com.google.ios.youtube" + b"\x52" + b"HostStreamingState" + b"\x42" + (b"YES" if streaming else b"NO") \
+        + b"\x49" + b"btAddress" + b"\x51" + self_mac.upper().encode() + b"btName" + b"\x43" + b"Mac" + b"\x58" \
+        + b"otherDevice" + b"AudioCategory" + bytes([0x31, 0x2D, 0x01])
+    b += bytes(max(0, 138 - len(b)))
+    return HDR + bytes([OP_SMART_ROUTING, 0x00]) + bytes(b)
+
+
+def hijack_packet(target_mac):
+    """«Забрать наушники у target» (send_hijack_request из librepods, байт в байт)."""
+    b = bytearray(_mac_rev(target_mac)) + bytes([0x62, 0x00, 0x01, 0xE5, 0x4A]) + b"localscore" + bytes([0x30, 0x64]) \
+        + b"\x46" + b"reason" + b"\x48" + b"Hijackv2" + b"\x51" + b"audioRoutingScore" + bytes([0x31, 0x2D, 0x01, 0x5F]) \
+        + b"audioRoutingSetOwnershipToFalse" + b"\x01" + b"\x4B" + b"remotescore" + b"\xA5"
+    b += bytes(max(0, 106 - len(b)))
+    return HDR + bytes([OP_SMART_ROUTING, 0x00]) + bytes(b)
 
 COMPONENT = {0x01: "single", 0x02: "right", 0x04: "left", 0x08: "case"}
 BATT_STATUS = {0x00: "unknown", 0x01: "charging", 0x02: "normal", 0x04: "disconnected"}
@@ -170,6 +232,45 @@ def settings_packet(ident, *values):
     return set_packet(ident, *values)
 
 
+def relay_path(mac):
+    """Сокет службы yumi-airpods для этих наушников (есть, только пока служба держит канал)."""
+    run = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    return os.path.join(run, f"yumi-airpods-{mac.replace(':', '').upper()}.sock")
+
+
+def open_l2cap(mac, timeout=6.0, extra=()):
+    """Открыть канал AAP: L2CAP PSM 0x1001 → рукопожатие → возможности хоста → уведомления (+ extra-пакеты)."""
+    s = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_SEQPACKET, socket.BTPROTO_L2CAP)
+    s.settimeout(timeout)
+    try:
+        try:
+            s.setsockopt(SOL_BLUETOOTH, BT_SECURITY, bytes([BT_SECURITY_MEDIUM, 0]))
+        except OSError:
+            pass
+        s.connect((mac, PSM))
+        for pkt in (HANDSHAKE, SET_SPECIFIC_FEATURES, REQ_NOTIFICATIONS, *extra):
+            s.send(pkt)
+            time.sleep(0.15)
+    except OSError:
+        s.close()
+        raise
+    return s
+
+
+def open_relay(mac):
+    """Подключиться к сокету службы yumi-airpods; None — службы нет (или сокет мёртвый)."""
+    path = relay_path(mac)
+    if not os.path.exists(path):
+        return None
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    try:
+        s.connect(path)
+    except OSError:
+        s.close()
+        return None
+    return s
+
+
 class Session(threading.Thread):
     """Фоновая AAP-сессия: подключается, читает уведомления, пишет настройки. Окно не ждёт её никогда.
     on_update(snapshot) вызывается из потока сессии — меню само переносит его в главный поток.
@@ -279,16 +380,12 @@ class Session(threading.Thread):
                 with self.lock:
                     self.state.handle(pkt)
             return
-        s = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_SEQPACKET, socket.BTPROTO_L2CAP)
-        s.settimeout(6.0)
-        try:
-            s.connect((self.mac, PSM))
-            for pkt in (HANDSHAKE, SET_SPECIFIC_FEATURES, REQ_NOTIFICATIONS):
-                s.send(pkt)
-                time.sleep(0.15)
-        except OSError as e:
-            s.close()
-            raise AAPError(str(e)) from e
+        s = open_relay(self.mac)           # служба yumi-airpods держит канал — работаем через неё
+        if s is None:
+            try:
+                s = open_l2cap(self.mac)
+            except OSError as e:
+                raise AAPError(str(e)) from e
         s.setblocking(False)
         self.sock = s
 
@@ -382,11 +479,19 @@ PREFS = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.co
 
 
 def load_prefs():
+    """pause_on_removal — пауза при снятии наушника; handoff_on_lock — при блокировке экрана отдать AirPods
+    айфону (пауза + отключение). Оба по умолчанию выключены. iphone_mac — Bluetooth-адрес айфона: при подключении
+    AirPods к ноутбуку служба сразу забирает их у него (иначе нажатия уходят айфону)."""
+    keys = ("pause_on_removal", "handoff_on_lock")
     try:
         with open(PREFS) as f:
-            return {"pause_on_removal": bool(json.load(f).get("pause_on_removal", False))}
+            data = json.load(f)
+        prefs = {k: bool(data.get(k, False)) for k in keys}
+        mac = str(data.get("iphone_mac", "")).strip().upper()     # айфон, у которого забирать AirPods
+        prefs["iphone_mac"] = mac if len(mac) == 17 and mac.count(":") == 5 else None
+        return prefs
     except (OSError, ValueError, AttributeError):
-        return {"pause_on_removal": False}
+        return {**{k: False for k in keys}, "iphone_mac": None}
 
 
 class EarPause:

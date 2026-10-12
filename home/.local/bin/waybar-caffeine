@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Пилюля ☕ «Не засыпать» — общее состояние с плиткой центра уведомлений (cc caffeine): включено = hypridle остановлен.
-# Обновление мгновенно по сигналу RTMIN+15 (его шлёт cc caffeine toggle).
-if pgrep -x hypridle >/dev/null; then
-    printf '{"text":"󰒲","tooltip":"Не засыпать: выключено\\nЭкран блокируется и засыпает по таймеру","class":"deactivated"}\n'
+# Пилюля ☕ «Не засыпать» — общее состояние с плиткой центра уведомлений (yumi-caffeine): таймер + закрытая крышка.
+# Обновление мгновенно по сигналу RTMIN+15 (его шлёт yumi-caffeine).
+if [ "$("$HOME/.local/bin/yumi-caffeine" state)" = true ]; then
+    printf '{"text":"󰅶","tooltip":"Не засыпать: включено\\nНет блокировки и сна по таймеру, закрытая крышка не усыпляет","class":"activated"}\n'
 else
-    printf '{"text":"󰅶","tooltip":"Не засыпать: включено\\nБлокировка и сон по таймеру отключены","class":"activated"}\n'
+    printf '{"text":"󰒲","tooltip":"Не засыпать: выключено\\nЭкран блокируется и засыпает по таймеру и при закрытой крышке","class":"deactivated"}\n'
 fi

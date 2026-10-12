@@ -3,6 +3,9 @@
 # Правки снимаются точечно (другие изменения в этих файлах остаются). Если файл успели переделать
 # так, что нужный кусок не найден, — скрипт скажет об этом; исходники лежат в бэкапе.
 set -euo pipefail
+# сначала — тексты песен и cava (12.10), у них свой откат по бэкапам
+L="$(dirname "$(readlink -f "$0")")/yumi-lyrics-uninstall"   # архив yumi-uninstall или ~/.local/bin
+[ -x "$L" ] && "$L"
 B="$HOME/.local/share/yumi-player-backup"
 [ -f "$B/created_at" ] || { echo "Бэкап не найден: $B"; exit 1; }
 pkill -f "$HOME/.local/bin/yumi-player( |$)" 2>/dev/null || true

@@ -10,7 +10,7 @@
   YP_FAKE=1     (только с YP_DRYRUN) добавить выдуманные потоки и Bluetooth-наушники — для снимков
   YP_OPEN=rec | dev:<часть имени/описания> | move:<индекс потока> | moverec:<индекс>   сразу открыть подстраницу
   YP_TEST=actions   (только с YP_DRYRUN) прогнать действия меню и напечатать команды
-Откат: yumi-panel-uninstall"""
+Откат: yumi-uninstall panel"""
 import os
 import re
 import sys

@@ -1,0 +1,11 @@
+[Unit]
+Description=yumi-music: прокси WARP для SoundCloud (wireproxy, 127.0.0.1:40080)
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/wireproxy -c %h/.local/share/yumi-music/proxy/wireproxy.conf
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

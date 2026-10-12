@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Визуализатор cava в пилюле плеера Waybar (custom/player-cava, после custom/player-text).
+# Играет → 10 столбиков из PipeWire (класс playing); пауза → cava останавливается, ровная линия (paused);
+# ничего не играет → пустой текст, модуль скрыт вместе с пилюлей. Цвет — @yb-acc (yumi-accent, из обоев).
+# Откат: yumi-uninstall player
+export LANG=C.UTF-8 LC_ALL=C.UTF-8
+BARS=10
+conf=${XDG_RUNTIME_DIR:-/tmp}/waybar-player-cava.$$.conf   # свой на каждый экземпляр (два монитора — два)
+
+# слушаем «монитор» текущего выхода (то, что идёт в наушники/динамики) через pulse.
+# НЕ method = pipewire: с именем выхода он цепляется к микрофону, а микрофон Bluetooth-наушников
+# переводит их в режим гарнитуры (24 кГц моно) — музыка портится
+write_conf() {
+    # 40 кадров + сглаживание (monstercat — соседние столбики плавнее, noise_reduction — мягкий спад).
+    # 60 кадров стоили ~20 % ядра в Waybar и по 8 % на каждую cava
+    printf '%s\n' "[general]" "bars = $BARS" "framerate = 40" "autosens = 1" \
+        "[input]" "method = pulse" "source = $1" \
+        "[smoothing]" "monstercat = 1" "noise_reduction = 85" \
+        "[output]" "method = raw" "raw_target = /dev/stdout" "data_format = ascii" "ascii_max_range = 7" > "$conf"
+}
+
+dict='s/;//g;s/0/▁/g;s/1/▂/g;s/2/▃/g;s/3/▄/g;s/4/▅/g;s/5/▆/g;s/6/▇/g;s/7/█/g;'
+dict+='s/.*/{"text":"&","class":"playing"}/;'
+dict+='s/"text":"\(▁*\)","class":"playing"/"text":"\1","class":"quiet"/'   # тишина — бледная линия
+flat=$(printf '▁%.0s' $(seq $BARS))
+
+sink=""
+stop() { pkill -x -f -- "cava -p $conf" 2>/dev/null; sink=""; }   # sed закончится сам по концу потока
+trap 'stop; rm -f "$conf"; exit 0' EXIT TERM INT HUP
+
+last=""
+while :; do
+    st=$(playerctl -p playerctld status 2>/dev/null || playerctl status 2>/dev/null)
+    st=${st%%$'\n'*}
+    if [ "$st" = Playing ]; then
+        cur=$(pactl get-default-sink 2>/dev/null)
+        if [ "$cur" != "$sink" ] || ! pgrep -x -f -- "cava -p $conf" >/dev/null; then
+            stop
+            sink=$cur
+            write_conf "${sink:+$sink.monitor}"; [ -n "$sink" ] || write_conf auto
+            # uniq: одинаковые кадры (тишина, ровный звук) не перерисовывают Waybar
+            cava -p "$conf" 2>/dev/null | sed -u "$dict" | stdbuf -oL uniq &
+        fi
+        last=playing
+    else
+        [ -n "$sink" ] && stop
+        if [ "$st" = Paused ]; then out="{\"text\":\"$flat\",\"class\":\"paused\"}"; else out='{"text":"","class":"stopped"}'; fi
+        [ "$out" != "$last" ] && { printf '%s\n' "$out"; last=$out; }
+    fi
+    sleep 1
+done

@@ -1,0 +1,10 @@
+[Unit]
+Description=Предел зарядки аккумулятора (yumi-battery-limit apply)
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/yumi-battery-limit apply
+
+[Install]
+WantedBy=graphical-session.target

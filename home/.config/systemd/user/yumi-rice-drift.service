@@ -1,0 +1,7 @@
+[Unit]
+Description=yumi-rice: напомнить, если система ушла от репозитория
+ConditionPathExists=%h/Projects/yumi-rice/rice
+
+[Service]
+Type=oneshot
+ExecStart=%h/Projects/yumi-rice/rice drift --notify 20

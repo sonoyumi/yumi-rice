@@ -5,7 +5,7 @@
   • следит за значками фоновых программ (StatusNotifierItem), их статусом и названием;
   • пишет список в $XDG_RUNTIME_DIR/yumi-tray/items.json — его читают пилюля (yumi-tray bar) и меню.
 Значок программы — один глиф Nerd Font (карта GLYPHS ниже), неизвестные — 󰀻.
-Скрытые (уже есть свои пилюли Wi-Fi/Bluetooth): ~/.config/yumi-tray/hidden. Откат: yumi-tray-uninstall
+Скрытые (уже есть свои пилюли Wi-Fi/Bluetooth): ~/.config/yumi-tray/hidden. Откат: yumi-uninstall tray
 """
 import json
 import os

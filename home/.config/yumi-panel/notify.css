@@ -1,0 +1,106 @@
+/* yuminotify — список уведомлений «Центра управления». Только цвета @yp-* (wallbash),
+   подключается после style.css; классы ynl-* описаны в ~/.local/lib/yumi-panel/yuminotify.py */
+
+/* ── заголовок ── */
+.ynl-header { padding: 0 4px; }
+.ynl-title { font-size: 11pt; font-weight: 700; color: @yp-fg; }
+.ynl-badge {
+  font-size: 8.5pt; font-weight: 700;
+  min-width: 18px; padding: 0 6px;
+  border-radius: 9px;
+  background: alpha(@yp-accent, 0.25);
+  color: @yp-accent;
+}
+.ynl-clear {
+  background: @yp-btn; color: @yp-fg2;
+  border: none; box-shadow: none;
+  border-radius: 12px;
+  padding: 2px 12px; min-height: 24px;
+  font-size: 9.5pt;
+  transition: background 150ms;
+}
+.ynl-clear:hover { background: @yp-hover; color: @yp-fg; }
+.ynl-clear:disabled { opacity: 0.4; }
+
+.ynl-scroll, .ynl-scroll > viewport { background: transparent; }
+
+/* ── группа ── */
+.ynl-group { margin-bottom: 4px; }
+.ynl-group-head { padding: 2px 6px; }
+.ynl-group-icon { color: @yp-accent; }
+.ynl-group-name { font-size: 9pt; font-weight: 700; letter-spacing: 1px; color: alpha(@yp-fg2, 0.8); }
+.ynl-group-count { font-size: 9pt; color: alpha(@yp-fg2, 0.6); }
+
+/* ── карточка ── */
+.ynl-card {
+  background: @yp-btn;
+  border-radius: 16px;
+  padding: 10px 12px;
+  border: 1px solid transparent;
+  transition: background 150ms;
+}
+.ynl-card:hover { background: @yp-hover; }
+.ynl-card.ynl-critical {
+  border-color: alpha(#ed8796, 0.75);
+  background: alpha(#ed8796, 0.14);
+}
+.ynl-card.ynl-critical:hover { background: alpha(#ed8796, 0.24); }
+.ynl-card.ynl-low { opacity: 0.85; }
+
+.ynl-icon { color: @yp-accent; margin-top: 2px; }
+.ynl-icon.ynl-icon-image { border-radius: 10px; }
+
+.ynl-app  { font-size: 9pt; color: alpha(@yp-fg2, 0.8); }
+.ynl-time { font-size: 8.5pt; color: alpha(@yp-fg2, 0.6); }
+.ynl-summary { font-size: 10.5pt; font-weight: 700; color: @yp-fg; }
+.ynl-body { font-size: 9.5pt; color: alpha(@yp-fg, 0.82); }
+.ynl-critical .ynl-summary { color: #ed8796; }
+
+.ynl-close {
+  min-width: 20px; min-height: 20px;
+  padding: 0;
+  border-radius: 10px;
+  border: none; box-shadow: none;
+  background: transparent;
+  color: alpha(@yp-fg2, 0.7);
+  font-size: 9pt;
+  opacity: 0;
+  transition: opacity 150ms, background 150ms;
+}
+.ynl-card:hover .ynl-close { opacity: 1; }
+.ynl-close:hover { background: alpha(@yp-fg, 0.15); color: @yp-fg; }
+
+/* ── компактный режим ── */
+.ynl-compact .ynl-card { padding: 6px 10px; border-radius: 12px; }
+.ynl-compact .ynl-summary { font-size: 10pt; }
+.ynl-compact .ynl-body { font-size: 9pt; }
+
+/* ── пусто ── */
+.ynl-empty { padding: 18px 0; }
+.ynl-empty-icon { font-size: 26pt; color: alpha(@yp-fg2, 0.45); }
+.ynl-empty-text { font-size: 10.5pt; color: alpha(@yp-fg2, 0.7); }
+
+/* ── «Не беспокоить» и счётчик ── */
+.ynl-dnd {
+  background: @yp-btn;
+  border-radius: 16px;
+  padding: 6px 10px 6px 14px;
+}
+.ynl-dnd-icon { font-size: 13pt; color: @yp-accent; }
+.ynl-dnd-label { font-size: 11pt; color: @yp-fg; }
+.ynl-dnd.on { background: alpha(@yp-accent, 0.22); box-shadow: inset 0 0 0 1px alpha(@yp-accent, 0.6); }
+.ynl-dnd-switch { border-radius: 14px; background: alpha(@yp-fg, 0.18); border: none; min-height: 24px; }
+.ynl-dnd-switch:checked { background: @yp-accent; }
+.ynl-dnd-switch slider {
+  border-radius: 12px; min-width: 20px; min-height: 20px; margin: 2px;
+  background: @yp-fg; box-shadow: none;
+}
+.ynl-dnd-switch:checked slider { background: @yp-on-acc; }
+
+.ynl-count {
+  font-size: 9pt; font-weight: 700;
+  min-width: 18px; padding: 0 6px;
+  border-radius: 9px;
+  background: @yp-accent; color: @yp-on-acc;
+}
+.ynl-count.zero { background: alpha(@yp-fg, 0.15); color: alpha(@yp-fg2, 0.7); }

@@ -31,7 +31,7 @@
     "modules-center": ["group/pill#player"],
     "group/pill#player": {
         "orientation": "inherit",
-        "modules": ["image#player-cover", "custom/player-text"]
+        "modules": ["image#player-cover", "custom/player-text", "cffi/yumi-eq"]
     },
 
     // ===== Справа =====
@@ -80,6 +80,7 @@
         "format": "<span size='130%' rise='-1200' font_family='JetBrainsMono Nerd Font Propo'>󰍛</span> {usage}%",
         "min-length": 5,                 // restyle: ширина под 2 цифры, не прыгает
         "interval": 5,
+        "format-alt": null,              // клик не переключает вид (HyDE подмешивает столбики ▁▂▃▄), только меню
         "on-click": "@HOME@/.local/bin/yumi-menu-top"
     },
     "memory": {
@@ -112,7 +113,7 @@
         "exec-if": "pgrep -x swaync",
         "return-type": "json",
         "format": "{}",
-        "on-click": "@HOME@/.local/bin/cc-open"
+        "on-click": "@HOME@/.local/bin/yumi-menu-control"   // свой центр управления (08.10); откат: yumi-control-uninstall
     },
     "custom/clip": {
         "format": "<span size='130%' rise='-1200' font_family='JetBrainsMono Nerd Font Propo'>󰅌</span>",
@@ -159,10 +160,25 @@
         "format": "<span size='130%' rise='-1200' font_family='JetBrainsMono Nerd Font Propo'>{icon}</span> {volume}%",    // restyle
         "format-muted": "<span size='130%' rise='-1200' font_family='JetBrainsMono Nerd Font Propo'>󰝟</span>",             // restyle: вместо старого «婢»
         "min-length": 6,                 // restyle
-        "format-bluetooth": "<span size='130%' rise='-1200' font_family='JetBrainsMono Nerd Font Propo'>󱡏</span> {volume}%",
-        "format-bluetooth-muted": "<span size='130%' rise='-1200' font_family='JetBrainsMono Nerd Font Propo'>󱡏 󰝟</span>"
+        "format-bluetooth": "<span size='130%' rise='-1200' font_family='JetBrainsMono Nerd Font Propo'>{icon}</span> {volume}%",
+        "format-bluetooth-muted": "<span size='130%' rise='-1200' font_family='JetBrainsMono Nerd Font Propo'>{icon} 󰝟</span>",
+        // yumi 12.10: свои значки по имени выхода — AirPods Pro (шрифт YumiIcons, ~/.local/share/yumi-icons) и колонка на 3,5 мм;
+        // остальное — как в модуле HyDE. Откат: yumi-airpods-icon-uninstall
+        "format-icons": {
+            "bluez_output.98_1C_A2_DD_1F_EE.1": "<span font_family='YumiIcons'>\ue900</span><span font_family='YumiIcons' alpha='50%'>\ue901</span>",
+            "alsa_output.platform-sound.HiFi__Headphones__sink": "<span font_family='YumiIcons'>\ue902</span>",
+            "headphone": "󱡏",
+            "hands-free": "\uf025",
+            "headset": "\uf025",
+            "phone": "\uf095",
+            "portable": "\uf095",
+            "car": "\uf1b9",
+            "default": ["\uf026", "\uf027", "\uf028"]
+        }
     },
     "battery": {
+        "bat": "macsmc-battery",         // 11.10: только батарея ноутбука — батарея мыши (hidpp) при отключении хаба роняла Waybar
+        "adapter": "macsmc-ac",
         "format": "<span size='130%' rise='-1200' font_family='JetBrainsMono Nerd Font Propo'>{icon}</span> {capacity}%",
         "format-charging": "<span size='130%' rise='-1200' font_family='JetBrainsMono Nerd Font Propo'>󰂄</span> {capacity}%",
         "format-plugged": "<span size='130%' rise='-1200' font_family='JetBrainsMono Nerd Font Propo'>󰚥</span> {capacity}%",
@@ -209,8 +225,8 @@
         "on-click": "@HOME@/.local/bin/yumi-player toggle --bar",
         "on-click-middle": "playerctl play-pause",
         "on-click-right": "playerctl next",
-        "on-scroll-up": "playerctl position 5+",
-        "on-scroll-down": "playerctl position 5-"
+        "on-scroll-up": "@HOME@/.local/bin/player-seek 5",
+        "on-scroll-down": "@HOME@/.local/bin/player-seek -5"
     },
     "custom/player-text": {
         "exec": "@HOME@/.local/bin/waybar-iconwrap @HOME@/.local/bin/waybar-player-pill",
@@ -220,8 +236,23 @@
         "on-click": "@HOME@/.local/bin/yumi-player toggle --bar",
         "on-click-middle": "playerctl play-pause",
         "on-click-right": "playerctl next",
-        "on-scroll-up": "playerctl position 5+",
-        "on-scroll-down": "playerctl position 5-"
+        "on-scroll-up": "@HOME@/.local/bin/player-seek 5",
+        "on-scroll-down": "@HOME@/.local/bin/player-seek -5"
+    },
+    // Эквалайзер yumi-eq (CFFI-модуль на C, ~/.local/src/yumi-eq): рисует прямо в пилюле, одна cava на оба
+    // монитора, только пока играет; цвета @yb-acc/@yb-acc5 из обоев. Клики — как у всей пилюли.
+    "cffi/yumi-eq": {
+        "module_path": "@HOME@/.config/waybar/cffi/yumi-eq.so",
+        "style": "classic",
+        "bars": 10,
+        "bar-width": 3,
+        "gap": 2,
+        "height": 16,
+        "on-click": "@HOME@/.local/bin/yumi-player toggle --bar",
+        "on-click-middle": "playerctl play-pause",
+        "on-click-right": "playerctl next",
+        "on-scroll-up": "@HOME@/.local/bin/player-seek 5",
+        "on-scroll-down": "@HOME@/.local/bin/player-seek -5"
     },
     "custom/mouse": {
         "exec": "@HOME@/.local/bin/waybar-iconwrap @HOME@/.local/bin/waybar-mouse",

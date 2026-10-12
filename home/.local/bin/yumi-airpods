@@ -1,0 +1,334 @@
+#!/usr/bin/env python3
+"""yumi-airpods — фоновая служба AirPods: двойное нажатие ножки → следующий трек, тройное → предыдущий;
+наушник вынули из уха → пауза, оба снова в ушах → продолжить (~/.config/yumi-panel/airpods.json,
+"pause_on_removal": true/false — перечитывается на лету); экран заблокирован (появился hyprlock) →
+пауза и отключение AirPods, чтобы их подхватил айфон ("handoff_on_lock" там же).
+По обычному Bluetooth (AVRCP) AirPods Pro 2 на Linux шлют на любое нажатие только «play», поэтому
+нажатия читаются по протоколу Apple AAP: при каждом подключении наушникам отправляется настройка 0x39
+(маска 0x06 — двойное + тройное), и они шлют пакет 0x19. Одиночное нажатие остаётся обычным play/pause.
+Нужен спуф производителя в /etc/bluetooth/main.conf: DeviceID = bluetooth:004C:0000:0000.
+
+Канал AAP может держать только одна программа, поэтому служба отдаёт его через сокет aap.relay_path(mac):
+меню yumi-menu-bluetooth (aap.Session) подключается туда, получает последние пакеты и дальше всё
+пересылается в обе стороны.
+  yumi-airpods            работать (systemd: yumi-airpods.service)
+  YP_DRYRUN=1             нажатия только печатаются, playerctl не вызывается
+Откат: yumi-uninstall airpods"""
+import os
+import re
+import select
+import socket
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-panel"))
+import aap  # noqa: E402
+
+DRY = os.environ.get("YP_DRYRUN") == "1"
+POLL_S = 3.0
+LOCK_POLL_S = 2.0                                 # как часто проверять, не заблокирован ли экран (hyprlock)
+STEM_MASK = 0x06                                  # 0x02 двойное | 0x04 тройное
+SILENT_S, SILENT_TRIES = 3.0, 3                   # канал открыт, а наушники молчат (вернулись с айфона и
+                                                  # пропустили рукопожатие) — повторить, потом переоткрыть
+ACTIONS = {"double": ("next",), "triple": ("previous",)}
+UUID_RE = re.compile(r"\(([0-9a-f-]{36})\)")
+
+
+def log(*args):
+    print(time.strftime("%T"), *args, flush=True)
+
+
+def connected_airpods():
+    """MAC первых подключённых AirPods или None."""
+    try:
+        out = subprocess.run(["bluetoothctl", "devices", "Connected"], capture_output=True, text=True,
+                             timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) < 2 or parts[0] != "Device":
+            continue
+        try:
+            info = subprocess.run(["bluetoothctl", "info", parts[1]], capture_output=True, text=True,
+                                  timeout=5).stdout
+        except (OSError, subprocess.SubprocessError):
+            continue
+        modalias = next((ln.split(":", 1)[1].strip() for ln in info.splitlines()
+                         if ln.strip().startswith("Modalias:")), "")
+        if aap.is_airpods(modalias, UUID_RE.findall(info.lower())):
+            return parts[1]
+    return None
+
+
+def cache_key(data):
+    """Какие пакеты запоминать для новых клиентов: последняя батарея/уши/сведения и каждая настройка."""
+    if not data.startswith(aap.HDR) or len(data) < 6:
+        return None
+    op = int.from_bytes(data[4:6], "little")
+    if op in (aap.OP_BATTERY, aap.OP_EAR, aap.OP_DEVINFO):
+        return op
+    if op == aap.OP_CONTROL and len(data) > 6:
+        return (op, data[6])
+    return None
+
+
+def on_stem(data):
+    if len(data) < 7:
+        return
+    press = aap.STEM_PRESS.get(data[6])
+    args = ACTIONS.get(press)
+    log("нажатие:", press or f"0x{data[6]:02x}", "→", " ".join(args) if args else "—")
+    if args and not DRY:
+        subprocess.Popen(["playerctl", *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def on_ear(data, ear_pause):
+    """Наушник вынули — пауза, оба снова в ушах — продолжить (как на айфоне). Выключается в airpods.json."""
+    if len(data) < 8 or not aap.load_prefs()["pause_on_removal"]:
+        return
+    ear = {"primary": data[6], "secondary": data[7]}
+    log("уши:", {k: aap.EAR_STATE.get(v, v) for k, v in ear.items()})
+    ear_pause.update(ear)
+
+
+def screen_locked():
+    return subprocess.run(["pgrep", "-x", "hyprlock"], stdout=subprocess.DEVNULL).returncode == 0
+
+
+RESUME = []                                # плееры, поставленные на паузу при блокировке
+
+
+def playing_players():
+    try:
+        names = subprocess.run(["playerctl", "-l"], capture_output=True, text=True, timeout=3).stdout.split()
+        return [n for n in names if subprocess.run(["playerctl", "-p", n, "status"], capture_output=True,
+                                                   text=True, timeout=3).stdout.strip() == "Playing"]
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+
+def handoff(mac):
+    """Экран заблокирован — отдать AirPods айфону: пауза (иначе звук уйдёт в динамики) и отключение."""
+    if not aap.load_prefs()["handoff_on_lock"]:
+        return
+    log("экран заблокирован → пауза и отключение AirPods (айфон их подхватит)")
+    if DRY:
+        return
+    RESUME[:] = playing_players()           # их и продолжим, когда AirPods вернутся на ноутбук
+    subprocess.run(["playerctl", "-a", "pause"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
+    subprocess.run(["bluetoothctl", "disconnect", mac], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                   timeout=10)
+
+
+def resume():
+    """Как на маке: AirPods вернулись на ноутбук (экран не заблокирован) — продолжить то, что поставили на паузу
+    при блокировке."""
+    if not RESUME or screen_locked():
+        return
+    time.sleep(0.5)
+    log("продолжаю:", ", ".join(RESUME))
+    for p in RESUME:
+        subprocess.run(["playerctl", "-p", p, "play"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=3)
+    RESUME.clear()
+
+
+def local_mac():
+    try:
+        out = subprocess.run(["bluetoothctl", "show"], capture_output=True, text=True, timeout=5).stdout
+        return out.split()[1].upper()
+    except (OSError, subprocess.SubprocessError, IndexError):
+        return None
+
+
+class Takeover:
+    """Мультиточка: AirPods подключились к ноутбуку, а айфон тоже на связи — звук и нажатия остаются у айфона,
+    а ноутбуку наушники не шлют вообще ничего. Поэтому забираем их сразу при открытии канала, по адресу айфона
+    из airpods.json (iphone_mac), и ещё раз — если в списке 0x2E увидим другое устройство (как librepods):
+    владею → «хост играет» → hijack. Не чаще раза за Bluetooth-подключение и не при заблокированном экране."""
+
+    taken = False                          # уже забирали в этом Bluetooth-подключении (сбрасывает main)
+
+    RETRY_S, TRIES = 4.0, 3                # не подтвердили «владение: ноутбук» — повторить (наушники бывают заняты)
+
+    def __init__(self, sock):
+        self.sock, self.me = sock, local_mac()
+        self.target, self.tries, self.sent_at, self.owned = None, 0, 0.0, False
+
+    def grab(self, target, why):
+        if Takeover.taken or not self.me or screen_locked():
+            return
+        Takeover.taken = True
+        self.target, self.tries = target, 0
+        log(f"забираю AirPods у {target} ({why})")
+        self._send()
+
+    def _send(self, again=False):
+        self.tries += 1
+        self.sent_at = time.monotonic()
+        if DRY:
+            return
+        pkts = [aap.set_packet(aap.S_OWNS, 0x01), aap.media_info_packet(self.me, self.target),
+                aap.hijack_packet(self.target)]
+        if again:                          # заново представиться: рукопожатие, уведомления, нажатия ножки
+            pkts = [aap.HANDSHAKE, aap.SET_SPECIFIC_FEATURES, aap.REQ_NOTIFICATIONS,
+                    aap.set_packet(aap.S_STEM, STEM_MASK)] + pkts
+        for pkt in pkts:
+            self.sock.send(pkt)
+            time.sleep(0.15)
+
+    def tick(self):
+        """Из цикла serve: захват без подтверждения — повторить, пока не кончились попытки."""
+        if self.target and not self.owned and self.tries < self.TRIES \
+                and time.monotonic() - self.sent_at >= self.RETRY_S and not screen_locked():
+            log(f"наушники не подтвердили владение — повтор {self.tries + 1}/{self.TRIES}")
+            self._send(again=True)
+
+    def start(self):
+        iphone = aap.load_prefs()["iphone_mac"]
+        if iphone:
+            self.grab(iphone, "при подключении")
+
+    def packet(self, op, data):
+        if op == aap.OP_CONNECTED:
+            devs = aap.connected_devices(data)
+            log("на связи у AirPods:", ", ".join(devs) or "—")
+            others = [d for d in devs if d != self.me]
+            if others:
+                self.grab(others[0], "в списке устройств")
+        elif op == aap.OP_AUDIO_SOURCE:
+            src = aap.audio_source(data)
+            if src:
+                log("источник звука:", src[0], {0: "нет", 1: "звонок", 2: "медиа"}.get(src[1], src[1]))
+        elif op == aap.OP_SMART_ROUTING_RESP:
+            log("smart routing:", "".join(c if 32 <= ord(c) < 127 else " " for c in data[8:].decode("latin-1")).split()[:12])
+        elif op == aap.OP_CONTROL and len(data) > 7 and data[6] == aap.S_OWNS:
+            self.owned = bool(data[7])
+            log("владение:", "ноутбук" if data[7] else "другое устройство")
+
+
+def serve(mac):
+    """Держать канал AAP, пока наушники на связи. Возврат — канал закрылся."""
+    ear_pause = aap.EarPause(dry=DRY)
+    was_locked = screen_locked()          # уже заблокирован при подключении — не отдаём
+    s = aap.open_l2cap(mac, extra=(aap.set_packet(aap.S_STEM, STEM_MASK),))
+    s.setblocking(False)
+    path = aap.relay_path(mac)
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    lst = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    lst.bind(path)
+    os.chmod(path, 0o600)
+    lst.listen(4)
+    cache, clients = {}, []
+    takeover = Takeover(s)
+    heard, hs_tries, hs_at = False, 0, time.monotonic()
+    log("канал AAP открыт:", mac)
+    takeover.start()
+    resume()
+
+    def drop(c):
+        clients.remove(c)
+        c.close()
+
+    try:
+        while True:
+            ready, _, _ = select.select([s, lst, *clients], [], [], LOCK_POLL_S)
+            locked = screen_locked()
+            if locked and not was_locked:
+                takeover.target = None         # отдаём айфону — никаких повторов захвата
+                handoff(mac)
+            elif was_locked and not locked:
+                takeover.start()               # наушники вернулись, пока экран был заблокирован
+                resume()
+            was_locked = locked
+            takeover.tick()
+            if not heard and not locked and time.monotonic() - hs_at >= SILENT_S:
+                if hs_tries >= SILENT_TRIES:
+                    raise OSError("наушники не отвечают — переоткрываю канал AAP")
+                hs_tries += 1
+                hs_at = time.monotonic()
+                log(f"наушники молчат — повтор рукопожатия {hs_tries}/{SILENT_TRIES}")
+                for pkt in (aap.HANDSHAKE, aap.SET_SPECIFIC_FEATURES, aap.REQ_NOTIFICATIONS,
+                            aap.set_packet(aap.S_STEM, STEM_MASK)):
+                    s.send(pkt)
+                    time.sleep(0.15)
+            if s in ready:
+                while True:
+                    try:
+                        data = s.recv(8192)
+                    except BlockingIOError:
+                        break
+                    if not data:
+                        raise OSError("канал закрыт наушниками")
+                    heard = True
+                    key = cache_key(data)
+                    if key is not None:
+                        cache[key] = data
+                    op = int.from_bytes(data[4:6], "little") if data.startswith(aap.HDR) else None
+                    if op == aap.OP_STEM:
+                        on_stem(data)
+                    elif op == aap.OP_EAR:
+                        on_ear(data, ear_pause)
+                    else:
+                        takeover.packet(op, data)
+                    for c in list(clients):
+                        try:
+                            c.send(data)
+                        except OSError:
+                            drop(c)
+            if lst in ready:
+                c, _ = lst.accept()
+                try:
+                    for pkt in cache.values():
+                        c.send(pkt)
+                    clients.append(c)
+                except OSError:
+                    c.close()
+            for c in [c for c in clients if c in ready]:
+                try:
+                    data = c.recv(8192)
+                except OSError:
+                    data = b""
+                if not data:
+                    drop(c)
+                    continue
+                s.send(data)                       # настройки из меню — наушникам как есть
+    finally:
+        for c in clients:
+            c.close()
+        lst.close()
+        s.close()
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+
+
+def main():
+    last_err = None
+    while True:
+        mac = connected_airpods()
+        if not mac:
+            Takeover.taken = False             # наушники отключились — при следующем подключении забрать снова
+        if mac:
+            try:
+                serve(mac)
+                last_err = None
+            except OSError as e:
+                kind, msg = aap.explain(e)
+                if msg != last_err:
+                    log(msg)
+                    last_err = msg
+        time.sleep(POLL_S)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass

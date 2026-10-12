@@ -7,7 +7,7 @@
   • одно окно на меню (повторный вызов закрывает), Esc и уход мыши закрывают.
 
 Меню — отдельный скрипт: создаёт PanelApp(id, title, icon, build), где build(panel, body) наполняет body.
-Стиль: ~/.config/yumi-panel/style.css. Откат: yumi-panel-uninstall
+Стиль: ~/.config/yumi-panel/style.css. Откат: yumi-uninstall panel
 """
 import os
 import sys
@@ -160,6 +160,9 @@ class Panel(Gtk.ApplicationWindow):
         self.rect_age = 0
         if mode == "bar" and not os.environ.get("YP_STAY"):
             GLib.timeout_add(250, self._watch_cursor)
+        # щелчок мимо меню закрывает его (не в тестах без клавиатуры и не с YP_STAY)
+        if os.environ.get("YP_KEYBOARD") != "none" and not os.environ.get("YP_STAY"):
+            watch_mouse_clicks(self._click_outside)
 
     # ---------- окно ----------
     def setup_layer(self):
@@ -396,6 +399,30 @@ class Panel(Gtk.ApplicationWindow):
         if shape != self.shape:
             self.shape = shape
             self.get_surface().set_input_region(cairo.Region(cairo.RectangleInt(*shape)))
+
+    def _click_outside(self):
+        """Нажата кнопка мыши: если курсор не над меню и не над Waybar — закрыть меню."""
+        if self.busy or not self.get_mapped():
+            return
+        cur = hypr("j/cursorpos")
+        layers = hypr("j/layers") or {}
+        if not cur:
+            return
+        cx, cy = cur.get("x", 0), cur.get("y", 0)
+        inside = False
+        for mon in layers.values():
+            for lv in mon.get("levels", {}).values():
+                for l in lv:
+                    x, y, w, h = l["x"], l["y"], l["w"], l["h"]
+                    if l.get("pid") == os.getpid() and l.get("namespace") == "yumi-panel" and self.shape:
+                        sx, sy, sw, sh = self.shape          # окно во всю высоту — считаем по самой рамке
+                        x, y, w, h = x + sx, y + sy, sw, sh
+                    elif l.get("namespace") != "waybar":       # щелчок по бару — его пилюли сами закрывают меню
+                        continue
+                    if x <= cx <= x + w and y <= cy <= y + h:
+                        inside = True
+        if not inside:
+            self.app.quit()
 
     def on_enter(self, *_):
         self.entered = True
@@ -642,6 +669,46 @@ def hotkey_char(keyval):
     ru = "йцукенгшщзхъфывапролджэячсмитьбю"
     en = "qwertyuiop[]asdfghjkl;'zxcvbnm,."
     return en[ru.index(ch)] if ch and ch in ru else ch
+
+
+def watch_mouse_clicks(on_press):
+    """Нажатия кнопок мыши прямо с устройств (/dev/input, группа input), чтобы закрыть меню щелчком мимо.
+    Слой-перехватчик не подходит: Hyprland не отдаёт щелчки прозрачному слою. Щелчок при этом проходит
+    дальше, к окну под курсором. on_press() вызывается в главном потоке."""
+    import struct
+    import threading
+    devs = []
+    try:
+        block = ""
+        for line in open("/proc/bus/input/devices").read().split("\n") + [""]:
+            if line.strip():
+                block += line + "\n"
+                continue
+            m = re.search(r"Handlers=.*\bmouse\d+.*\b(event\d+)", block)
+            if m and "Touch Bar" not in block:
+                devs.append("/dev/input/" + m.group(1))
+            block = ""
+    except OSError:
+        return
+    fmt = "llHHi"                          # struct input_event (64-бит): время, type, code, value
+    size = struct.calcsize(fmt)
+
+    def reader(path):
+        try:
+            fd = os.open(path, os.O_RDONLY)
+        except OSError:
+            return
+        while True:
+            try:
+                data = os.read(fd, size * 16)
+            except OSError:
+                return
+            for i in range(0, len(data) - size + 1, size):
+                _s, _u, typ, code, val = struct.unpack_from(fmt, data, i)
+                if typ == 1 and code in (0x110, 0x111, 0x112) and val == 1:   # EV_KEY: левая/правая/средняя нажата
+                    GLib.idle_add(lambda: on_press() or False)
+    for d in devs:
+        threading.Thread(target=reader, args=(d,), daemon=True).start()
 
 
 class PanelApp(Gtk.Application):

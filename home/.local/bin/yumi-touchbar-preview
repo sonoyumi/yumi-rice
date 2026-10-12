@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# yumi-touchbar-preview — снимки всех стилей встроенным рендером touchbard (без железа):
+#   картинки ~/Pictures/touchbar-styles/*.png и общий лист all.png
+SRC="$HOME/.cache/touchbard-src"; BIN="${TOUCHBARD_BIN:-$SRC/daemon/target/release/touchbard}"
+[ -x "$BIN" ] || BIN=/usr/local/bin/touchbard
+[ -x "$BIN" ] || { echo "Нет touchbard: соберите (cd $SRC/daemon && cargo build --release)"; exit 1; }
+OUT="$HOME/Pictures/touchbar-styles"; W=$(mktemp -d); mkdir -p "$OUT"
+# что играет сейчас — для блока «сейчас играет» на снимке (обложка → png)
+title=$(playerctl metadata xesam:title 2>/dev/null || echo "Трек"); artist=$(playerctl metadata xesam:artist 2>/dev/null)
+python3 -c 'import json,sys; json.dump({"title":sys.argv[1],"artist":sys.argv[2],"playing":True,"position":65,"length":201,"volume":0.6,"brightness":0.7},open(sys.argv[3],"w"),ensure_ascii=False)' "$title" "$artist" "$W/state.json"
+art=$(playerctl metadata mpris:artUrl 2>/dev/null | sed 's|^file://||'); ART=()
+[ -f "$art" ] && magick "$art" -resize 120x120 "$W/art.png" 2>/dev/null && ART=("art=$W/art.png")
+for f in "$HOME"/.config/touchbar/styles/*.toml; do
+    n=$(basename "$f" .toml); mkdir -p "$W/$n/touchbar"; cp "$f" "$W/$n/touchbar/config.toml"
+    ln -sfn "$HOME/.config/touchbar/plugins" "$W/$n/touchbar/plugins"
+    XDG_CONFIG_HOME="$W/$n" python3 "$SRC/agent/touchbar-agent" --dump-layout > "$W/$n/layout.json"
+    XDG_CONFIG_HOME="$W/$n" python3 "$SRC/agent/touchbar-agent" --dump-theme > "$W/$n/theme.json"
+    "$BIN" --preview "$OUT/$n.png" "$W/$n/layout.json" "$W/$n/theme.json" "state=$W/state.json" "${ART[@]}" bars=48 && echo "✓ $n"
+    "$BIN" --preview "$OUT/$n-apps.png" "$W/$n/layout.json" "$W/$n/theme.json" layer=apps >/dev/null 2>&1
+done
+magick $(ls "$OUT"/[1-5]-*.png | grep -v -- -apps) "$OUT"/1-*-apps.png -background "#202020" -splice 0x14 -append "$OUT/all.png" 2>/dev/null && echo "лист: $OUT/all.png"
+rm -rf "$W"

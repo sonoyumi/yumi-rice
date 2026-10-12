@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# yumi-touchbar-style — выбрать стиль тачбара (touchbard): yumi-touchbar-style [N|имя]
+#   без аргумента — список стилей и текущий;  N — 1…5 или часть имени (mac, latte…)
+# Стили: ~/.config/touchbar/styles/*.toml → копируется в ~/.config/touchbar/config.toml (агент применяет сразу).
+S="$HOME/.config/touchbar/styles"; C="$HOME/.config/touchbar/config.toml"; CUR="$HOME/.config/touchbar/.style"
+if [ -z "${1:-}" ]; then
+    for f in "$S"/*.toml; do n=$(basename "$f" .toml); d=$(sed -n '1s/^# Стиль тачбара «\([^»]*\)».*— \(.*\)$/\1 — \2/p' "$f")
+        mark=" "; [ "$(cat "$CUR" 2>/dev/null)" = "$n" ] && mark="▶"; echo "$mark ${n%%-*}. $d"; done
+    exit 0
+fi
+f=$(ls "$S"/*.toml | grep -iE "/${1}[-.]|${1}" | head -1)
+[ -f "$f" ] || { echo "Нет такого стиля: $1"; exit 1; }
+[ -f "$C" ] && [ ! -f "$C.bak-before-styles" ] && cp -a "$C" "$C.bak-before-styles"
+cp "$f" "$C.tmp" && mv "$C.tmp" "$C"
+basename "$f" .toml > "$CUR"
+notify-send -a "Тачбар" -i input-touchpad "Тачбар: стиль $(basename "$f" .toml)" "$(sed -n '1s/^# Стиль тачбара «\([^»]*\)».*/\1/p' "$f")" 2>/dev/null
+echo "Стиль: $(basename "$f" .toml)"

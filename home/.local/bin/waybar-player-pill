@@ -2,7 +2,7 @@
 # Текст пилюли плеера в Waybar (custom/player-text): «Название — Артист  1:23/3:39».
 # Раз в секунду один запрос к playerctl (без --follow: браузер шлёт пачки событий при смене трека).
 # Ничего не играет → пустой текст, модуль скрыт (вместе с обложкой image#player-cover).
-# При смене трека/статуса будит обложку сигналом 14. Откат: yumi-player-uninstall
+# При смене трека/статуса будит обложку сигналом 14. Откат: yumi-uninstall player
 export LANG=C.UTF-8 LC_ALL=C.UTF-8   # playerctl ломается на кириллице и «—» без UTF-8
 MAX=30                               # длина «Название — Артист» вместе с «…»
 
@@ -11,14 +11,28 @@ esc() { local s=$1; s=${s//&/&amp;}; s=${s//</&lt;}; s=${s//>/&gt;}; printf '%s'
 json() { local s=$1; s=${s//\\/\\\\}; s=${s//\"/\\\"}; s=${s//$'\n'/\\n}; s=${s//$'\t'/ }; printf '%s' "$s"; }
 cut_to() { local s=$1 n=$2; (( ${#s} > n )) && s="${s:0:n-1}…"; printf '%s' "$s"; }
 
-last="" key_prev=""
+last="" key_prev="" url_prev="" clean=""
+META=${XDG_CACHE_HOME:-$HOME/.cache}/yumi-music/meta.tsv   # пишет yumi-music (см. yumimeta.py)
 while :; do
     # разделитель \x1f, а не таб: пустые поля (нет артиста) не должны схлопываться
-    IFS=$'\x1f' read -r st title artist pos len art < <(playerctl -p playerctld metadata --format \
-        $'{{status}}\x1f{{title}}\x1f{{artist}}\x1f{{position}}\x1f{{mpris:length}}\x1f{{mpris:artUrl}}' 2>/dev/null)
+    IFS=$'\x1f' read -r st title artist pos len art url < <(playerctl -p playerctld metadata --format \
+        $'{{status}}\x1f{{title}}\x1f{{artist}}\x1f{{position}}\x1f{{mpris:length}}\x1f{{mpris:artUrl}}\x1f{{xesam:url}}' 2>/dev/null)
     if [ -z "$st" ]; then   # playerctld иногда теряет активный плеер — спросить первый попавшийся напрямую
-        IFS=$'\x1f' read -r st title artist pos len art < <(playerctl metadata --format \
-            $'{{status}}\x1f{{title}}\x1f{{artist}}\x1f{{position}}\x1f{{mpris:length}}\x1f{{mpris:artUrl}}' 2>/dev/null)
+        IFS=$'\x1f' read -r st title artist pos len art url < <(playerctl metadata --format \
+            $'{{status}}\x1f{{title}}\x1f{{artist}}\x1f{{position}}\x1f{{mpris:length}}\x1f{{mpris:artUrl}}\x1f{{xesam:url}}' 2>/dev/null)
+    fi
+    # трек yumi-music: настоящие артист/название из meta.tsv (mpv отдаёт ник SoundCloud / канал YouTube).
+    # Ищем только при смене трека — не каждую секунду
+    if [ "$url" != "$url_prev" ]; then
+        url_prev=$url clean=""
+        if [[ $url =~ [?\&]v=([A-Za-z0-9_-]+) ]]; then mkey=${BASH_REMATCH[1]}
+        elif [[ $url =~ ^https?://[a-z.]*soundcloud\.com/ ]]; then mkey=${url//[^A-Za-z0-9]/_}; mkey=${mkey:0:120}
+        else mkey=""; fi
+        [ -n "$mkey" ] && [ -r "$META" ] && clean=$(awk -F'\t' -v k="$mkey" '$1 == k { print $2 "\x1f" $3; exit }' "$META")
+    fi
+    if [ -n "$clean" ]; then
+        IFS=$'\x1f' read -r c_artist c_title <<< "$clean"
+        [ -n "$c_title" ] && { title=$c_title; artist=$c_artist; }
     fi
     key="$st|$art"
     if [ "$key" != "$key_prev" ]; then
@@ -39,7 +53,7 @@ while :; do
         fi
         tm=""
         [[ $len =~ ^[0-9]+$ ]] && (( len > 0 )) && tm="  <span alpha='70%'>$(t "${pos%.*}")/$(t "$len")</span>"
-        case ${name,,} in firefox*) src="󰈹 Firefox" ;; spotify*) src="󰓇 Spotify" ;; mpv*) src="󰐹 mpv" ;; *) src="󰝚 $name" ;; esac
+        case ${name,,} in zen*) src="󰖟 Zen" ;; firefox*) src="󰈹 Firefox" ;; spotify*) src="󰓇 Spotify" ;; mpv*) src="󰐹 mpv" ;; *) src="󰝚 $name" ;; esac
         tip="$(esc "$title")"; [ -n "$artist" ] && tip+=$'\n'"$(esc "$artist")"
         tip+=$'\n'"<span alpha='70%'>$src · $([ "$st" = Playing ] && echo играет || echo пауза)</span>"
         out="{\"text\":\"$(json "$(esc "$s")$tm")\",\"tooltip\":\"$(json "$tip")\",\"class\":\"${st,,}\"}"

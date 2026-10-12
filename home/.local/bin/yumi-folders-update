@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Перекрасить папки темы Yumi-Folders в цвета текущих обоев.
+# Вызывается хуком wallbash (~/.config/hyde/wallbash/always/yumi-folders.dcol) при смене обоев.
+# Откат: yumi-uninstall folders
+set -euo pipefail
+cacheDir="${cacheDir:-${XDG_CACHE_HOME:-$HOME/.cache}/hyde}"
+PAL="${cacheDir}/wallbash/yumi-folders"
+[[ -r "$PAL" ]] || PAL="${cacheDir}/wall.dcol"
+D="$HOME/.local/share/yumi-folders"
+T="$HOME/.local/share/icons/Yumi-Folders"
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/yumi-folders.lock"; flock -n 9 || exit 0
+python3 -I "$D/recolor.py" "$PAL" "$D/src" "$T/places/scalable"
+gtk-update-icon-cache -f -q -t "$T" 2>/dev/null || true
+rm -f "${XDG_CACHE_HOME:-$HOME/.cache}/icon-cache.kcache"
+# программы KDE (Dolphin) слушают этот сигнал и перечитывают значки
+dbus-send --session --type=signal /KIconLoader org.kde.KIconLoader.iconChanged int32:0 2>/dev/null || true

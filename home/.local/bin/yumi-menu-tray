@@ -3,7 +3,7 @@
   yumi-menu-tray [--bar|--center|--close]
 Строка программы — показать окно (Activate), кнопка 󰇙 — пункты меню самой программы (dbusmenu:
 «Настройки», «Выход»…). Список обновляется сам (демон yumi-tray). Проверка: YP_DRYRUN=1,
-YUMI_TRAY_OPEN=<имя> — сразу открыть меню этой программы. Откат: yumi-tray-uninstall"""
+YUMI_TRAY_OPEN=<имя> — сразу открыть меню этой программы. Откат: yumi-uninstall tray"""
 import os
 import re
 import sys

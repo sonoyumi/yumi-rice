@@ -1,0 +1,12 @@
+[Unit]
+Description=Touch Bar session agent (theme, layout, volume, Touch ID prompts)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/local/bin/touchbar-agent
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

@@ -26,10 +26,11 @@
     "wallBash.autoUpdate": false,
     "editor.fontSize": 12,
     "github.copilot.enable": {
-        "*": false,
+        "*": true,
         "plaintext": false,
         "markdown": false,
-        "scminput": false,
-        "python": false
-    }
+        "scminput": false
+    },
+    "explorer.confirmDelete": false,
+    "python.createEnvironment.trigger": "off"
 }

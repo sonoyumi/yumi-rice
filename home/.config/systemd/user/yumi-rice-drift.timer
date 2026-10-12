@@ -1,0 +1,10 @@
+[Unit]
+Description=yumi-rice: раз в день проверить расхождение системы и репозитория
+# Откат: systemctl --user disable --now yumi-rice-drift.timer
+
+[Timer]
+OnCalendar=*-*-* 20:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

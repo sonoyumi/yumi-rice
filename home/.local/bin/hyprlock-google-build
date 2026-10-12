@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """hyprlock-google-build — собрать yumi-google.conf из шаблона yumi-google.base.tmpl.
 Каждый элемент копируется на каждый монитор со своим масштабом (размеры, позиции, шрифты).
-Мониторы и масштабы — в MONITORS. Откат: hyprlock-google-uninstall"""
+Мониторы и масштабы — в MONITORS. Откат: yumi-uninstall hyprlock-google"""
 import os, re, json, subprocess
 
 D = os.path.expanduser('~/.config/hypr/hyprlock')

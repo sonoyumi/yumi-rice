@@ -1,0 +1,10 @@
+[Unit]
+Description=yumi-music: синхронизация плейлистов (SoundCloud, Apple Music, совместный)
+After=network-online.target yumi-music-proxy.service
+Wants=yumi-music-proxy.service
+
+[Service]
+Type=oneshot
+ExecStart=@HOME@/.local/bin/yumi-music sync
+Nice=10
+TimeoutStartSec=30min

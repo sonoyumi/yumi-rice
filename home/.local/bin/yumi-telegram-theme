@@ -12,7 +12,7 @@
 Основа — встроенная ночная тема tdesktop v7.2.9 (~/.local/lib/yumi-telegram/base.colors): все её
 голубые тона переводятся в оттенок обоев (OKLCH: светлота сохраняется, меняются тон и насыщенность),
 ссылки/активное — акцент yumi-accent; пары текст/фон доводятся до контраста ≥ 4.5.
-Откат: yumi-telegram-uninstall"""
+Откат: yumi-uninstall telegram"""
 import base64
 import hashlib
 import io
@@ -401,12 +401,12 @@ def notify_flow():
             if cur.get("ok") and cur.get("path") == OUT:
                 res = apply_now()
                 if res.get("ok"):
-                    notify("Тема Telegram обновлена", "Цвета подстроены под новые обои.", timeout_ms=4000)
-                    return 0
-        body = "Цвета под новые обои готовы. «Применить» — Telegram сразу перекрасится " \
+                    return 0                       # всё получилось — без уведомления (только ошибки)
+        # автоматически не вышло (тема в Telegram сменена вручную, автоматизация выключена, ошибка) — спросить
+        body = "Новые цвета не применились сами. «Применить» — Telegram перекрасится " \
                "(вернуть прежнюю можно в его подсказке «Undo»)."
         for i in range(4):
-            if notify("Тема Telegram обновлена", body, "apply=Применить", urgent=i > 0) != "apply":
+            if notify("Telegram: тема не обновилась", body, "apply=Применить", urgent=i > 0) != "apply":
                 return 0
             res = apply_now()
             if res.get("ok"):

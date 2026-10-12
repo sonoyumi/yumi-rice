@@ -9,7 +9,7 @@ YP_DRYRUN=1 — действия, меняющие состояние (пита�
 YP_BT_PAGE — сразу открыть подстраницу (для проверки/снимков), см. debug_page().
 AirPods (Apple, AAP): на странице подключённых наушников — батарея Л/П/кейс, режим шумоподавления,
 восприятие разговора, ношение (модуль aap.py). YP_BT_AAP_DEMO=1 (вместе с YP_DRYRUN=1) — имитация наушников.
-Откат: yumi-panel-uninstall"""
+Откат: yumi-uninstall panel"""
 import os
 import re
 import select

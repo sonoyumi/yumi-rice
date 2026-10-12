@@ -61,11 +61,13 @@ hl.config({
 	general = {
 			layout = "dwindle",
 			},
-		--master = {
-		--mfact = 0.60,          -- главное окно = 70% экрана
-		--orientation = "left",  -- master-зона слева, стек — справа
-		--new_status = "slave",  -- новые окна встают в стек справа, а не заменяют главное
-	--},
+		-- раскладка master (SUPER+O: dwindle → scrolling → master)
+		master = {
+			mfact = 0.65,           -- главное окно слева = 65 % ширины монитора
+			orientation = "left",   -- master-зона слева, стек остальных окон — справа
+			new_status = "slave",   -- новые окна встают в стек справа, главное не заменяют
+			new_on_top = false,     -- новое окно — внизу стека справа
+		},
 
 })
 
@@ -134,6 +136,12 @@ end)
 --hl.bind("SUPER + F",hl.dsp.window.fullscreen({ mode = "maximized", action = "toggle" }))
 hl.bind("XF86KbdBrightnessUp",   hl.dsp.exec_cmd("brightnessctl -d kbd_backlight set 10%+"), { locked = true, repeating = true })
 hl.bind("XF86KbdBrightnessDown", hl.dsp.exec_cmd("brightnessctl -d kbd_backlight set 10%-"), { locked = true, repeating = true })
+-- Лупа на тачбаре (клавиша Search) — файловый менеджер Dolphin
+hl.bind("XF86Search", hl.dsp.exec_cmd("dolphin"))
+-- Кнопка ☕ на тачбаре: tiny-dfr шлёт KEY_F13, а раскладка xkb называет его XF86Tools (не "F13")
+hl.bind("XF86Tools", hl.dsp.exec_cmd("@HOME@/.local/bin/yumi-caffeine toggle"))
+-- Часы на тачбаре: tiny-dfr шлёт KEY_F14 (в xkb это XF86Launch5) — открыть/закрыть календарь, как клик по часам в Waybar
+hl.bind("XF86Launch5", hl.dsp.exec_cmd("@HOME@/.local/bin/yumi-menu-calendar"))
 
 
 
@@ -160,7 +168,32 @@ hl.window_rule {
   },
   stay_focused = true
 }
-hl.bind("SUPER + N", hl.dsp.exec_cmd("@HOME@/.local/bin/cc-open --bind"), {description = "[Session] control center"})
+-- === Крышка MacBook (07.10) ===
+-- Сон при закрытии решает ☕ «Не засыпать» (yumi-caffeine держит блокировку handle-lid-switch у systemd).
+-- Закрыли: блокировка; есть внешний монитор → встроенный экран отключается (всё остаётся на внешнем),
+-- нет → экран гаснет. Открыли: встроенный экран снова включён (параметры как в monitors.lua).
+-- locked = true — срабатывает и на экране блокировки.
+local LID = "Apple SMC power/lid events"
+local function has_external()
+	for _, m in ipairs(hl.get_monitors()) do
+		if m.name ~= "eDP-1" then return true end
+	end
+	return false
+end
+hl.bind("switch:on:" .. LID, function()
+	hl.exec_cmd("loginctl lock-session")
+	if has_external() then
+		hl.monitor({ output = "eDP-1", disabled = true })
+	else
+		hl.dispatch(hl.dsp.dpms({ action = "disable" }))
+	end
+end, { locked = true, description = "[Hardware] lid closed" })
+hl.bind("switch:off:" .. LID, function()
+	hl.monitor({ output = "eDP-1", mode = "2560x1600@60.0", position = "0x0", scale = 1.6, vrr = 0 })
+	hl.dispatch(hl.dsp.dpms({ action = "enable" }))
+end, { locked = true, description = "[Hardware] lid opened" })
+
+-- SUPER+N (центр уведомлений) убран по просьбе пользователя 07.10; был: cc-open --bind
 
 -- Загрузка плагинов Hyprland (hyprexpo) при входе
 hl.on("hyprland.start", function()
@@ -207,8 +240,12 @@ hl.config({ decoration = { active_opacity = 0.85, inactive_opacity = 0.75, fulls
 hl.window_rule {
   name = "rofi_opacity",
   match = { class = "Rofi" },
-  opacity = "0.84 override 0.78 override",
-  opaque = false
+  opacity = "0.95 override 0.92 override",   -- 08.10: плотнее (было 0.84 / 0.78)
+  opaque = false,
+  -- yumi-corners 08.10.2026: без размытия под окном rofi. Hyprland размывает весь прямоугольник окна
+  -- (обрезанный своим rounding 10), а rofi рисует карточку с радиусом ~1.55em — в углах между ними
+  -- была видна вторая, серая «рамка» из размытия. Откат: удалить эту строку.
+  no_blur = true
 }
 
 -- Размытие под центром управления и уведомлениями (как у окон)
@@ -221,6 +258,8 @@ hl.layer_rule({
 
 -- Плеер yumi-player (GTK4 + layer-shell): SUPER+M — по центру, повторно — закрыть
 hl.bind("SUPER + M", hl.dsp.exec_cmd("@HOME@/.local/bin/yumi-player toggle --center"), {description = "[Media] player"})
+-- Меню «Музыка» (yumi-music: mpv + YouTube Music): очередь, поиск, плейлисты
+hl.bind("SUPER + SHIFT + M", hl.dsp.exec_cmd("@HOME@/.local/bin/yumi-menu-music --center"), {description = "[Media] music library"})
 
 -- Размытие под окном плеера (как у центра управления)
 hl.layer_rule({

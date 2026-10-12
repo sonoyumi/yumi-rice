@@ -1,0 +1,10 @@
+[Unit]
+Description=yumi-music: синхронизация плейлистов раз в сутки
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=30min
+
+[Install]
+WantedBy=timers.target

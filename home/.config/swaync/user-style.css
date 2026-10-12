@@ -591,3 +591,38 @@ notificationwindow, blankwindow,
 
 scrollbar, scrollbar trough { background: transparent; border: none; }
 scrollbar slider { min-width: 4px; border-radius: 2px; background: alpha(@yn-fg, 0.3); border: none; }
+
+/* ───────── Плеер (mpris), вариант C (08.10; playerctld в blacklist — он дублирует активный плеер): крупная обложка, размытый фон из неё,
+   затемнение к стороне текста. Обложка в swaync всегда слева — порядок задан в программе.
+   Откат: cp user-style.css.bak-player-2026-10-08 user-style.css ───────── */
+.widget-mpris { padding: 0; margin: 4px 0 6px; }
+.widget-mpris .widget-mpris-player {
+  margin: 4px 12px;
+  border-radius: 16px;
+  box-shadow: none;
+}
+.widget-mpris .widget-mpris-player .mpris-background { filter: blur(14px) saturate(1.15); }
+.widget-mpris .widget-mpris-player .mpris-overlay {
+  padding: 12px 14px 8px;
+  background-color: transparent;
+  background-image: linear-gradient(to left, alpha(@yumi_bg, 0.92) 30%, alpha(@yumi_bg, 0.40));
+}
+.widget-mpris .widget-mpris-player .mpris-overlay .widget-mpris-album-art {
+  border-radius: 14px;
+  -gtk-icon-size: 72px;   /* меньше обложка — больше места названию */
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+}
+.widget-mpris .widget-mpris-player .mpris-overlay .widget-mpris-title {
+  color: @yn-fg; font-weight: bold; font-size: 0.82rem;
+}
+.widget-mpris .widget-mpris-player .mpris-overlay .widget-mpris-subtitle {
+  color: @wallbash_1xa9; font-size: 0.74rem;
+}
+.widget-mpris .widget-mpris-player .mpris-overlay > box > button {
+  color: @yn-fg; min-width: 30px; min-height: 30px; padding: 2px; border-radius: 999px;
+}
+.widget-mpris .widget-mpris-player .mpris-overlay > box > button:nth-child(3) {
+  background-color: alpha(@yn-fg, 0.16);   /* плей/пауза — в кружке */
+}
+.widget-mpris .widget-mpris-player .mpris-overlay > box > button:hover { background-color: alpha(@yn-fg, 0.24); }
+.widget-mpris > box > button { color: alpha(@yn-fg, 0.6); }   /* стрелки между плеерами */

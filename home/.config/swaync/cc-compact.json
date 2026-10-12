@@ -36,10 +36,9 @@
   "widgets": [
     "label",
     "buttons-grid",
-    "slider#vol",
-    "slider#mic",
     "backlight",
     "backlight#KB",
+    "mpris",
     "title",
     "dnd",
     "notifications"
@@ -99,21 +98,11 @@
           "command": "@HOME@/.local/bin/cc view notifs"
         },
         {
-          "label": "󰍽",
-          "command": "@HOME@/.local/bin/cc menu mouse",
-          "tooltip": "Мышь: батарея, DPI, частота"
+          "label": "󰌢",
+          "command": "@HOME@/.local/bin/cc menu devices",
+          "tooltip": "Устройства: мышь (DPI, частота) и клавиатура (подсветка)"
         }
       ]
-    },
-    "slider#mic": {
-      "label": "󰍬",
-      "min": 0,
-      "max": 100,
-      "cmd_setter": "@HOME@/.local/bin/cc micvol $value",
-      "cmd_getter": "@HOME@/.local/bin/cc micvol get",
-      "min_limit": 0,
-      "max_limit": 100,
-      "value_scale": 0
     },
     "backlight": {
       "label": "󰃟",
@@ -124,18 +113,16 @@
       "device": "kbd_backlight",
       "subsystem": "leds"
     },
-    "slider#vol": {
-      "label": "󰕾",
-      "min": 0,
-      "max": 100,
-      "cmd_setter": "@HOME@/.local/bin/cc vol $value",
-      "cmd_getter": "@HOME@/.local/bin/cc vol get",
-      "min_limit": 0,
-      "max_limit": 100,
-      "value_scale": 0
-    },
     "dnd": {
       "text": "󰂛   Не беспокоить"
+    },
+    "mpris": {
+      "autohide": true,
+      "show-album-art": "always",
+      "loop-carousel": false,
+      "blacklist": [
+        "playerctld"
+      ]
     }
   },
   "control-center-positionX": "right",

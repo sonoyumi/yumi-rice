@@ -39,6 +39,8 @@ def app_name(pid, comm):
     except OSError:
         return comm
     base = os.path.basename(exe)
+    if base == "zen-bin":  # Zen: все процессы браузера — одно «zen»
+        return "zen"
     if re.fullmatch(r"[\d.]+", base):  # ~/.local/share/<app>/versions/2.1.284
         return os.path.basename(os.path.dirname(os.path.dirname(exe)))
     if base.startswith(("python", "node", "bash", "zsh", "sh")):

@@ -1,0 +1,9 @@
+#!/bin/bash
+# Перемотка активного плеера на ±N секунд точным SetPosition (колесо на пилюле плеера в Waybar).
+# Относительный Seek браузеры и Pear Desktop выполняют неточно, поэтому считаем позицию сами.
+# player-seek 5   → вперёд на 5 с;   player-seek -5 → назад
+export LANG=C.UTF-8 LC_ALL=C.UTF-8
+d=${1:-5}
+pos=$(playerctl -p playerctld position 2>/dev/null) || exit 0
+new=$(awk -v p="$pos" -v d="$d" 'BEGIN{n=p+d; if(n<0)n=0; printf "%.2f", n}')
+playerctl -p playerctld position "$new"

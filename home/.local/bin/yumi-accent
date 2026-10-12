@@ -11,7 +11,7 @@ Wallbash HyDE строит акценты от САМОГО ТЁМНОГО цв�
   yumi-accent --from-wallbash  вызов из шаблона wallbash: единственный перезапуск Waybar и swaync на смену обоев
 Выход: ~/.config/yumi-player/accent.css (меню и плеер подхватывают на лету),
        ~/.config/waybar/yumi-accent.css, ~/.cache/yumi-accent/accent.{conf,rasi,txt}
-Откат: yumi-accent-uninstall"""
+Откат: yumi-uninstall accent"""
 import colorsys
 import os
 import re

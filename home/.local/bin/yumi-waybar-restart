@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Полный перезапуск Waybar (нужен после пересборки CFFI-модулей вроде yumi-eq: SIGUSR2 не перезагружает .so).
+# Просто kill не годится: служба hyde-<DE>-bar.service остаётся «running» из-за дочерних процессов,
+# watcher HyDE бар не поднимает, а новый запуск упирается в занятое имя службы.
+UNIT="hyde-${XDG_SESSION_DESKTOP:-Hyprland}-bar"
+systemctl --user stop "$UNIT.service" 2>/dev/null
+pkill -x waybar 2>/dev/null
+sleep 1
+hyde-shell app -u "$UNIT.scope" -t scope -- waybar.py --watch >/dev/null 2>&1 &
+disown
+for _ in $(seq 1 30); do
+    pgrep -x waybar >/dev/null && { echo "Waybar перезапущен"; exit 0; }
+    sleep 0.3
+done
+echo "Waybar не поднялся — запустите вручную: hyde-shell app -u $UNIT.scope -t scope -- waybar.py --watch" >&2
+exit 1

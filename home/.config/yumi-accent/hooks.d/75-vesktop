@@ -1,0 +1,7 @@
+#!/bin/sh
+# yumi-vesktop: Discord (Vesktop) в цветах yumi-accent поверх темы HyDE (откат — yumi-vesktop-uninstall)
+T="$HOME/.local/bin/yumi-vesktop-theme"
+[ -x "$T" ] || exit 0
+# HyDE пишет quickCss почти одновременно — дать ему закончить, затем подставить наши цвета
+( sleep 2; timeout 5 "$T" ) >/dev/null 2>&1 &
+exit 0

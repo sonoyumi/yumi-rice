@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# yumi-caffeine — ☕ «Не засыпать», глобально: ни по таймеру, ни при закрытой крышке.
+#   on | off | toggle   включить / выключить / переключить
+#   state               true|false (для плитки swaync и пилюли Waybar)
+#   guard               (таймер yumi-caffeine-guard) без зарядки и батарея < 20 % → выключить ☕ и предупредить
+# Включено = у systemd взята блокировка idle + handle-lid-switch; закрытая крышка не усыпляет.
+# Таймеры hypridle (с 08.10) проверяют ☕ сами через yumi-idle-action: без затемнения/автоблокировки/сна,
+# а на экране блокировки экран тускнеет и гаснет. Блокировка по SUPER+N и крышке остаётся. Root не нужен.
+# Источники (все через этот скрипт): тачбар (XF86Tools), пилюля Waybar, плитка swaync, phone caffeine по SSH, guard-таймер.
+# Одновременные вызовы выполняются по очереди (flock), чтобы не появлялась вторая «сиротская» блокировка.
+# PID процесса-блокировки: $XDG_RUNTIME_DIR/yumi-caffeine.pid. Откат: yumi-uninstall caffeine-global
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+export DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}
+[[ -n $HYPRLAND_INSTANCE_SIGNATURE ]] || export HYPRLAND_INSTANCE_SIGNATURE=$(ls -t "$XDG_RUNTIME_DIR/hypr" 2>/dev/null | head -1)
+PIDF=$XDG_RUNTIME_DIR/yumi-caffeine.pid
+BAT=/sys/class/power_supply/macsmc-battery
+AC=/sys/class/power_supply/macsmc-ac/online
+LOW=20
+
+inhibit_alive() { [[ -r $PIDF ]] && kill -0 "$(cat "$PIDF")" 2>/dev/null; }
+state() { inhibit_alive; }
+ensure_hypridle() { pgrep -x hypridle >/dev/null || hyprctl dispatch 'hl.dsp.exec_cmd([[hypridle]])' >/dev/null 2>&1 || setsid -f hypridle >/dev/null 2>&1 </dev/null; }
+note() { notify-send -a "Не засыпать" -i preferences-desktop-screensaver "$@" 2>/dev/null; }
+refresh() { sleep 0.2; pkill -RTMIN+15 -x waybar; }
+
+on() {
+    ensure_hypridle                       # hypridle нужен для блокировки экрана; ☕ его больше не останавливает
+    if ! inhibit_alive; then
+        setsid -f systemd-inhibit --what=idle:handle-lid-switch --who="Не засыпать" \
+            --why="☕ включено: нет сна по таймеру, закрытая крышка не усыпляет" --mode=block \
+            sh -c 'echo $$ > "$1"; exec sleep infinity' sh "$PIDF" >/dev/null 2>&1 </dev/null 9>&-   # 9>&-: не передавать замок очереди, иначе он держится, пока ☕ включён
+        for _ in 1 2 3 4 5 6 7 8 9 10; do inhibit_alive && break; sleep 0.1; done
+    fi
+    inhibit_alive || { logger -t yumi-caffeine "on FAILED: systemd-inhibit handle-lid-switch denied"; note -u critical "☕ Не удалось" "Блокировка крышки не взялась (systemd-inhibit — запуск вне графической сессии?)"; refresh; return 1; }
+    logger -t yumi-caffeine "on: idle+lid inhibitor pid $(cat "$PIDF"), hypridle running"
+    note "☕ Включено" "Ноутбук не блокируется и не засыпает сам — даже с закрытой крышкой"
+    refresh
+}
+
+off() {
+    if [[ -r $PIDF ]]; then kill "$(cat "$PIDF")" 2>/dev/null; rm -f "$PIDF"; fi
+    ensure_hypridle
+    logger -t yumi-caffeine "off: inhibitor released"
+    note "☕ Выключено" "Ноутбук снова блокируется и засыпает по таймеру и при закрытой крышке"
+    refresh
+}
+
+case ${1:-} in on|off|toggle|guard)   # очередь: двойное нажатие / тачбар + Waybar одновременно
+    exec 9>"$XDG_RUNTIME_DIR/yumi-caffeine.lock"; flock -w 5 9 || { logger -t yumi-caffeine "busy: lock timeout"; exit 1; } ;;
+esac
+case ${1:-} in
+    on)     on ;;
+    off)    off ;;
+    toggle) if state; then off; else on; fi ;;
+    state)  if state; then echo true; else echo false; fi ;;
+    guard)  state || exit 0
+            [[ $(cat $AC 2>/dev/null) == 0 && $(cat $BAT/capacity 2>/dev/null || echo 100) -lt $LOW ]] || exit 0
+            off >/dev/null 2>&1
+            note -u critical "☕ Выключено: батарея $(cat $BAT/capacity)%" "Без зарядки ноутбук снова будет засыпать, чтобы не разрядиться" ;;
+    *)      echo "yumi-caffeine on|off|toggle|state|guard"; exit 1 ;;
+esac

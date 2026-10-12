@@ -1,0 +1,207 @@
+#!/usr/bin/env python3
+"""yumi-hyprtoolkit-theme — тема hyprtoolkit (окно пароля hyprpolkitagent, hyprland-dialog и др.)
+в цветах обоев (живой акцент yumi-accent).
+
+  yumi-hyprtoolkit-theme           собрать ~/.config/hypr/hyprtoolkit.conf
+  yumi-hyprtoolkit-theme --check   только показать цвета и контраст, файл не писать
+
+Запущенные программы на hyprtoolkit перечитывают файл сами (inotify), если он существовал при их
+запуске; иначе — подхватят при следующем запуске (агент polkit — после перезахода в сессию).
+Агент и логику аутентификации не трогает. Откат: yumi-uninstall hyprtoolkit"""
+import os
+import shutil
+import sys
+
+HOME = os.path.expanduser("~")
+ACC_DIR = os.path.join(HOME, ".cache/yumi-accent")
+CONF_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.join(HOME, ".config"), "hypr")
+OUT = os.path.join(CONF_DIR, "hyprtoolkit.conf")
+BACKUP = OUT + ".yumi-backup"           # чужой файл, который был до первой записи
+MARK = "# yumi-hyprtoolkit:"             # по этой строке узнаём «свой» файл
+
+FONT = "JetBrainsMono Nerd Font"
+FONT_MONO = "JetBrainsMono Nerd Font Mono"
+ICONS = "Tela-circle-dracula"
+MIN_CONTRAST = 4.5
+
+
+# ---------- цвета ----------
+def hx(h):
+    h = h.strip().lstrip("#")
+    if len(h) != 6:
+        raise ValueError(h)
+    int(h, 16)
+    return h.upper()
+
+
+def rgb(h):
+    return [int(h[i:i + 2], 16) / 255 for i in (0, 2, 4)]
+
+
+def to_hex(c):
+    return "".join(f"{max(0, min(255, round(x * 255))):02X}" for x in c)
+
+
+def mix(a, b, t):
+    """t=0 → a, t=1 → b."""
+    return to_hex([x + (y - x) * t for x, y in zip(rgb(a), rgb(b))])
+
+
+def darken(h, k):
+    """Как CHyprColor::darken в hyprtoolkit: каналы × (1 - k)."""
+    return to_hex([x * (1 - k) for x in rgb(h)])
+
+
+def _lin(x):
+    return x / 12.92 if x <= 0.04045 else ((x + 0.055) / 1.055) ** 2.4
+
+
+def lum(h):
+    r, g, b = (_lin(x) for x in rgb(h))
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def contrast(a, b):
+    la, lb = sorted((lum(a), lum(b)), reverse=True)
+    return (la + 0.05) / (lb + 0.05)
+
+
+def oklab_l(h):
+    """Светлота OkLab — по ней hyprtoolkit выбирает цвет текста на кнопке цвета акцента."""
+    r, g, b = (_lin(x) for x in rgb(h))
+    l_ = (0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b) ** (1 / 3)
+    m_ = (0.2119034981 * r + 0.6806995451 * g + 0.1073969560 * b) ** (1 / 3)
+    s_ = (0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b) ** (1 / 3)
+    return 0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_
+
+
+# ---------- входные цвета ----------
+def accent_vars():
+    xa = [hx(c) for c in open(os.path.join(ACC_DIR, "accent.txt")).read().split()]
+    deep, bg, btn, hov = (hx(c) for c in open(os.path.join(ACC_DIR, "bg.txt")).read().split()[:4])
+    if len(xa) < 9:
+        raise ValueError("в accent.txt меньше 9 оттенков")
+    return xa, deep, bg, btn, hov
+
+
+def pick_text(light, surfaces, background):
+    """Основной текст: почти белый с оттенком обоев. Должен читаться (≥4.5) на всех поверхностях,
+    а его затемнённая версия (hyprtoolkit рисует ею «for user», подписи деталей) — на фоне окна."""
+    cands = [mix(light, "FFFFFF", t) for t in (0.8, 0.88, 0.94, 1.0)]
+    cands += [mix(light, "000000", t) for t in (0.85, 0.92, 1.0)]   # на случай светлых обоев/фона
+
+    def score(t):
+        return min([contrast(t, s) for s in surfaces] + [contrast(darken(t, 0.3), background)])
+
+    for t in cands:
+        if score(t) >= MIN_CONTRAST:
+            return t
+    return max(cands, key=score)
+
+
+def on_accent(acc, background, bright):
+    """Цвет надписи на кнопке-акценте — ровно по правилу hyprtoolkit."""
+    return background if oklab_l(acc) > 0.5 else bright
+
+
+def pick_accent(xa, background, bright):
+    """Основной акцент — 7-й оттенок; если текст на нём не читается, ищем ближайший подходящий."""
+    for i in (6, 7, 8, 5, 4, 3, 2, 1, 0):
+        if contrast(xa[i], on_accent(xa[i], background, bright)) >= MIN_CONTRAST:
+            return xa[i]
+    return max(xa, key=lambda c: contrast(c, on_accent(c, background, bright)))
+
+
+def build():
+    xa, deep, bg, btn, hov = accent_vars()
+    light = xa[8]
+    background = bg                     # фон окна — как у меню yumi-panel
+    base = btn                          # поле пароля, кнопки
+    alt = hov                           # рамки, блок команды и деталей
+    bright = "FFFFFF"
+    text = pick_text(light, (background, base, alt), background)
+    acc = pick_accent(xa, background, bright)
+    acc2 = xa[4]
+    link = light if contrast(light, background) >= MIN_CONTRAST else text
+    c = {
+        "background": background, "base": base, "alternate_base": alt, "text": text,
+        "bright_text": bright, "link_text": link, "accent": acc, "accent_secondary": acc2,
+    }
+    checks = {
+        "текст / фон": contrast(text, background),
+        "текст / поле": contrast(text, base),
+        "текст / рамки": contrast(text, alt),
+        "вторичный текст (×0.7) / фон": contrast(darken(text, 0.3), background),
+        "подсказка в поле (×0.6) / поле": contrast(darken(text, 0.4), base),
+        "текст на акценте": contrast(acc, on_accent(acc, background, bright)),
+        "ссылка / фон": contrast(link, background),
+    }
+    lines = [
+        "# yumi-hyprtoolkit: генерируется yumi-hyprtoolkit-theme из цветов обоев — НЕ ПРАВИТЬ вручную,",
+        "# файл перезапишется при смене обоев (хук ~/.config/yumi-accent/hooks.d/25-hyprtoolkit).",
+        "# Откат: yumi-uninstall hyprtoolkit",
+        "",
+        "# цвета (hyprlang: rgb(RRGGBB))",
+    ]
+    lines += [f"{k} = rgb({v})" for k, v in c.items()]
+    lines += [
+        "",
+        "# шрифты и значки — как в меню yumi-panel",
+        f"font_family = {FONT}",
+        f"font_family_monospace = {FONT_MONO}",
+        f"icon_theme = {ICONS}",
+        "h1_size = 19",
+        "h2_size = 16",
+        "h3_size = 12",
+        "font_size = 11",
+        "small_font_size = 10",
+        "",
+        "# скругления: мелкие — кнопки и поле пароля, крупные — блоки и выпадающие списки",
+        "# (скругление самого окна задаёт Hyprland)",
+        "rounding_small = 16",
+        "rounding_large = 20",
+        "",
+        "# контраст (WCAG): " + ", ".join(f"{k} {v:.1f}" for k, v in checks.items()),
+        "",
+    ]
+    return "\n".join(lines), checks
+
+
+def write(conf):
+    os.makedirs(CONF_DIR, exist_ok=True)
+    # чужой файл (без нашей метки) сохраняем один раз — до первой записи
+    if os.path.exists(OUT) and not os.path.exists(BACKUP):
+        try:
+            mine = MARK in open(OUT, errors="replace").read(4096)
+        except OSError:
+            mine = False
+        if not mine:
+            shutil.copy2(OUT, BACKUP)
+    tmp = OUT + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(conf)
+    os.replace(tmp, OUT)
+
+
+def main():
+    if "-h" in sys.argv or "--help" in sys.argv:
+        print(__doc__)
+        return 0
+    try:
+        conf, checks = build()
+    except (OSError, ValueError) as e:
+        print("yumi-hyprtoolkit-theme: нет цветов yumi-accent:", e, file=sys.stderr)
+        return 1
+    if "--check" in sys.argv:
+        print(conf)
+        return 0
+    for k, v in checks.items():
+        if v < MIN_CONTRAST and "подсказка" not in k:
+            print(f"предупреждение: контраст «{k}» = {v:.2f}", file=sys.stderr)
+    write(conf)
+    print(OUT)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -69,7 +69,9 @@ window#waybar.top #pill label.module:hover {
 #custom-updates.updates,
 #custom-bt.connected {
   color: @yb-acc;
-  text-shadow: 0 0 6px alpha(@yb-acc, 0.6);
+  /* 3px, а не 6px: свечение должно помещаться в отступ значка (0.3em ≈ 4px). Шире — GTK3 при наведении
+     перерисовывает только сам значок, свечение на соседях не стирается и копится «куском тени» */
+  text-shadow: 0 0 3px alpha(@yb-acc, 0.75);
 }
 
 /* ───────── Значок Arch ───────── */
@@ -116,18 +118,22 @@ window#waybar.top #pill label#custom-archlogo:hover {
 #workspaces button.active:hover {
   animation: none;
   transition: background-color 250ms ease, color 250ms ease, box-shadow 250ms ease;
-  margin: 0.35em 0.2em;
+  /* margin не задаём: действует HyDE «window#waybar.top button» (0.41em 0.11em).
+     Свой margin здесь срабатывал только у .active:hover (селектор сильнее) — капсула прыгала при наведении */
   padding: 0 1.1em;
   background-color: @yb-acc;
   background-image: linear-gradient(to right, @yb-acc, mix(@yb-acc, @wb-act-bg, 0.55));
   color: @yb-deep;
   font-weight: bold;
-  box-shadow: 0 0 6px 0 alpha(@yb-acc, 0.55),
-              inset 0 1px 0 0 alpha(white, 0.25);
+  /* свечение — только ВНУТРИ капсулы: внешняя тень GTK3 перерисовывается не целиком (стирается лишь сама
+     кнопка) и оставляла тёмный ореол над и под активным столом. Блик сверху + мягкая светлая кромка */
+  box-shadow: inset 0 1px 0 0 alpha(white, 0.30),
+              inset 0 0 0 1px alpha(white, 0.14),
+              inset 0 -2px 4px -2px alpha(@yb-deep, 0.35);
 }
 @keyframes yb-urgent {
   from { background-color: alpha(@yb-crit, 0.15); box-shadow: 0 0 0 0 alpha(@yb-crit, 0); }
-  to   { background-color: alpha(@yb-crit, 0.60); box-shadow: 0 0 6px 0 alpha(@yb-crit, 0.6); }
+  to   { background-color: alpha(@yb-crit, 0.60); box-shadow: 0 0 4px -1px alpha(@yb-crit, 0.7); }
 }
 #workspaces button.urgent {
   color: @main-fg;
@@ -145,7 +151,8 @@ window#waybar.top #pill.player { padding: 0; }
 #image.player-cover         { padding: 0 0 0 5px; }
 #image.player-cover.empty   { padding: 0; }   /* без обложки модуль не должен оставлять щель */
 #custom-player-text         { color: @main-fg; }
-#custom-player-text.playing { text-shadow: 0 0 8px alpha(@yb-acc, 0.35); }
+/* 3px — не шире отступа модуля: иначе при обновлении раз в секунду свечение копится кусками */
+#custom-player-text.playing { text-shadow: 0 0 3px alpha(@yb-acc, 0.45); }
 #custom-player-text.paused  { opacity: 0.6; }
 #custom-player-text.paused:hover { opacity: 1; }
 
@@ -227,3 +234,18 @@ window#waybar.top #pill label#custom-swaync {
 window#waybar.top #pill.tray { padding: 0; }
 window#waybar.top #pill label#custom-tray { padding: 0 1.0em; margin: 0; }
 #custom-tray.attention { color: @yb-warn; }
+
+/* Визуализатор cava в пилюле плеера (waybar-player-cava): цвет — живой акцент из обоев (yumi-accent).
+   Когда ничего не играет, модуль пустой и не оставляет щели. */
+window#waybar.top #pill label#custom-player-text { padding: 0 0.45em 0 0.5em; }
+window#waybar.top #pill label#custom-player-cava { padding: 0 0.9em 0 0; margin: 0; }
+#custom-player-cava         { color: @yb-acc; font-family: "JetBrainsMono Nerd Font";
+                              transition: opacity 300ms ease; }
+/* без text-shadow: cava перерисовывается 60 раз в секунду, свечение размазывалось на соседний текст */
+#custom-player-cava.playing { opacity: 1; }
+#custom-player-cava.paused  { opacity: 0.35; }
+#custom-player-cava.stopped { padding: 0; }
+#custom-player-cava.quiet   { opacity: 0.35; }   /* играет, но тихо или трек ещё грузится */
+
+/* Эквалайзер yumi-eq (CFFI, рисует сам; цвета берёт из @yb-acc/@yb-acc5) — отступ до края пилюли */
+/* отступы задаются в конфиге модуля (margin-left/right): CSS-margin перебивается стилями HyDE */

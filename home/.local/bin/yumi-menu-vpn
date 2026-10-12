@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-"""yumi-menu-vpn — меню VPN на GTK (каркас yumi-panel): ExpressVPN + Tailscale.
+"""yumi-menu-vpn — меню VPN на GTK (каркас yumi-panel): WireGuard-локации (Cloudflare WARP, Proton Free) + Tailscale.
   yumi-menu-vpn [--bar|--center]   открыть / закрыть
   yumi-menu-vpn --close            закрыть
 
-ExpressVPN (expressvpnctl): переключатель, текущая локация, выбор локации с поиском, «Подключиться» со спиннером.
+VPN (yumi-vpn → подключения NetworkManager «VPN …»): переключатель, текущая локация, выбор локации, «Подключиться» со спиннером.
 Tailscale: состояние, свой адрес (копирование), устройства сети (tailscale status --json) с задержкой
 (tailscale ping) и подстраницей устройства. Чтение статуса — по-настоящему; всё меняющее — через yp.do().
 
 Переменные для проверки:
   YP_DRYRUN=1         подключение/отключение VPN и Tailscale не выполняются (команда — в stderr), результат имитируется
   YP_FAKE_NET=1       выдуманные состояние и устройства (для снимков; включает и YP_DRYRUN)
-  YP_FAKE_VPN=on      (с YP_FAKE_NET) ExpressVPN «подключён»
+  YP_FAKE_VPN=on      (с YP_FAKE_NET) VPN «подключён»
   YP_OPEN=regions | device:<имя> | ts-off   сразу открыть подстраницу / подтверждение
   YP_TEST=connect     нажать «Подключиться» (только в проверке)
-Откат: удалить этот файл"""
+Откат: ~/.local/share/yumi-archive/home/.local/share/yumi-vpn-backup/yumi-menu-vpn"""
 import os
 import re
 import sys
@@ -29,8 +29,6 @@ from yumipanel import Gtk, Gdk, GLib, Pango  # noqa: E402
 FAKE = bool(os.environ.get("YP_FAKE_NET"))
 DRY = yp.DRY or FAKE
 yp.DRY = DRY
-DEFAULT_REGION = "usa-new-york"          # как VPN_REGION в zsh-функции vpn
-
 CSS = """
 .yv-card { background: @yp-btn; border-radius: 16px; padding: 10px 14px; }
 .yv-card-title { font-size: 12pt; font-weight: 700; }
@@ -52,90 +50,53 @@ CSS = """
 .yv-small { font-size: 9.5pt; color: alpha(@yp-fg2, 0.75); padding: 0 4px 4px 4px; }
 """
 
-COUNTRIES = {
-    "usa": "США", "uk": "Великобритания", "italy": "Италия", "france": "Франция", "germany": "Германия",
-    "switzerland": "Швейцария", "spain": "Испания", "netherlands": "Нидерланды", "canada": "Канада",
-    "japan": "Япония", "australia": "Австралия", "singapore": "Сингапур", "hong-kong": "Гонконг",
-    "south-korea": "Южная Корея", "brazil": "Бразилия", "india": "Индия", "sweden": "Швеция",
-    "taiwan": "Тайвань", "austria": "Австрия", "belgium": "Бельгия", "poland": "Польша", "norway": "Норвегия",
-    "finland": "Финляндия", "denmark": "Дания", "ireland": "Ирландия", "portugal": "Португалия",
-    "greece": "Греция", "turkey": "Турция", "ukraine": "Украина", "czech-republic": "Чехия",
-    "romania": "Румыния", "hungary": "Венгрия", "bulgaria": "Болгария", "serbia": "Сербия",
-    "croatia": "Хорватия", "slovenia": "Словения", "slovakia": "Словакия", "estonia": "Эстония",
-    "latvia": "Латвия", "lithuania": "Литва", "moldova": "Молдова", "georgia": "Грузия", "armenia": "Армения",
-    "kazakhstan": "Казахстан", "uzbekistan": "Узбекистан", "belarus": "Беларусь", "israel": "Израиль",
-    "united-arab-emirates": "ОАЭ", "mexico": "Мексика", "argentina": "Аргентина", "chile": "Чили",
-    "new-zealand": "Новая Зеландия", "south-africa": "ЮАР", "iceland": "Исландия", "luxembourg": "Люксембург",
-    "malta": "Мальта", "cyprus": "Кипр", "monaco": "Монако", "andorra": "Андорра", "liechtenstein": "Лихтенштейн",
-    "albania": "Албания", "montenegro": "Черногория", "north-macedonia": "Северная Македония",
-    "bosnia-and-herzegovina": "Босния и Герцеговина", "egypt": "Египет", "morocco": "Марокко",
-    "algeria": "Алжир", "kenya": "Кения", "nigeria": "Нигерия", "ghana": "Гана", "lebanon": "Ливан",
-    "thailand": "Таиланд", "vietnam": "Вьетнам", "philippines": "Филиппины", "indonesia": "Индонезия",
-    "malaysia": "Малайзия", "china": "Китай", "mongolia": "Монголия", "azerbaijan": "Азербайджан",
-    "saudi-arabia": "Саудовская Аравия", "qatar": "Катар", "pakistan": "Пакистан", "colombia": "Колумбия",
-    "peru": "Перу", "ecuador": "Эквадор", "uruguay": "Уругвай", "bolivia": "Боливия", "venezuela": "Венесуэла",
-    "cuba": "Куба", "panama": "Панама", "costa-rica": "Коста-Рика", "jamaica": "Ямайка",
-    "puerto-rico": "Пуэрто-Рико", "bahamas": "Багамы", "greenland": "Гренландия", "isle-of-man": "Остров Мэн",
-    "jersey": "Джерси", "gaming-europe": "Европа (игры)", "macau": "Макао", "sri-lanka": "Шри-Ланка",
-    "bangladesh": "Бангладеш", "nepal": "Непал", "cambodia": "Камбоджа", "laos": "Лаос", "myanmar": "Мьянма",
-    "bhutan": "Бутан", "brunei": "Бруней", "guam": "Гуам", "guatemala": "Гватемала", "honduras": "Гондурас",
-    "bermuda": "Бермуды", "cayman-islands": "Каймановы острова", "dominican-republic": "Доминикана",
-    "trinidad-and-tobago": "Тринидад и Тобаго",
-}
-STATE_RU = {"Connected": "Подключено", "Disconnected": "Отключено", "Connecting": "Подключаюсь…",
-            "Reconnecting": "Переподключаюсь…", "Interrupted": "Прервано", "Disconnecting": "Отключаюсь…",
-            "DisconnectingToReconnect": "Переподключаюсь…"}
+LOC_INFO = {"WARP": ("Cloudflare WARP", "")}
+PROTON_CC = {"NL": "Нидерланды", "JP": "Япония", "US": "США", "PL": "Польша", "RO": "Румыния", "CH": "Швейцария",
+             "NO": "Норвегия", "SG": "Сингапур", "MX": "Мексика", "CA": "Канада", "DE": "Германия"}
 OS_ICON = {"linux": "󰌽", "macos": "󰀵", "ios": "󰀷", "android": "󰀲", "windows": "󰖳"}
 
 
-def region_parts(code):
-    """'usa-new-york' → ('США', 'New York')."""
-    if code == "smart":
-        return "Умный выбор", ""
-    for key in sorted(COUNTRIES, key=len, reverse=True):
-        if code == key or code.startswith(key + "-"):
-            rest = code[len(key) + 1:]
-            city = " ".join(w.capitalize() for w in rest.split("-")).replace("(via", "(Via") if rest else ""
-            return COUNTRIES[key], city.replace("(Via Uk)", "(через UK)").replace("(Via Singapore)", "(через Сингапур)")
-    return code.replace("-", " ").title(), ""
+def region_parts(name):
+    """'VPN WARP' → ('Cloudflare WARP', '…'); 'VPN Proton NL' → ('Proton Free', 'Нидерланды')."""
+    short = name[4:] if name.startswith("VPN ") else name
+    if short in LOC_INFO:
+        return LOC_INFO[short]
+    if short.lower().startswith("proton"):
+        rest = short[6:].strip(" -")
+        cc = re.split(r"[-# ]", rest)[0].upper() if rest else ""
+        return "Proton Free", PROTON_CC.get(cc, rest)
+    return short, ""
 
 
-def region_name(code):
-    c, city = region_parts(code)
+def region_name(name):
+    c, city = region_parts(name)
     return f"{c} · {city}" if city else c
 
 
 # ---------- чтение состояния ----------
-def evpn(*args):
-    return yp.run("expressvpnctl", "-t", "2", *args, timeout=3).strip()
+def vpnctl(*args):
+    return yp.run(os.path.expanduser("~/.local/bin/yumi-vpn"), *args, timeout=5).strip()
 
 
-REGIONS = []
 FAKE_STATE = {"state": "Connected" if os.environ.get("YP_FAKE_VPN") == "on" else "Disconnected",
-              "region": "smart", "smart": "italy-milan", "vpnip": "10.84.0.17"}
+              "region": "VPN WARP"}
+
+
+def last_region():
+    try:
+        with open(os.path.expanduser("~/.local/state/yumi-vpn-last")) as f:
+            return f.read().strip() or "VPN WARP"
+    except OSError:
+        return "VPN WARP"
 
 
 def vpn_snapshot():
     if FAKE:
-        regions = ["smart", "italy-milan", "italy-naples", "germany-frankfurt-1", "germany-berlin", "france-paris-1",
-                   "switzerland", "netherlands-amsterdam", "uk-london", "usa-new-york", "usa-los-angeles-1",
-                   "japan-tokyo", "singapore-cbd", "canada-toronto"]
-        return dict(FAKE_STATE, ok=True, regions=regions)
-    if not shutil.which("expressvpnctl"):
-        return {"ok": False}
-    st = evpn("get", "connectionstate")
-    region = evpn("get", "region")
-    d = {"ok": bool(st), "state": st or "Unknown", "region": region, "smart": "", "vpnip": ""}
-    if region == "smart":
-        d["smart"] = evpn("get", "smart")
-    if st == "Connected":
-        ip = evpn("get", "vpnip")
-        d["vpnip"] = ip if re.match(r"^[\d.:a-f]+$", ip or "") else ""
-    global REGIONS
-    if not REGIONS:                       # список локаций читается один раз
-        REGIONS = [r for r in evpn("get", "regions").splitlines() if r.strip()]
-    d["regions"] = REGIONS
-    return d
+        return dict(FAKE_STATE, ok=True, regions=["VPN WARP", "VPN Proton NL", "VPN Proton JP"])
+    regions = [r for r in vpnctl("list").splitlines() if r.strip()]
+    cur = vpnctl("state")
+    return {"ok": bool(regions), "state": "Connected" if cur else "Disconnected",
+            "region": cur or last_region(), "regions": regions}
 
 
 FAKE_TS = {
@@ -220,9 +181,9 @@ class Vpn:
         self.ts_switch_block = False
         self.vpn_switch_block = False
 
-        # ── ExpressVPN ──
-        body.append(yp.section("EXPRESSVPN"))
-        row, self.vpn_sw = yp.toggle_row("󰖂", "ExpressVPN", False, self.on_vpn_toggle)
+        # ── VPN (WARP / Proton) ──
+        body.append(yp.section("VPN"))
+        row, self.vpn_sw = yp.toggle_row("󰖂", "VPN", False, self.on_vpn_toggle)
         body.append(row)
         self.vpn_card = Gtk.Box(spacing=12, css_classes=["yv-card"])
         self.vpn_dot = Gtk.Label(label="●", css_classes=["yv-dot", "off"])
@@ -236,6 +197,9 @@ class Vpn:
         body.append(self.vpn_card)
         self.loc_btn = yp.row_button("󰍎", "Локация", self.open_regions, meta="›")
         self.loc_label = self.loc_btn.get_child().get_first_child().get_next_sibling()
+        self.loc_label.set_ellipsize(Pango.EllipsizeMode.END)       # длинная локация не раздвигает меню
+        self.loc_label.set_max_width_chars(1)
+        self.loc_label.set_hexpand(True)
         body.append(self.loc_btn)
         self.spin = yp.revealer(yp.spinner_row("Подключаюсь…"))
         body.append(self.spin)
@@ -290,30 +254,21 @@ class Vpn:
         if self.connecting:
             return
         if not v.get("ok"):
-            self.vpn_title.set_label("ExpressVPN недоступен")
-            self.vpn_sub.set_label("нет expressvpnctl или служба не запущена")
+            self.vpn_title.set_label("VPN не настроен")
+            self.vpn_sub.set_label("нет подключений «VPN …» в NetworkManager")
             self.set_dot(self.vpn_dot, "err")
             self.connect_btn.set_sensitive(False)
             return
-        st = v["state"]
-        on = st == "Connected"
-        busy = st in ("Connecting", "Reconnecting", "DisconnectingToReconnect", "Disconnecting")
+        on = v["state"] == "Connected"
         self.vpn_switch_block = True
-        self.vpn_sw.set_active(on or (busy and st != "Disconnecting"))
+        self.vpn_sw.set_active(on)
         self.vpn_switch_block = False
         region = v.get("region") or ""
-        where = region_name(v["smart"]) if region == "smart" and v.get("smart") else region_name(region)
-        self.vpn_title.set_label(STATE_RU.get(st, st))
-        if on:
-            self.vpn_sub.set_label(f"{where}" + (f" · IP {v['vpnip']}" if v.get("vpnip") else ""))
-        else:
-            self.vpn_sub.set_label("Трафик идёт напрямую")
-        self.set_dot(self.vpn_dot, "on" if on else "mid" if busy else "off")
-        sel = self.selected or region or DEFAULT_REGION
-        label = region_name(sel)
-        if sel == "smart" and v.get("smart"):
-            label += f" ({region_name(v['smart'])})"
-        self.loc_label.set_label(label)
+        self.vpn_title.set_label("Подключено" if on else "Отключено")
+        self.vpn_sub.set_label(region_name(region) if on else "Трафик идёт напрямую")
+        self.set_dot(self.vpn_dot, "on" if on else "off")
+        sel = self.selected or region
+        self.loc_label.set_label(region_name(sel))
         if not self.connecting:
             if on and (self.selected in (None, region)):
                 self.connect_btn.set_label("󰌙  Отключиться")
@@ -394,7 +349,7 @@ class Vpn:
                 threading.Thread(target=lambda i=ip: (self.pings.__setitem__(i, ts_ping(i)),
                                                       GLib.idle_add(self.apply_ts)), daemon=True).start()
 
-    # ---------- ExpressVPN: действия ----------
+    # ---------- VPN: действия ----------
     def on_vpn_toggle(self, state):
         if self.vpn_switch_block or self.connecting:
             return
@@ -410,7 +365,7 @@ class Vpn:
         if self.vpn.get("state") == "Connected" and self.selected in (None, self.vpn.get("region")):
             self.disconnect()
             return
-        region = self.selected or self.vpn.get("region") or DEFAULT_REGION
+        region = self.selected or self.vpn.get("region") or "VPN WARP"
         self.connecting = True
         self.panel.busy += 1
         self.spin.set_reveal_child(True)
@@ -424,21 +379,15 @@ class Vpn:
         self.vpn_switch_block = False
 
         def work():
-            ok, out = yp.do("expressvpnctl", "connect", region, timeout=30)
-            state = ""
+            ok, out = yp.do(os.path.expanduser("~/.local/bin/yumi-vpn"), "up", region, timeout=30)
             if DRY:
                 import time
                 time.sleep(2)
                 FAKE_STATE.update(state="Connected", region=region)
-                state = "Connected"
-            elif ok:
-                import time
-                for _ in range(25):
-                    state = evpn("get", "connectionstate")
-                    if state == "Connected":
-                        break
-                    time.sleep(1)
-            GLib.idle_add(self.connect_done, region, state == "Connected", out)
+                ok = True
+            else:
+                ok = vpnctl("state") == region
+            GLib.idle_add(self.connect_done, region, ok, out)
         threading.Thread(target=work, daemon=True).start()
 
     def connect_done(self, region, ok, out):
@@ -449,10 +398,7 @@ class Vpn:
             self.selected = None
             self.panel.toast(f"VPN подключён: {region_name(region)}" + (" (проверка)" if DRY else ""), hold=4)
         else:
-            msg = "Не удалось подключиться"
-            if "GUI" in (out or "") or "background" in (out or ""):
-                msg += ": запустите ExpressVPN или включите фоновый режим"
-            self.panel.toast(msg, error=True, hold=6)
+            self.panel.toast("Не удалось подключиться" + (f": {out[:60]}" if out else ""), error=True, hold=6)
         if DRY:
             self.apply(vpn_snapshot() if FAKE else dict(self.vpn, state="Connected", region=region), self.ts)
         else:
@@ -460,7 +406,7 @@ class Vpn:
         return False
 
     def disconnect(self):
-        ok, out = yp.do("expressvpnctl", "disconnect")
+        ok, out = yp.do(os.path.expanduser("~/.local/bin/yumi-vpn"), "down")
         if DRY:
             FAKE_STATE.update(state="Disconnected")
             self.panel.toast("VPN отключён (проверка)", hold=4)
@@ -470,50 +416,21 @@ class Vpn:
             self.refresh()
 
     def open_regions(self, *_):
-        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        search = Gtk.SearchEntry(placeholder_text="Страна или город…", css_classes=["yp-entry"])
-        page.append(search)
-        lst = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, propagate_natural_height=True,
-                                    max_content_height=round(420 * self.panel.k), css_classes=["yv-list"])
-        scroll.set_child(lst)
-        page.append(scroll)
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         regions = self.vpn.get("regions") or []
         cur = self.selected or self.vpn.get("region")
-
-        def fill(*_):
-            while (c := lst.get_first_child()):
-                lst.remove(c)
-            q = search.get_text().strip().lower()
-            last_country = None
-            n = 0
-            for code in regions:
-                country, city = region_parts(code)
-                hay = f"{code} {country} {city}".lower()
-                if q and q not in hay:
-                    continue
-                if code != "smart" and country != last_country:
-                    lst.append(yp.section(country.upper()))
-                    last_country = country
-                text = city or (country if code != "smart" else "Умный выбор — самая быстрая")
-                icon = "󰓅" if code == "smart" else "󰍎"
-                lst.append(yp.row_button(icon, text, lambda *_, c=code: self.pick_region(c), active=(code == cur)))
-                n += 1
-            if not n:
-                lst.append(Gtk.Label(label="Ничего не найдено", xalign=0, css_classes=["yv-dim"]))
-
-        search.connect("search-changed", fill)
-        search.connect("activate", lambda *_: self.pick_first(lst))
-        fill()
+        last = None
+        for code in regions:
+            service, where = region_parts(code)
+            if service != last:
+                page.append(yp.section(service.upper()))
+                last = service
+            icon = "󰅟" if service == "Cloudflare WARP" else "󰍎"
+            page.append(yp.row_button(icon, where or service, lambda *_, c=code: self.pick_region(c),
+                                      active=(code == cur)))
+        if not regions:
+            page.append(Gtk.Label(label="Локаций нет", xalign=0, css_classes=["yv-dim"]))
         self.panel.push("Локация VPN", page, f"Локаций: {len(regions)}")
-        GLib.timeout_add(80, lambda: search.grab_focus() and False)
-
-    def pick_first(self, lst):
-        c = lst.get_first_child()
-        while c is not None and not isinstance(c, Gtk.Button):
-            c = c.get_next_sibling()
-        if c:
-            c.emit("clicked")
 
     def pick_region(self, code):
         self.selected = code

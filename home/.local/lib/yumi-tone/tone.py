@@ -16,7 +16,7 @@
 Правило перекраски: тёмные цвета (фоны) получают оттенок обоев и насыщенность фона yumi-accent
 (яркость сохраняется, почти чёрный чуть приподнят), цвета акцента темы — оттенок акцента yumi-accent;
 белый текст, чёрные тени и цвета состояний (красный/жёлтый/зелёный) не меняются.
-Откат: ~/.local/bin/yumi-tone-uninstall"""
+Откат: yumi-uninstall tone"""
 import colorsys
 import glob
 import hashlib
@@ -421,7 +421,7 @@ def do_gtk(tone):
             write(out3, gtk3_validate(gtk3_delta(src, rc, os.path.join(d3, "assets"))))
             write(stamp, key)
         user = os.path.join(CFG, "gtk-3.0/gtk.css")
-        line = '@import url("file://%s"); /* %s: цвета в тоне обоев, откат — yumi-tone-uninstall */\n' % (out3, MARK)
+        line = '@import url("file://%s"); /* %s: цвета в тоне обоев, откат — yumi-uninstall tone */\n' % (out3, MARK)
         try:
             cur = open(user).read()
         except OSError:

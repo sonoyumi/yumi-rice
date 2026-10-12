@@ -1,0 +1,40 @@
+#!/usr/bin/env python3
+"""yumi-touchbar-theme — цвета тачбара (touchbard) из живого акцента обоев (yumi-accent).
+Пишет ~/.local/state/omarchy/current/theme/colors.toml — этот файл touchbar-agent читает как «тему Omarchy»
+и применяет на лету. Запускается хуком ~/.config/yumi-accent/hooks.d/80-touchbar при смене обоев.
+Стили со своим [theme] в ~/.config/touchbar/config.toml перекрывают эти цвета (кроме стиля «Обои»)."""
+import os, re
+HOME = os.path.expanduser("~")
+src = os.path.join(HOME, ".cache/yumi-accent/accent-gtk.css")
+dst = os.path.join(HOME, ".local/state/omarchy/current/theme/colors.toml")
+c = {}
+try:
+    for name, val in re.findall(r"@define-color\s+(\w+)\s+(#[0-9A-Fa-f]{6})", open(src).read()):
+        c[name] = val.lower()
+except OSError:
+    raise SystemExit(0)
+deep, bg, btn, hov = c.get("yumi_deep", "#111111"), c.get("yumi_bg", "#1b1b1b"), c.get("yumi_btn", "#303030"), c.get("yumi_hover", "#474747")
+acc, acc5 = c.get("yumi_acc", "#c0c0c0"), c.get("yumi_acc5", "#808080")
+toml = f'''# yumi-touchbar-theme: из обоев (yumi-accent), генерируется — не править
+mode = "dark"
+darker_background = "#000000"
+background = "{deep}"
+lighter_background = "{btn}"
+selection = "{btn}"
+muted = "{hov}"
+foreground = "#e8e6e3"
+bright_foreground = "#ffffff"
+dark_foreground = "{acc5}"
+accent = "{acc}"
+blue = "{acc}"
+magenta = "{acc5}"
+bright_magenta = "{acc}"
+red = "#ed8796"
+green = "#a6da95"
+yellow = "#eed49f"
+'''
+os.makedirs(os.path.dirname(dst), exist_ok=True)
+tmp = dst + ".tmp"
+with open(tmp, "w") as f:
+    f.write(toml)
+os.replace(tmp, dst)

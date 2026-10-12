@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# yumi-battery-limit — предел зарядки аккумулятора MacBook (Asahi, macsmc-battery).
+#   yumi-battery-limit 80 | 100   поставить предел и запомнить выбор
+#   yumi-battery-limit toggle      80 ↔ 100
+#   yumi-battery-limit state       текущий предел (число)
+#   yumi-battery-limit apply       применить запомненный выбор (при входе; по умолчанию 80)
+# Писать в sysfs может группа wheel — правило /etc/udev/rules.d/90-yumi-battery-limit.rules.
+# Откат: yumi-uninstall battery-limit
+B=/sys/class/power_supply/macsmc-battery
+END=$B/charge_control_end_threshold
+START=$B/charge_control_start_threshold
+CONF=${XDG_CONFIG_HOME:-$HOME/.config}/yumi-battery/limit
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+export DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}
+
+note() { [ -n "${QUIET:-}" ] || notify-send -a "Питание" -i battery "$@" 2>/dev/null; }
+
+set_limit() {
+    local n=$1
+    if [ "$n" -lt 100 ]; then
+        echo $((n - 5)) > "$START" 2>/dev/null      # начало зарядки чуть ниже конца (если контроллер позволяет)
+        echo "$n" > "$END" 2>/dev/null || { note -u critical "🔋 Не удалось" "Нет прав на $END (правило udev не применено?)"; return 1; }
+    else
+        echo 100 > "$END" 2>/dev/null || { note -u critical "🔋 Не удалось" "Нет прав на $END (правило udev не применено?)"; return 1; }
+        echo 100 > "$START" 2>/dev/null
+    fi
+    local got; got=$(cat "$END")
+    mkdir -p "$(dirname "$CONF")"; echo "$n" > "$CONF"
+    logger -t yumi-battery-limit "limit $n → sysfs $got"
+    if [ "$got" -lt 100 ]; then note "🔋 Зарядка до ${got} %" "Бережём аккумулятор. Нужно 100 % — переключатель в меню «Питание»"
+    else note "🔋 Зарядка до 100 %" "Полный заряд. Вернуть 80 % — переключатель в меню «Питание»"; fi
+    [ "$got" = "$n" ]
+}
+
+case ${1:-} in
+    80|100) set_limit "$1" ;;
+    toggle) if [ "$(cat "$END")" -lt 100 ]; then set_limit 100; else set_limit 80; fi ;;
+    state)  cat "$END" ;;
+    apply)  QUIET=1 set_limit "$(cat "$CONF" 2>/dev/null || echo 80)" ;;
+    *)      echo "yumi-battery-limit 80|100|toggle|state|apply"; exit 1 ;;
+esac

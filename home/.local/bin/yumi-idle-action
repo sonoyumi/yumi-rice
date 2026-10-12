@@ -1,0 +1,19 @@
+#!/bin/bash
+# Действия по бездействию для hypridle с учётом ☕ (yumi-caffeine).
+# ☕ включён: нет автоблокировки и сна; затемнение и выключение экрана — только если сессия заблокирована.
+# ☕ выключен: всё как в HyDE. DRY=1 — только напечатать, что было бы сделано (для проверки).
+# Откат: yumi-uninstall idle-fix
+caf()    { "$HOME/.local/bin/yumi-caffeine" state >/dev/null 2>&1; }
+locked() { pgrep -x hyprlock >/dev/null; }
+FLAG="${XDG_RUNTIME_DIR:-/tmp}/yumi-idle-dimmed"
+run()    { if [[ -n $DRY ]]; then echo "DO: $*"; else "$@"; fi; }
+skip()   { [[ -n $DRY ]] && echo "SKIP: $1"; exit 0; }
+
+case "$1" in
+  dim)     caf && ! locked && skip "dim (☕, экран не заблокирован)"; run brightnessctl -q -s; run brightnessctl -q s 10%; [[ -n $DRY ]] || touch "$FLAG" ;;
+  undim)   [[ -e $FLAG ]] || skip "undim (не затемняли)"; run brightnessctl -q -r; [[ -n $DRY ]] || rm -f "$FLAG" ;;
+  lock)    caf && skip "lock (☕)"; run loginctl lock-session ;;
+  dpms)    caf && ! locked && skip "dpms (☕, экран не заблокирован)"; run hyprctl dispatch 'hl.dsp.dpms({ action = "disable" })' ;;
+  suspend) caf && skip "suspend (☕)"; run systemctl suspend ;;
+  *) echo "использование: yumi-idle-action dim|undim|lock|dpms|suspend" >&2; exit 2 ;;
+esac

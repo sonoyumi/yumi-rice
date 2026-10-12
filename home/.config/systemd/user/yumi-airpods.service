@@ -1,0 +1,17 @@
+# AirPods: двойное нажатие ножки → следующий трек, тройное → предыдущий (по AAP; держит канал и отдаёт его меню).
+# Включить:  systemctl --user enable --now yumi-airpods.service
+# Отключить: systemctl --user disable --now yumi-airpods.service   (полный откат: yumi-airpods-uninstall)
+[Unit]
+Description=yumi-airpods — нажатия ножки AirPods (следующий/предыдущий трек)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/yumi-airpods
+Restart=on-failure
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=graphical-session.target

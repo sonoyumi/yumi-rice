@@ -20,7 +20,7 @@
   YP_FAKE_PROFILES=N (только с YP_DRYRUN) добавить N выдуманных профилей (проверка поиска)
   YP_TEST=prof:auto-off | prof:prio-high | prof:metered | prof:ip-manual | prof:ip-auto | prof:mac-random |
           prof:forget | prof:bad-ip   (с YP_OPEN=profile:…, только с YP_DRYRUN) — нажать настройку профиля
-Откат: yumi-panel-uninstall (или просто удалить этот файл)"""
+Откат: yumi-uninstall panel (или просто удалить этот файл)"""
 import os
 import sys
 import re

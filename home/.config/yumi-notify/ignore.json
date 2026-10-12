@@ -1,0 +1,27 @@
+{
+ "_help": "Правила yumi-notify-log: что НЕ сохранять в журнал центра управления (всплывашка всё равно показывается). Поля правила — регулярные выражения без учёта регистра: app, summary, body, icon; replaces — точное число. Правило срабатывает, если совпали все его поля. keep сильнее ignore. Правка подхватывается без перезапуска службы.",
+ "keep": [
+  {"name": "критические", "urgency": 2},
+  {"name": "ошибки", "summary": "error|ошибк|failed|warning|not found|not installed|не обновилась"}
+ ],
+ "ignore": [
+  {"name": "раскладка", "app": "^Раскладка$"},
+  {"name": "раскладка HyDE", "app": "^HyDE Alert$", "icon": "keyboard\\.svg$"},
+  {"name": "скриншот", "app": "^HyDE Alert$", "summary": "^saved in "},
+  {"name": "скриншот grimblast", "app": "^grimblast$"},
+  {"name": "громкость/яркость", "app": "^HyDE Notify$", "summary": "^(\\d+|muted|unmuted)"},
+  {"name": "ночной свет", "app": "^HyDE Notify$", "summary": "^(Hyprsunset|Mode:)"},
+  {"name": "обои", "app": "^HyDE Alert$", "summary": "(wallpaper set|\\.(jpe?g|png|gif|webp|mp4|mkv|webm)( set for .*)?$)"},
+  {"name": "обои: миниатюры", "app": "^HyDE wallpaper$"},
+  {"name": "тема/стиль/режим HyDE", "app": "^HyDe? ?Alert$", "summary": "(style .*applied|mode$)"},
+  {"name": "тема HyDE", "app": "^HyDE Alert$", "icon": "Wallbash-Icon/hyde\\.png$"},
+  {"name": "режим меню", "summary": "^Режим$"},
+  {"name": "тачбар", "app": "^Тачбар$"},
+  {"name": "вид hyprlock", "summary": "^Hyprlock (layout:|config regenerated)"},
+  {"name": "не засыпать", "app": "^Не засыпать$"},
+  {"name": "буфер обмена", "summary": "^(Deleted|No favorites\\.)$"},
+  {"name": "буфер: превью", "app": "^Pastebin:$"},
+  {"name": "после сна", "summary": "^Awake!$"},
+  {"name": "alt+tab", "replaces": 6, "app": "^notify-send$"}
+ ]
+}

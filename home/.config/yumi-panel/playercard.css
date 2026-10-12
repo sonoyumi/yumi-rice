@@ -1,0 +1,99 @@
+/* yumi-panel — базовый стиль карточки плеера (yumiplayercard.py). Цвета только @yp-*.
+   Подключается yumiplayercard.install_css() с приоритетом ниже style.css меню — центр перекрывает. */
+
+.ypc-card {
+  background: alpha(@yp-btn, 0.75);
+  border-radius: 16px;
+  padding: 14px 16px 10px 16px;
+  color: @yp-fg;
+  font-family: "JetBrainsMono Nerd Font";
+}
+.ypc-card.ypc-compact { padding: 8px 10px; border-radius: 14px; }
+
+/* ── обложка ── */
+.ypc-art {
+  border-radius: 14px;
+  background: alpha(@yp-fg, 0.08);
+  box-shadow: 0 2px 8px alpha(black, 0.35);
+}
+.ypc-compact .ypc-art { border-radius: 10px; }
+.ypc-art-ph { font-size: 22pt; color: alpha(@yp-fg2, 0.6); }
+.ypc-paused .ypc-art-img { opacity: 0.8; }
+.ypc-art-img { transition: opacity 200ms ease; }
+
+/* ── текст ── */
+.ypc-source { margin-bottom: 2px; }
+.ypc-source-icon { font-size: 10pt; color: @yp-accent; margin-right: 4px; }
+.ypc-source-name { font-size: 8.5pt; font-weight: 700; letter-spacing: 1px; color: alpha(@yp-fg2, 0.75); }
+.ypc-title { font-size: 12pt; font-weight: 800; }
+.ypc-artist { font-size: 10pt; color: @yp-fg2; }
+.ypc-compact .ypc-title { font-size: 10.5pt; }
+.ypc-compact .ypc-artist { font-size: 9pt; }
+
+/* переключатель плееров — точки */
+button.ypc-dot {
+  min-width: 7px; min-height: 7px;
+  padding: 0; margin: 0;
+  border-radius: 999px;
+  border: none; box-shadow: none;
+  background: alpha(@yp-fg, 0.3);
+  transition: background 150ms ease, min-width 150ms ease;
+}
+button.ypc-dot:hover { background: alpha(@yp-fg, 0.6); }
+button.ypc-dot.active { background: @yp-accent; min-width: 16px; }
+
+/* ── прогресс: тонкая полоса, круглый бегунок растёт при наведении ── */
+scale.ypc-progress { padding: 6px 0; margin: 0; }
+.ypc-compact scale.ypc-progress { padding: 5px 0 1px 0; }
+scale.ypc-progress > trough {
+  min-height: 4px;
+  border-radius: 2px;
+  border: none; box-shadow: none;
+  background: alpha(@yp-fg, 0.2);
+}
+scale.ypc-progress > trough > highlight {
+  min-height: 4px;
+  border-radius: 2px;
+  border: none;
+  background: @yp-accent;
+}
+scale.ypc-progress > trough > slider {
+  min-width: 8px; min-height: 8px;
+  margin: -2px;
+  border-radius: 999px;
+  border: none;
+  background: @yp-fg;
+  box-shadow: 0 1px 3px alpha(black, 0.4);
+  transition: min-width 150ms ease, min-height 150ms ease, margin 150ms ease;
+}
+scale.ypc-progress:hover > trough > slider,
+scale.ypc-progress > trough > slider:active {
+  min-width: 14px; min-height: 14px;
+  margin: -5px;
+}
+scale.ypc-progress:disabled > trough > highlight { background: alpha(@yp-fg, 0.25); }
+scale.ypc-progress:disabled > trough > slider { opacity: 0; }
+
+/* ── время и кнопки ── */
+.ypc-time { font-size: 9pt; color: alpha(@yp-fg2, 0.85); }
+button.ypc-btn {
+  min-width: 34px; min-height: 34px;
+  padding: 0;
+  border-radius: 999px;
+  border: none; box-shadow: none;
+  background: transparent;
+  color: @yp-fg;
+  font-size: 14pt;
+  transition: background 150ms ease, opacity 150ms ease;
+}
+button.ypc-btn:hover { background: @yp-hover; }
+button.ypc-btn:disabled { opacity: 0.35; }
+button.ypc-btn.ypc-play {
+  min-width: 42px; min-height: 42px;
+  background: @yp-accent;
+  color: @yp-on-acc;
+  font-size: 16pt;
+}
+button.ypc-btn.ypc-play:hover { background: alpha(@yp-accent, 0.85); }
+.ypc-compact button.ypc-btn { min-width: 30px; min-height: 30px; font-size: 12pt; }
+.ypc-compact button.ypc-btn.ypc-play { min-width: 36px; min-height: 36px; font-size: 14pt; }

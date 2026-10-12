@@ -21,12 +21,13 @@ case "$what" in
         exit 0 ;;
     view)
         echo switching > /tmp/cc-watch.pid
-        "$bin/cc-build" "$act"
+        "$bin/cc-build" "$act" --states   # --states: плитки сразу с верной подсветкой (центр не переоткрывается)
         swaync-client -op -sw
         "$bin/cc-open" --watch
         exit 0 ;;
     menu)
-        case "$act" in sound) open_menu yumi-menu-sound ;; mouse) open_menu yumi-menu-mouse ;; esac
+        case "$act" in sound) open_menu yumi-menu-sound ;; mouse) open_menu yumi-menu-mouse ;;
+                       devices) open_menu yumi-menu-devices ;; esac
         exit 0 ;;
 esac
 
@@ -34,11 +35,11 @@ state() {
     case "$what" in
         wifi)  [ "$(nmcli radio wifi)" = "enabled" ] ;;
         bt)    busctl get-property org.bluez /org/bluez/hci0 org.bluez.Adapter1 Powered 2>/dev/null | grep -q true ;;
-        vpn)   [ "$(timeout 0.5 expressvpnctl -t 1 get connectionstate 2>/dev/null)" = "Connected" ] ;;
+        vpn)   [ -n "$("$bin/yumi-vpn" state)" ] ;;   # WARP / Proton (yumi-vpn)
         saver) busctl get-property org.freedesktop.UPower.PowerProfiles /org/freedesktop/UPower/PowerProfiles \
                    org.freedesktop.UPower.PowerProfiles ActiveProfile 2>/dev/null | grep -q '"power-saver"' ;;
         mic)   ! wpctl get-volume @DEFAULT_AUDIO_SOURCE@ | grep -q MUTED ;;
-        caffeine) ! pgrep -x hypridle >/dev/null ;;     # «Не засыпать» = hypridle остановлен
+        caffeine) [ "$("$HOME/.local/bin/yumi-caffeine" state)" = true ] ;;   # ☕ глобально (yumi-caffeine)
     esac
 }
 
@@ -51,13 +52,10 @@ do_toggle() {
     case "$what" in
         wifi)  if state; then nmcli radio wifi off; else nmcli radio wifi on; fi ;;
         bt)    if state; then bluetoothctl power off; else bluetoothctl power on; fi ;;
-        vpn)   if state; then expressvpnctl disconnect; else expressvpnctl connect; fi; pkill -RTMIN+10 waybar ;;
+        vpn)   "$bin/yumi-vpn" toggle ;;
         saver) if state; then powerprofilesctl set balanced; else powerprofilesctl set power-saver; fi; pkill -RTMIN+8 waybar ;;
         mic)   wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle ;;
-        caffeine)                                         # без блокировки/сна по таймеру — для работы с телефона
-            if state; then hyprctl dispatch 'hl.dsp.exec_cmd([[hypridle]])'; notify-send -a "Не засыпать" -i preferences-desktop-screensaver "☕ Выключено" "Ноутбук снова блокируется и засыпает по таймеру"
-            else pkill -x hypridle; notify-send -a "Не засыпать" -i preferences-desktop-screensaver "☕ Включено" "Ноутбук не будет блокироваться и засыпать сам"; fi
-            sleep 0.3; pkill -RTMIN+15 -x waybar ;;                   # пилюля ☕ в Waybar — то же состояние
+        caffeine) "$HOME/.local/bin/yumi-caffeine" toggle ;;   # ☕ глобально: таймер + крышка (сам обновляет пилюлю)
     esac
 } >/dev/null 2>&1
 

@@ -16,7 +16,7 @@ N — новый план на выбранный день, Esc — назад/�
   YP_CAL_AUTOSAVE="текст"       (с add/edit) вписать текст и сохранить; YP_CAL_CONFIRM=1 — показать «Удалить?»
   YP_CAL_KEYS=Right,Down,Page_Down   «нажать» клавиши на главной (проверка без клавиатуры)
   YP_CAL_DEBUG=1                ширины элементов открытой страницы — в stderr
-Откат: yumi-calendar-uninstall"""
+Откат: yumi-uninstall calendar"""
 import os
 import sys
 from datetime import date, datetime, timedelta

@@ -4,7 +4,7 @@
 # Играет — тонкое кольцо цвета акцента вокруг обложки; пауза — без кольца и тусклее.
 # Нет обложки — круг цвета акцента (wallbash 1xa7) со значком 󰝚. Waybar (GTK3) не умеет обрезать
 # картинку стилями, поэтому круг рисуется заранее (magick) и кэшируется по artUrl + цвету.
-# Откат: yumi-player-uninstall
+# Откат: yumi-uninstall player
 export LANG=C.UTF-8 LC_ALL=C.UTF-8   # playerctl ломается на кириллице и «—» без UTF-8
 c="${XDG_CACHE_HOME:-$HOME/.cache}/yumi-player/pill"
 mkdir -p "$c"

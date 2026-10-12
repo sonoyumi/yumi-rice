@@ -21,7 +21,9 @@ server_up() { (exec 3<>"/dev/tcp/127.0.0.1/${PORT}") 2>/dev/null; }
 (
     flock -w 30 9 || exit 0
     for _ in $(seq 30); do server_up && break; pgrep -x openrgb >/dev/null || break; sleep 1; done
-    if server_up; then
+    if server_up && [[ -x "$HOME/.local/bin/kb-light" ]]; then
+        "$HOME/.local/bin/kb-light" >/dev/null 2>&1    # учитывает яркость и «свой цвет» (kb-light --help)
+    elif server_up; then
         openrgb --client "127.0.0.1:${PORT}" --noautoconnect --device "${DEVICE}" --mode static --color "${KB_COLOR}" >/dev/null 2>&1
     else
         openrgb --device "${DEVICE}" --mode static --color "${KB_COLOR}" >/dev/null 2>&1

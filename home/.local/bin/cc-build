@@ -1,11 +1,32 @@
 #!/usr/bin/env bash
 # Собрать config.json центра из cc-<вид>.json со значком громкости под текущее устройство вывода
+#   cc-build <вид> [--states]
+#   --states — заранее вписать "active" плиткам-переключателям (для смены вида при открытом центре):
+#   swaync опрашивает update-command только при ОТКРЫТИИ центра, а -R при открытом центре
+#   пересоздаёт кнопки выключенными (ToggleButton берёт active из конфига) — плитки бледнели.
 view="${1:-compact}"
 dir="$HOME/.config/swaync"
 icon="󰕾"
 case "$(pactl get-default-sink 2>/dev/null)" in bluez*) icon="󱡏" ;; esac
 jq --arg i "$icon" 'if .["widget-config"]["slider#vol"] then .["widget-config"]["slider#vol"].label = $i else . end' \
    "$dir/cc-$view.json" > /tmp/cc-build.json
+if [ "$2" = "--states" ]; then
+    mapfile -t ucmd < <(jq -r '.["widget-config"]["buttons-grid"].actions[]? | if .type == "toggle" then (.["update-command"] // "") else "" end' /tmp/cc-build.json)
+    sd=$(mktemp -d)
+    for i in "${!ucmd[@]}"; do                                  # опрос параллельно (vpn ~0.1 с)
+        [ -n "${ucmd[$i]}" ] && ( timeout 1 sh -c "${ucmd[$i]}" > "$sd/$i" 2>/dev/null ) &
+    done
+    wait
+    act=$(for i in "${!ucmd[@]}"; do
+              r=; [ -f "$sd/$i" ] && r=$(tr -d '[:space:]' < "$sd/$i"); [ "${r^^}" = TRUE ] && echo true || echo false
+          done | jq -s -c .)
+    rm -rf "$sd"
+    jq --argjson a "${act:-[]}" '
+        if .["widget-config"]["buttons-grid"].actions then
+            .["widget-config"]["buttons-grid"].actions |= [ to_entries[]
+                | .value + (if .value.type == "toggle" then {active: ($a[.key] // false)} else {} end) ]
+        else . end' /tmp/cc-build.json > /tmp/cc-build.json.st && mv /tmp/cc-build.json.st /tmp/cc-build.json
+fi
 if ! cmp -s /tmp/cc-build.json "$dir/config.json"; then
     cp /tmp/cc-build.json "$dir/config.json"
     swaync-client -R >/dev/null 2>&1

@@ -20,8 +20,9 @@ window.yp-window.background {
 }
 
 /* Размытая обложка под карточкой */
+/* Размытая обложка под карточкой: размывается один раз в коде (blurred_texture), без CSS filter —
+   фильтр пересчитывался на каждом кадре анимации */
 .yp-bgart {
-  filter: blur(14px) saturate(1.2);
   opacity: 0.45;
 }
 
@@ -140,4 +141,60 @@ button.yp-btn.yp-mute:hover {
 }
 scale.yp-vol {
   padding: 4px 0;
+}
+
+/* ---------- Текст песни (yumilyrics) ----------
+ * Все цвета — те же @yp-* из wallbash/yumi-accent: при смене обоев текст перекрашивается на лету.
+ * Блок под карточкой в обоих режимах (--bar и SUPER+M). Выключен (󰉢 / L) — рамка сжимается. */
+.yp-lyrics {
+  padding: 0 22px 12px 22px;
+  background: alpha(@yp-bg, 0.35);
+  border-top: 1px solid alpha(@yp-border, 0.35);
+}
+.yp-lyrics-scroll,
+.yp-lyrics-scroll > viewport {
+  background: transparent;
+}
+.yp-window label.yp-lyric {
+  font-family: "Inter Display", "Inter", "Cantarell", sans-serif;
+  font-size: 16pt;
+  font-weight: 800;
+  color: @yp-fg;
+  opacity: 0.28;
+  transition: opacity 300ms ease, color 300ms ease;
+}
+/* как в Apple Music: текущая строка — просто чистый белый, без свечения; прошлые и будущие одинаково
+   приглушены; под курсором строка чуть светлее, но не окрашивается */
+.yp-window label.yp-lyric.past {
+  opacity: 0.28;
+}
+.yp-window label.yp-lyric.current {
+  opacity: 1;
+  color: #ffffff;
+  text-shadow: none;
+}
+.yp-window label.yp-lyric:hover {
+  opacity: 0.55;
+}
+.yp-window label.yp-lyric.current:hover {
+  opacity: 1;
+}
+.yp-window label.yp-lyric.plain {
+  font-size: 12pt;
+  font-weight: 600;
+  opacity: 0.85;
+}
+.yp-lyrics-msg {
+  font-size: 12pt;
+  color: alpha(@yp-fg2, 0.7);
+}
+.yp-lyrics-src {
+  font-size: 8pt;
+  color: alpha(@yp-fg2, 0.5);
+  margin-top: 6px;
+}
+button.yp-btn.yp-lyr.active {
+  background: alpha(@yp-accent, 0.22);
+  color: @yp-accent;
+  box-shadow: inset 0 0 0 1px alpha(@yp-accent, 0.8);
 }

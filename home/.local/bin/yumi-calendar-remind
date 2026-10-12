@@ -12,7 +12,7 @@
 Переменные: YP_DRYRUN=1 — не слать, а печатать в stderr (отметки "notified" всё равно ставятся),
             YP_CAL_FILE — другой файл событий (проверки), YP_CAL_NOW — подменить «сейчас»,
             YP_CAL_NOACTIONS=1 — без кнопок (не ждать ответа уведомления).
-Откат: yumi-calendar-uninstall"""
+Откат: yumi-uninstall calendar"""
 import os
 import shutil
 import subprocess

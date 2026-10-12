@@ -1,0 +1,18 @@
+# Журнал уведомлений для «Центра управления» yumi-panel: пассивно слушает сессионную шину
+# (BecomeMonitor) и пишет ~/.cache/yumi-notify/history.json. swaync не затрагивается.
+# Включить:  systemctl --user enable --now yumi-notify-log.service
+# Отключить: systemctl --user disable --now yumi-notify-log.service
+[Unit]
+Description=yumi-notify-log — журнал уведомлений (наблюдатель D-Bus для центра yumi-panel)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/yumi-notify-log
+Restart=on-failure
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=graphical-session.target

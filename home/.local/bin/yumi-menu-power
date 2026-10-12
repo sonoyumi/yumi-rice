@@ -12,7 +12,7 @@ Workflow — как menu-workflows: hyde-shell workflows --set NAME, сигна�
   YP_POWER_PAGE=details             сразу открыть «Подробнее»
   YP_POWER_ACT=profile:NAME | workflow:NAME   через 0,8 с «нажать» плитку/строку
   YP_POWER_DEBUG=1  кадры анимации подсветки и смена профиля — в stderr
-Откат: yumi-panel-uninstall"""
+Откат: yumi-uninstall panel"""
 import os
 import shutil
 import subprocess
@@ -369,6 +369,12 @@ class Power:
         self.card.append(chips)
         body.append(self.card)
 
+        # ── предел зарядки 80 % (yumi-battery-limit; права на sysfs — правило udev для группы wheel) ──
+        limit_on = self.read_limit() < 100
+        row, self.limit_sw = yp.toggle_row("󰂃", "Зарядка до 80 %", limit_on, self.set_limit)
+        self.limit_sw.set_tooltip_text("Вкл — аккумулятор заряжается до 80 % (бережёт его), выкл — до 100 %")
+        body.append(row)
+
         # ── профиль ──
         body.append(yp.section("ПРОФИЛЬ"))
         self.seg = Segmented(PROFILES, self.set_profile)
@@ -570,6 +576,34 @@ class Power:
         self.panel.set_subtitle(f"{round(d['pct'])}% · {st}" + (f" · {tm}" if tm else ""))
 
     # ---------- профиль ----------
+    def read_limit(self):
+        try:
+            with open("/sys/class/power_supply/macsmc-battery/charge_control_end_threshold") as f:
+                return int(f.read())
+        except Exception:
+            return 100
+
+    def set_limit(self, on):
+        if getattr(self, "limit_lock", False):   # переключатель вернули программно — не применять снова
+            return
+        n = 80 if on else 100
+        if yp.DRY:
+            print(f"[dry] yumi-battery-limit {n}", file=sys.stderr, flush=True)
+            return
+        def work():
+            ok = subprocess.run([os.path.expanduser("~/.local/bin/yumi-battery-limit"), str(n)],
+                                env=yp.CHILD_ENV, capture_output=True).returncode == 0
+            GLib.idle_add(done, ok)
+        def done(ok):
+            real = self.read_limit() < 100
+            if real != on:                       # не получилось — вернуть переключатель в реальное положение
+                self.limit_lock = True
+                self.limit_sw.set_active(real)
+                self.limit_lock = False
+            self.toast("Зарядка до 80 %" if real else "Зарядка до 100 %", error=not ok)
+            return False
+        threading.Thread(target=work, daemon=True).start()
+
     def read_profile(self):
         if not self.bus:
             return False

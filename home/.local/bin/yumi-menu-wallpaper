@@ -452,6 +452,9 @@ class Wallpapers:
                 t.set_current(os.path.realpath(t.path) == self.current)
             self.subtitle()
             self.panel.toast(("[проверка] " if DRY else "") + f"󰄬 Обои: {tile.name}", hold=3)
+            # обои сменились — меню закрывается само (галочку видно ~0,6 с); при ошибке остаётся открытым
+            if not DRY:
+                GLib.timeout_add(600, lambda: self.panel.app.quit() or False)
         else:
             last = (out or "").strip().splitlines()[-1:] or ["ошибка"]
             self.panel.toast(f"Не удалось: {last[0][:80]}", error=True, hold=6)

@@ -4,11 +4,12 @@
   yumi-player toggle [--bar|--center]   открыть / закрыть (повторный вызов закрывает)
   yumi-player --close                   закрыть, если открыт
   yumi-player --render-colors           нарисовать colors.css из текущей палитры wallbash
+  yumi-player toggle --center --lyrics  открыть сразу с текстом песни (пункт меню «Музыка»)
 
 --bar     под пилюлей Waybar (по центру сверху, монитор под курсором), закрывается, если увести мышь
 --center  по центру экрана в фокусе (бинд SUPER+M)
 Цвета: ~/.config/yumi-player/colors.css (шаблон wallbash always/yumi-player.dcol), меняются на лету.
-Стиль: ~/.config/yumi-player/style.css. Откат: yumi-player-uninstall
+Стиль: ~/.config/yumi-player/style.css. Откат: yumi-uninstall player
 """
 import os
 import sys
@@ -72,6 +73,9 @@ if LAYER_LIB not in os.environ.get("LD_PRELOAD", "") and os.path.exists(LAYER_LI
                LANG="C.UTF-8", LC_ALL="C.UTF-8")
     os.execve(sys.executable, [sys.executable, os.path.abspath(__file__)] + sys.argv[1:], env)
 
+import bisect
+import math
+import cairo
 import json
 import re
 import subprocess
@@ -85,7 +89,9 @@ gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk4LayerShell", "1.0")
 gi.require_version("Playerctl", "2.0")
 gi.require_version("GdkPixbuf", "2.0")
-from gi.repository import Gtk, Gdk, Gio, GLib, GdkPixbuf, Pango, Playerctl  # noqa: E402
+gi.require_version("Graphene", "1.0")
+gi.require_version("Gsk", "4.0")
+from gi.repository import Gtk, Gdk, Gio, GLib, GdkPixbuf, Graphene, Gsk, Pango, Playerctl  # noqa: E402
 from gi.repository import Gtk4LayerShell as Layer  # noqa: E402
 
 FALLBACK_COLORS = """
@@ -103,6 +109,16 @@ FALLBACK_COLORS = """
 sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-panel"))
 import yumimon  # noqa: E402
 MONITOR_SCALE = yumimon.ui_scale()   # ~/.config/yumi/monitors.conf
+import yumilyrics  # noqa: E402
+import yumimeta  # noqa: E402  чистые артист/название треков yumi-music (meta.tsv)
+
+# Текст песни: включён ли (кнопка 󰉢 / клавиша L), запоминается между запусками
+LYRICS_STATE = os.path.join(os.environ.get("XDG_STATE_HOME", os.path.join(HOME, ".local/state")), "yumi-player", "lyrics")
+LYRICS_LEAD = 0.2      # строка подсвечивается чуть раньше — так глаз успевает за голосом
+# ~/.config/yumi-player/lyrics.conf: «offset = 0.0» (сдвиг, сек; + раньше) и «bluetooth = 0.2» — сколько
+# опаздывает звук в Bluetooth-наушниках (на столько же позже подсвечиваем строки, пока вывод — bluez)
+LYRICS_CONF = os.path.join(CONF, "lyrics.conf")
+LYRICS_MANUAL = 3.0    # после ручной прокрутки автоскролл ждёт столько секунд
 
 PLAYER_ICONS = {"firefox": "󰈹 Firefox", "spotify": "󰓇 Spotify", "mpv": "󰐹 mpv",
                 "chromium": " Chromium", "vlc": "󰕼 VLC"}
@@ -131,6 +147,118 @@ def square_texture(pixbuf, size):
     return Gdk.MemoryTexture.new(pb.get_width(), pb.get_height(), fmt, pb.read_pixel_bytes(), pb.get_rowstride())
 
 
+# ---------- «живой» плеер в духе Apple Music: индикатор у названия + дыхание фона ----------
+# Звук — из файла уровней модуля yumi-eq в Waybar (12 × uint8, ~30/с): вторая cava не нужна.
+# Цвета — только @yp-* (wallbash + yumi-accent): пересчитываются при перезагрузке CSS, т.е. при смене обоев.
+LEVELS = os.path.join(GLib.get_user_runtime_dir(), "yumi-eq.levels")
+
+
+def blurred_texture(pixbuf, size=160):
+    """Фон-обложка, размытая ОДИН раз при смене трека: ужать до 10 px и растянуть обратно (двойная билинейная
+    интерполяция = мягкое размытие) + насыщенность ×1.2. Раньше это делал CSS filter: blur() — он пересчитывался
+    на каждом кадре и стоил ~9 % ядра, пока в окне идёт анимация."""
+    w, h = pixbuf.get_width(), pixbuf.get_height()
+    side = min(w, h)
+    sub = pixbuf.new_subpixbuf((w - side) // 2, (h - side) // 2, side, side)
+    small = sub.scale_simple(10, 10, GdkPixbuf.InterpType.BILINEAR)
+    mid = small.scale_simple(40, 40, GdkPixbuf.InterpType.BILINEAR)
+    pb = mid.scale_simple(size, size, GdkPixbuf.InterpType.BILINEAR)
+    pb.saturate_and_pixelate(pb, 1.2, False)
+    fmt = Gdk.MemoryFormat.R8G8B8A8 if pb.get_has_alpha() else Gdk.MemoryFormat.R8G8B8
+    return Gdk.MemoryTexture.new(size, size, fmt, pb.read_pixel_bytes(), pb.get_rowstride())
+
+
+class LevelsReader:
+    """Файл уровней держим открытым и читаем pread'ом (без open/close на каждый кадр); свежесть по mtime
+    проверяем раз в ~0.25 с. Файл пропал (cava остановлена) — переоткрываем не чаще раза в секунду."""
+    def __init__(self):
+        self.fd, self.fresh, self.checked, self.retry = -1, False, 0.0, 0.0
+
+    def read(self, now):
+        if self.fd < 0:
+            if now < self.retry:
+                return None
+            try:
+                self.fd = os.open(LEVELS, os.O_RDONLY | os.O_CLOEXEC)
+            except OSError:
+                self.retry = now + 1.0
+                return None
+        try:
+            if now - self.checked > 0.25:
+                self.checked = now
+                st = os.fstat(self.fd)
+                self.fresh = st.st_nlink > 0 and time.time() - st.st_mtime < 1.0
+                if not self.fresh:                    # удалён или не обновляется — переоткроем позже
+                    os.close(self.fd)
+                    self.fd, self.retry = -1, now + 1.0
+                    return None
+            return os.pread(self.fd, 32, 0) if self.fresh else None
+        except OSError:
+            self.fd = -1
+            return None
+
+
+def rgba_mix(a, b, t, alpha=None):
+    c = Gdk.RGBA()
+    c.red, c.green, c.blue = (a.red + (b.red - a.red) * t, a.green + (b.green - a.green) * t,
+                              a.blue + (b.blue - a.blue) * t)
+    c.alpha = a.alpha + (b.alpha - a.alpha) * t if alpha is None else alpha
+    return c
+
+
+class EqIsland(Gtk.Widget):
+    """Пять мягких скруглённых столбиков у названия, как музыка в Dynamic Island: оттенки обоев
+    от светлого (@yp-fg2) через акцент к цвету рамки."""
+    def __init__(self, win, k):
+        super().__init__(valign=Gtk.Align.CENTER, halign=Gtk.Align.START)
+        self.win = win
+        self.set_size_request(round(28 * k), round(17 * k))
+
+    def do_snapshot(self, snap):
+        w, h = self.get_width(), self.get_height()
+        win = self.win
+        n, fade = 5, win.eq_fade
+        bw = max(2.0, w / (n * 1.75))
+        gap = (w - n * bw) / (n - 1)
+        for i in range(n):
+            bh = max(bw, (h - 1) * (0.2 + 0.8 * win.eq_bars[i]) * fade + bw * (1 - fade))
+            rect = Graphene.Rect().init(i * (bw + gap), (h - bh) / 2, bw, bh)
+            rr = Gsk.RoundedRect()
+            rr.init_from_rect(rect, bw / 2)
+            snap.push_rounded_clip(rr)
+            c = win.eq_cols[i].copy()
+            c.alpha = 0.45 + 0.55 * fade
+            snap.append_color(c, rect)
+            snap.pop()
+
+
+class EqGlow(Gtk.Widget):
+    """Едва заметное дыхание фона: два мягких пятна акцентных тонов медленно плывут под карточкой
+    и чуть разгораются на басах."""
+    def __init__(self, win):
+        super().__init__(can_target=False)
+        self.win = win
+
+    def do_snapshot(self, snap):
+        w, h = self.get_width(), self.get_height()
+        if w <= 0 or h <= 0:
+            return
+        win = self.win
+        k, t = win.eq_bass * win.eq_fade, win.eq_time
+        for i, base in enumerate((win.eq_glow_a, win.eq_glow_b)):
+            cx = w * (0.3 + 0.4 * (0.5 + 0.5 * math.sin(t * (0.19 + i * 0.07) + i * 2.4)))
+            cy = h * (0.3 + 0.35 * (0.5 + 0.5 * math.cos(t * (0.15 + i * 0.05) + i)))
+            r = max(w, h) * (0.42 + 0.10 * k)
+            inner, outer = base.copy(), base.copy()
+            inner.alpha = (0.07 + 0.16 * k) * win.eq_fade
+            outer.alpha = 0.0
+            s0, s1 = Gsk.ColorStop(), Gsk.ColorStop()
+            s0.offset, s0.color = 0.0, inner
+            s1.offset, s1.color = 1.0, outer
+            snap.append_radial_gradient(Graphene.Rect().init(0, 0, w, h), Graphene.Point().init(cx, cy),
+                                        r, r * 0.8, 0.0, 1.0, [s0, s1])
+
+
 class PlayerWindow(Gtk.ApplicationWindow):
     def __init__(self, app, mode):
         super().__init__(application=app, title="Плеер")
@@ -147,11 +275,44 @@ class PlayerWindow(Gtk.ApplicationWindow):
         self.close_timer = 0
         self.update_timer = 0
         self.k = 1.0
+        # «живой» плеер: уровни, затухание на паузе, цвета из стиля (wallbash)
+        self.eq_fade = 0.0
+        self.eq_bars = [0.0] * 5
+        self.eq_bass = 0.0
+        self.eq_time = 0.0
+        self.eq_last = 0
+        self.eq_tick_id = 0
+        self.eq_levels = LevelsReader()
+        self.eq_targets = [0.0] * 5
+        self.eq_bass_t = 0.0
+        self.eq_read_at = 0
+        white = Gdk.RGBA()
+        white.parse("#ffffff")
+        self.eq_cols = [white] * 5
+        self.eq_glow_a = self.eq_glow_b = white
+        self.playing = False
+        self.pos_base = (0, time.monotonic())     # (позиция мкс, когда её узнали) — для плавной подсветки строк
+        self.lyr_on = self.read_lyrics_state() or "--lyrics" in sys.argv
+        self.lyr_shift = self.read_lyrics_shift()
+        self.lyr_key = None
+        self.lyr_meta = None
+        self.lyr_token = 0
+        self.lyr_pending = False
+        self.lyr_lines, self.lyr_times, self.lyr_labels = [], [], []
+        self.lyr_synced = False
+        self.lyr_cur = -1
+        self.lyr_manual_until = 0
+        self.lyr_rescroll = False
+        self.lyr_anim = None
+        self.lyr_anim_id = 0
 
         self.add_css_class("yp-window")
+        if mode == "center":
+            self.add_css_class("yp-center")
         self.setup_layer()
         self.build()
         self.setup_css()
+        self.fix_stage_size()
 
         self.manager = Playerctl.PlayerManager()
         self.manager.connect("name-appeared", lambda _m, n: self.manage(n))
@@ -162,6 +323,7 @@ class PlayerWindow(Gtk.ApplicationWindow):
         self.refresh(force=True)
         self.refresh_volume()
         GLib.timeout_add(500, self.tick)
+        GLib.timeout_add(100, self.lyrics_tick)
         GLib.timeout_add(2000, self.refresh_volume)
         if mode == "bar":   # мышь так и не дошла до окна — закрыть
             GLib.timeout_add(2500, lambda: (self.entered or self.app.quit()) and False)
@@ -208,11 +370,17 @@ class PlayerWindow(Gtk.ApplicationWindow):
         self.bgart = Gtk.Picture(css_classes=["yp-bgart"], content_fit=Gtk.ContentFit.COVER, can_shrink=True)
         frame.add_overlay(self.bgart)
         frame.set_measure_overlay(self.bgart, False)
+        self.eq_glow = EqGlow(self)                  # дыхание фона — между обложкой-фоном и карточкой
+        frame.add_overlay(self.eq_glow)
+        frame.set_measure_overlay(self.eq_glow, False)
 
         card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, css_classes=["yp-card"])
         card.set_size_request(round(440 * self.k), -1)
-        frame.add_overlay(card)
-        frame.set_measure_overlay(card, True)
+        # текст — под карточкой (и --bar, и --center). Выключен — рамка сжимается до карточки
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        body.append(card)
+        frame.add_overlay(body)
+        frame.set_measure_overlay(body, True)
 
         top = Gtk.Box(spacing=16)
         card.append(top)
@@ -231,10 +399,14 @@ class PlayerWindow(Gtk.ApplicationWindow):
         top.append(info)
         self.head = Gtk.Label(xalign=0, css_classes=["yp-head"], ellipsize=Pango.EllipsizeMode.END)
         self.title_l = Gtk.Label(xalign=0, css_classes=["yp-title"], ellipsize=Pango.EllipsizeMode.END,
-                                 max_width_chars=26, width_chars=26)
+                                 max_width_chars=23, width_chars=23)
+        self.eq_island = EqIsland(self, self.k)
+        title_row = Gtk.Box(spacing=round(8 * self.k))
+        title_row.append(self.title_l)
+        title_row.append(self.eq_island)
         self.artist_l = Gtk.Label(xalign=0, css_classes=["yp-artist"], ellipsize=Pango.EllipsizeMode.END,
                                   max_width_chars=30)
-        for w in (self.head, self.title_l, self.artist_l):
+        for w in (self.head, title_row, self.artist_l):
             info.append(w)
 
         self.progress = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL, draw_value=False,
@@ -250,6 +422,12 @@ class PlayerWindow(Gtk.ApplicationWindow):
         drag.connect("released", self.on_seek_release)
         drag.connect("cancel", lambda *_: self.on_seek_release())
         self.progress.add_controller(drag)
+        # колесо/тачпад над полосой: ±5 с за щелчок (без этого GtkScale двигает ползунок на крошечный шаг)
+        self.scroll_acc = 0.0
+        wheel = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.VERTICAL,
+                                          propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        wheel.connect("scroll", self.on_seek_scroll)
+        self.progress.add_controller(wheel)
         info.append(self.progress)
         times = Gtk.Box()
         self.pos_l = Gtk.Label(xalign=0, hexpand=True, css_classes=["yp-time"])
@@ -264,7 +442,8 @@ class PlayerWindow(Gtk.ApplicationWindow):
         self.b_play = self.button("󰏤", "Пауза", lambda *_: self.cmd("play_pause"), ["yp-play"])
         self.b_next = self.button("󰒭", "Вперёд", lambda *_: self.cmd("next"))
         self.b_switch = self.button("󰓃", "Другой плеер", self.on_switch)
-        for b in (self.b_prev, self.b_play, self.b_next, self.b_switch):
+        self.b_lyr = self.button("󰉢", "Текст песни (L)", self.on_lyrics_toggle, ["yp-lyr"])
+        for b in (self.b_prev, self.b_play, self.b_next, self.b_lyr, self.b_switch):
             ctl.append(b)
 
         vol = Gtk.Box(spacing=8, css_classes=["yp-volume"])
@@ -280,7 +459,19 @@ class PlayerWindow(Gtk.ApplicationWindow):
         for w in (self.b_mute, self.volume, self.vol_l):
             vol.append(w)
 
-        self.set_child(frame)
+        body.append(self.build_lyrics())
+        # Окно (layer-surface) размер НЕ меняет: в Hyprland изменение размера слоя анимируется как открытие —
+        # цветной прямоугольник и шлейф. Сцена всегда размером «с текстом», видимая рамка внутри прижата
+        # к верху (--bar) или к центру (--center) и сжимается мгновенно; щелчки принимает только рамка.
+        frame.set_hexpand(True)     # без expand Gtk.Box не даёт рамке места, и выравнивание не работает
+        frame.set_vexpand(True)
+        frame.set_halign(Gtk.Align.CENTER)
+        frame.set_valign(Gtk.Align.START if self.mode == "bar" else Gtk.Align.CENTER)
+        self.frame = frame
+        self.stage = Gtk.Box()
+        self.stage.append(frame)
+        self.shape = None
+        self.set_child(self.stage)
 
         # окно ловит клавиши первым (CAPTURE): иначе стрелки уходят ползунку под фокусом и он «перематывает»
         keys = Gtk.EventControllerKey(propagation_phase=Gtk.PropagationPhase.CAPTURE)
@@ -306,6 +497,7 @@ class PlayerWindow(Gtk.ApplicationWindow):
         self.mon = Gio.File.new_for_path(CONF).monitor_directory(Gio.FileMonitorFlags.WATCH_MOVES, None)
         self.mon.connect("changed", self.on_conf_changed)
         self.css_timer = 0
+        self.update_eq_colors()
 
     def load_css(self):
         parts = []
@@ -331,6 +523,7 @@ class PlayerWindow(Gtk.ApplicationWindow):
     def _reload_css(self):
         self.css_timer = 0
         self.load_css()
+        self.update_eq_colors()                  # новые обои — новые оттенки индикатора и фона
         return False
 
     # ---------- плееры ----------
@@ -401,12 +594,17 @@ class PlayerWindow(Gtk.ApplicationWindow):
             self.pos_l.set_label("-:--")
             self.len_l.set_label("-:--")
             self.b_play.set_label("󰐊")
+            self.playing = False
+            self.lyrics_for(None)
             return
         md = self.meta(p)
         title = md.get("xesam:title") or "Без названия"
         artist = md.get("xesam:artist") or ""
         if isinstance(artist, list):
             artist = ", ".join(a for a in artist if a)
+        clean = yumimeta.lookup(md.get("xesam:url") or "")   # трек yumi-music: настоящие имена, не ник/канал
+        if clean and clean["title"]:
+            title, artist = clean["title"], clean["artist"]
         playing = p.props.playback_status == PLAYING
         src = p.props.player_name.lower()
         src = PLAYER_ICONS.get(src, f"󰝚 {p.props.player_name}")
@@ -423,6 +621,9 @@ class PlayerWindow(Gtk.ApplicationWindow):
         self.len_l.set_label(fmt_time(self.length) if self.length else "-:--")
         self.progress.set_sensitive(bool(self.length) and p.props.can_seek)
         self.set_art(md.get("mpris:artUrl") or None)
+        self.playing = playing
+        self.eq_wake()
+        self.lyrics_for((title, artist, self.length / 1_000_000, md.get("xesam:url") or ""))
         self.tick()
         if os.environ.get("YP_DEBUG"):
             print(f"{time.strftime('%T')} refresh: {p.props.player_instance} | {'Playing' if playing else 'Paused'} | {title} | art={bool(md.get('mpris:artUrl'))}", file=sys.stderr, flush=True)
@@ -437,10 +638,297 @@ class PlayerWindow(Gtk.ApplicationWindow):
                 pos = p.get_position()
             except GLib.Error:
                 pos = 0
+            self.pos_base = (pos, time.monotonic())
             length = getattr(self, "length", 0)
             self.progress.set_value(min(pos / length, 1) if length else 0)
             self.pos_l.set_label(fmt_time(pos) if length else "-:--")
         return True
+
+    # ---------- индикатор и дыхание фона ----------
+    def update_eq_colors(self):
+        """Оттенки из @yp-* (colors.css от wallbash + accent.css от yumi-accent): светлый → акцент → рамка."""
+        ctx = self.get_style_context()
+
+        def col(name, fallback):
+            ok, c = ctx.lookup_color(name)
+            if not ok:
+                c = Gdk.RGBA()
+                c.parse(fallback)
+            return c
+        fg2, acc, border = col("yp-fg2", "#cce9ff"), col("yp-accent", "#9ad8e6"), col("yp-border", "#6598a3")
+        self.eq_cols = [fg2, rgba_mix(fg2, acc, 0.5), acc, rgba_mix(acc, border, 0.45), rgba_mix(acc, border, 0.8)]
+        self.eq_glow_a, self.eq_glow_b = acc, rgba_mix(acc, fg2, 0.35)
+        for w in (getattr(self, "eq_island", None), getattr(self, "eq_glow", None)):
+            if w:
+                w.queue_draw()
+
+    def eq_wake(self):
+        if not self.eq_tick_id:
+            self.eq_last = 0
+            self.eq_tick_id = self.add_tick_callback(self.eq_tick)
+
+    def eq_tick(self, _w, clock):
+        now = clock.get_frame_time()
+        dt = min(0.05, (now - self.eq_last) / 1e6) if self.eq_last else 0.016
+        self.eq_last = now
+        self.eq_time += dt
+        target_fade = 1.0 if self.playing else 0.0
+        self.eq_fade += (target_fade - self.eq_fade) * (1 - math.exp(-dt * 4))
+        # уровни приходят от cava ~30 раз/с — читаем с той же частотой; сглаживание ниже идёт на каждом кадре (60/с)
+        if now - self.eq_read_at >= 15000:      # cava шлёт 60 кадров/с — читаем так же часто
+            self.eq_read_at = now
+            lv = self.eq_levels.read(now / 1e6) if self.playing else None
+            if lv:
+                n = len(lv)
+                self.eq_targets = [(sum(lv[i * n // 5:(i + 1) * n // 5] or lv[:1]) /
+                                    max(1, len(lv[i * n // 5:(i + 1) * n // 5] or lv[:1])) / 255) ** 0.7
+                                   for i in range(5)]
+                self.eq_bass_t = ((lv[0] + lv[1] + lv[2]) / 765) ** 0.8
+            elif self.playing:   # уровней нет (Waybar без yumi-eq) — тихое дыхание, чтобы индикатор не замирал
+                self.eq_targets = [0.25 + 0.2 * math.sin(self.eq_time * (2.1 + i * 0.7) + i) ** 2 for i in range(5)]
+                self.eq_bass_t = 0.0
+            else:
+                self.eq_targets, self.eq_bass_t = [0.0] * 5, 0.0
+        targets, bass = self.eq_targets, self.eq_bass_t
+        for i, tg in enumerate(targets):
+            rate = 34.0 if tg > self.eq_bars[i] else 16.0          # быстрый подъём, мягкий спад
+            self.eq_bars[i] += (tg - self.eq_bars[i]) * (1 - math.exp(-dt * rate))
+        self.eq_bass += (bass - self.eq_bass) * (1 - math.exp(-dt * (26.0 if bass > self.eq_bass else 8.0)))
+        self.eq_island.queue_draw()
+        self.eq_glow.queue_draw()
+        if not self.playing and self.eq_fade < 0.01:              # затихло — перестаём перерисовывать
+            self.eq_tick_id = 0
+            return GLib.SOURCE_REMOVE
+        return GLib.SOURCE_CONTINUE
+
+    def fix_stage_size(self):
+        """Размер сцены = рамка с включённым текстом (меряем один раз, уже со стилем)."""
+        self.lyr_area.set_visible(True)
+        w = self.frame.measure(Gtk.Orientation.HORIZONTAL, -1)[1]
+        h = self.frame.measure(Gtk.Orientation.VERTICAL, w)[1]
+        self.stage.set_size_request(w, h)
+        self.lyr_area.set_visible(self.lyr_on)
+
+    def do_realize(self):
+        Gtk.ApplicationWindow.do_realize(self)
+        self.get_surface().get_frame_clock().connect("after-paint", self._update_shape)
+
+    def _update_shape(self, *_):
+        """Щелчки и наведение — только по рамке: прозрачная часть сцены пропускает их к окнам ниже."""
+        ok, b = self.frame.compute_bounds(self)
+        if not ok:
+            return
+        shape = (int(b.get_x()), int(b.get_y()), int(b.get_width() + 0.999), int(b.get_height() + 0.999))
+        if shape != self.shape:
+            self.shape = shape
+            self.get_surface().set_input_region(cairo.Region(cairo.RectangleInt(*shape)))
+
+    # ---------- текст песни (yumilyrics: YouTube Music → LRCLIB, кэш) ----------
+    def build_lyrics(self):
+        w, h = round(440 * self.k), round(230 * self.k)
+        self.lyr_area = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, css_classes=["yp-lyrics"])
+        self.lyr_area.set_size_request(w, h)
+        self.lyr_stack = Gtk.Stack(vexpand=True)
+        self.lyr_scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER,
+                                             vscrollbar_policy=Gtk.PolicyType.EXTERNAL, vexpand=True,
+                                             css_classes=["yp-lyrics-scroll"])
+        # отступы сверху и снизу: первая и последняя строки тоже встают на ~⅓ высоты
+        self.lyr_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=round(12 * self.k),
+                               margin_top=round(h * 0.3), margin_bottom=round(h * 0.6))
+        self.lyr_scroll.set_child(self.lyr_box)
+        self.lyr_msg = Gtk.Label(css_classes=["yp-lyrics-msg"], wrap=True, justify=Gtk.Justification.CENTER)
+        self.lyr_stack.add_named(self.lyr_scroll, "text")
+        self.lyr_stack.add_named(self.lyr_msg, "msg")
+        self.lyr_src = Gtk.Label(xalign=0, css_classes=["yp-lyrics-src"], ellipsize=Pango.EllipsizeMode.END)
+        self.lyr_area.append(self.lyr_stack)
+        self.lyr_area.append(self.lyr_src)
+        # колесо над текстом — ручная прокрутка, автоскролл ждёт LYRICS_MANUAL секунд
+        wheel = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.VERTICAL)
+        wheel.connect("scroll", self.on_lyrics_scroll)
+        self.lyr_scroll.add_controller(wheel)
+        self.lyr_area.set_visible(self.lyr_on)
+        if self.lyr_on:
+            self.b_lyr.add_css_class("active")
+        self.lyrics_msg("Ничего не играет")
+        return self.lyr_area
+
+    def read_lyrics_state(self):
+        try:
+            with open(LYRICS_STATE) as f:
+                return f.read().strip() != "off"
+        except OSError:
+            return True
+
+    def read_lyrics_shift(self):
+        """Итоговый сдвиг подсветки, сек: LEAD + offset − задержка Bluetooth (если вывод — bluez)."""
+        conf = {"offset": 0.0, "bluetooth": 0.2}
+        try:
+            with open(LYRICS_CONF) as f:
+                for line in f:
+                    k, _, v = line.partition("=")
+                    if k.strip() in conf:
+                        conf[k.strip()] = float(v.split("#")[0])
+        except (OSError, ValueError):
+            pass
+        bt = run("pactl", "get-default-sink").startswith("bluez_")
+        return LYRICS_LEAD + conf["offset"] - (conf["bluetooth"] if bt else 0.0)
+
+    def on_lyrics_toggle(self, *_):
+        self.lyr_on = not self.lyr_on
+        try:
+            os.makedirs(os.path.dirname(LYRICS_STATE), exist_ok=True)
+            with open(LYRICS_STATE, "w") as f:
+                f.write("on\n" if self.lyr_on else "off\n")
+        except OSError:
+            pass
+        (self.b_lyr.add_css_class if self.lyr_on else self.b_lyr.remove_css_class)("active")
+        self.lyr_area.set_visible(self.lyr_on)   # рамка сжимается/растёт внутри сцены постоянного размера
+        if self.lyr_on:
+            if self.lyr_pending:
+                self.load_lyrics()
+            self.lyr_cur, self.lyr_manual_until = -1, 0     # заново найти строку и докрутить до неё
+
+    def lyrics_msg(self, text, src=""):
+        self.lyr_msg.set_label(text)
+        self.lyr_src.set_label(src)
+        self.lyr_stack.set_visible_child_name("msg")
+
+    def lyrics_for(self, meta):
+        """Новый трек — новый текст. meta = (название, артист, длительность сек, url) или None."""
+        key = None if meta is None else (meta[3] or f"{meta[1]}|{meta[0]}")
+        if key == self.lyr_key:
+            return
+        self.lyr_key, self.lyr_meta = key, meta
+        self.lyr_token += 1                   # ответ на прошлый трек, если придёт, будет выброшен
+        self.clear_lyrics()
+        if meta is None:
+            self.lyr_pending = False
+            self.lyrics_msg("Ничего не играет")
+            return
+        self.load_lyrics()
+
+    def load_lyrics(self):
+        if not self.lyr_on:
+            self.lyr_pending = True           # текст спрятан — в сеть не ходим, пока не включат
+            return
+        self.lyr_pending = False
+        self.lyr_token += 1
+        self.lyrics_msg("Ищу текст…")
+        threading.Thread(target=self._fetch_lyrics, args=(self.lyr_token, *self.lyr_meta), daemon=True).start()
+
+    def _fetch_lyrics(self, token, title, artist, length, url):
+        try:
+            res = yumilyrics.fetch(title, artist, length, url)
+        except Exception as e:
+            if os.environ.get("YP_DEBUG"):
+                print(f"lyrics: {e}", file=sys.stderr, flush=True)
+            res = None
+        GLib.idle_add(self.set_lyrics, token, res)
+
+    def clear_lyrics(self):
+        for lbl in self.lyr_labels:
+            self.lyr_box.remove(lbl)
+        self.lyr_lines, self.lyr_times, self.lyr_labels = [], [], []
+        self.lyr_cur = -1
+        self.lyr_synced = False
+
+    def set_lyrics(self, token, res):
+        if token != self.lyr_token:
+            return False
+        self.clear_lyrics()
+        if not res or not res.get("lines"):
+            self.lyrics_msg("Текст не найден")
+            return False
+        self.lyr_synced = res["synced"]
+        self.lyr_lines = list(res["lines"])
+        self.lyr_times = [t for t, _ in self.lyr_lines]
+        for t, s in self.lyr_lines:
+            lbl = Gtk.Label(label=s or "♪", xalign=0, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR,
+                            max_width_chars=1, hexpand=True,
+                            css_classes=["yp-lyric"] if self.lyr_synced else ["yp-lyric", "plain"])
+            if self.lyr_synced:          # клик по строке — перемотка на её время
+                click = Gtk.GestureClick()
+                click.connect("released", lambda *_a, t=t: self.seek_to_line(t))
+                lbl.add_controller(click)
+                lbl.set_cursor_from_name("pointer")
+            self.lyr_box.append(lbl)
+            self.lyr_labels.append(lbl)
+        self.lyr_src.set_label(res["source"] + ("" if self.lyr_synced else " · без таймингов"))
+        self.lyr_stack.set_visible_child_name("text")
+        self.lyr_scroll.get_vadjustment().set_value(0)
+        self.lyr_manual_until = 0
+        return False
+
+    def lyrics_pos(self):
+        """Позиция в секундах: последний ответ MPRIS (раз в 500 мс) + сколько прошло с тех пор."""
+        pos, at = self.pos_base
+        if self.playing:
+            pos += (time.monotonic() - at) * 1_000_000
+        return pos / 1_000_000
+
+    def lyrics_tick(self):
+        if not (self.lyr_on and self.lyr_synced and self.lyr_labels):
+            return True
+        i = bisect.bisect_right(self.lyr_times, self.lyrics_pos() + self.lyr_shift) - 1
+        if i != self.lyr_cur:
+            for j, lbl in enumerate(self.lyr_labels):
+                (lbl.add_css_class if j < i else lbl.remove_css_class)("past")
+                (lbl.add_css_class if j == i else lbl.remove_css_class)("current")
+            self.lyr_cur = i
+            self.lyr_rescroll = True
+        if self.lyr_rescroll and time.monotonic() > self.lyr_manual_until:
+            self.lyr_rescroll = False
+            self.scroll_lyrics(max(i, 0))
+        return True
+
+    def scroll_lyrics(self, i):
+        lbl = self.lyr_labels[i]
+        ok, pt = lbl.compute_point(self.lyr_box, Graphene.Point())    # координаты всего текста, не видимой части
+        if not ok or lbl.get_height() == 0:   # ещё не разложено — попробуем на следующем тике
+            self.lyr_rescroll = True
+            return
+        adj = self.lyr_scroll.get_vadjustment()
+        page = adj.get_page_size()
+        target = self.lyr_box.get_margin_top() + pt.y + lbl.get_height() / 2 - page / 3   # строка — на ⅓ высоты
+        target = min(max(target, 0), max(adj.get_upper() - page, 0))
+        self.lyr_anim = (adj.get_value(), target, None)
+        if not self.lyr_anim_id:
+            self.lyr_anim_id = self.lyr_scroll.add_tick_callback(self._lyrics_anim)
+
+    def _lyrics_anim(self, _w, clock):
+        v0, v1, t0 = self.lyr_anim
+        now = clock.get_frame_time()
+        if t0 is None:
+            t0 = now
+            self.lyr_anim = (v0, v1, t0)
+        x = min(1.0, (now - t0) / 450_000)
+        self.lyr_scroll.get_vadjustment().set_value(v0 + (v1 - v0) * (1 - (1 - x) ** 3))   # ease-out
+        if x >= 1.0:
+            self.lyr_anim_id = 0
+            return GLib.SOURCE_REMOVE
+        return GLib.SOURCE_CONTINUE
+
+    def on_lyrics_scroll(self, *_):
+        if self.lyr_anim_id:
+            self.lyr_scroll.remove_tick_callback(self.lyr_anim_id)
+            self.lyr_anim_id = 0
+        self.lyr_manual_until = time.monotonic() + LYRICS_MANUAL
+        self.lyr_rescroll = True              # после паузы вернёмся к текущей строке
+        return False                          # саму прокрутку делает ScrolledWindow
+
+    def seek_to_line(self, t):
+        if not (self.player and self.lyr_synced):
+            return
+        us = int(max(t, 0) * 1_000_000)
+        try:
+            self.player.set_position(us)
+        except GLib.Error:
+            return
+        self.pos_base = (us, time.monotonic())
+        self.lyr_manual_until = 0
+        self.lyr_rescroll = True
+        self.seek_block_until = time.monotonic() + 0.8
+        GLib.timeout_add(900, lambda: self.tick() and False)
 
     # ---------- обложка ----------
     def set_art(self, url):
@@ -476,7 +964,7 @@ class PlayerWindow(Gtk.ApplicationWindow):
         tex = None
         try:
             pb = GdkPixbuf.Pixbuf.new_from_file(path)
-            tex = (square_texture(pb, 256), square_texture(pb, 24))
+            tex = (square_texture(pb, 256), blurred_texture(pb))
         except Exception:
             pass
         if len(self.art_cache) > 20:
@@ -519,10 +1007,11 @@ class PlayerWindow(Gtk.ApplicationWindow):
             self.seek_pending = int(v * length)
             self.seek_block_until = time.monotonic() + 1.5   # tick не двигает ползунок обратно
             self.pos_l.set_label(fmt_time(self.seek_pending))
-            if not self.dragging:                          # клик, колесо, клавиши — короткая пауза и одна команда
-                if self.seek_timer:
-                    GLib.source_remove(self.seek_timer)
-                self.seek_timer = GLib.timeout_add(150, self._seek_timeout)
+            # одна команда после паузы в движении ползунка; при перетаскивании пауза длиннее.
+            # На released не полагаемся: GtkScale забирает себе нажатие, и отпускание сюда не доходит.
+            if self.seek_timer:
+                GLib.source_remove(self.seek_timer)
+            self.seek_timer = GLib.timeout_add(250 if self.dragging else 150, self._seek_timeout)
         return False
 
     def on_seek_press(self, *_):
@@ -547,9 +1036,36 @@ class PlayerWindow(Gtk.ApplicationWindow):
                 pass
             self.seek_block_until = time.monotonic() + 0.8
         self.seek_pending = None
+        self.dragging = False
         return False
 
+    def on_seek_scroll(self, _ctl, _dx, dy):
+        self.scroll_acc += dy
+        steps = int(self.scroll_acc)              # тачпад шлёт дробные dy — копим до целого щелчка
+        if steps:
+            self.scroll_acc -= steps
+            self.seek_rel(-5 * steps)
+        return True
+
     def seek_rel(self, sec):
+        # точный SetPosition вместо Seek: браузеры и Pear Desktop выполняют относительный Seek неточно
+        length = getattr(self, "length", 0)
+        if self.player and length:
+            base = self.seek_pending
+            if base is None:
+                try:
+                    base = self.player.get_position()
+                except GLib.Error:
+                    return
+            target = min(max(base + int(sec * 1_000_000), 0), length - 1_000_000)
+            self.seek_pending = target
+            self.seek_block_until = time.monotonic() + 1.5
+            self.progress.set_value(target / length)
+            self.pos_l.set_label(fmt_time(target))
+            if self.seek_timer:
+                GLib.source_remove(self.seek_timer)
+            self.seek_timer = GLib.timeout_add(150, self._seek_timeout)
+            return
         if self.player:
             try:
                 self.player.seek(int(sec * 1_000_000))
@@ -612,14 +1128,29 @@ class PlayerWindow(Gtk.ApplicationWindow):
         return True
 
     def on_volume(self, _scale, _scroll, value):
+        """Ползунок громкости. При перетаскивании GTK шлёт десятки значений в секунду: каждая смена громкости —
+        скачок в звуке, и в Bluetooth-наушниках это трещит. Поэтому применяем не чаще раза в 90 мс (последнее
+        значение), а итоговое доходит всегда; надпись с процентами обновляется сразу."""
         v = int(min(max(value, 0), 100))
         self.vol_block_until = time.monotonic() + 1
         self.vol_l.set_label(f"{v}%")
+        self.vol_pending = v
+        if not getattr(self, "vol_timer", 0):
+            self._vol_apply()
+            self.vol_timer = GLib.timeout_add(90, self._vol_apply)
+        return False
+
+    def _vol_apply(self):
+        v = getattr(self, "vol_pending", None)
+        if v is None:                             # за 90 мс ничего нового — останавливаемся
+            self.vol_timer = 0
+            return False
+        self.vol_pending = None
         if self.sink is not None:
             subprocess.Popen(["pactl", "set-sink-input-volume", str(self.sink), f"{v}%"])
         else:
             subprocess.Popen(["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", f"{v}%"])
-        return False
+        return True
 
     def on_mute(self, *_):
         if self.sink is not None:
@@ -649,6 +1180,8 @@ class PlayerWindow(Gtk.ApplicationWindow):
             self.cmd("next")
         elif ch in ("p", "з"):
             self.cmd("previous")
+        elif ch in ("l", "д"):
+            self.on_lyrics_toggle()
         else:
             return False
         return True
@@ -669,14 +1202,43 @@ class App(Gtk.Application):
         super().__init__(application_id="org.yumi.player", flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE)
         self.win = None
 
+    def click_outside(self):
+        """Нажата кнопка мыши: курсор не над плеером и не над Waybar — закрыть (пилюля бара сама переключает)."""
+        if self.win is None or not self.win.get_mapped():
+            return
+        try:
+            cur = json.loads(subprocess.run(["hyprctl", "-j", "cursorpos"], capture_output=True, text=True,
+                                            timeout=1).stdout)
+            layers = json.loads(subprocess.run(["hyprctl", "-j", "layers"], capture_output=True, text=True,
+                                               timeout=1).stdout)
+        except Exception:
+            return
+        cx, cy = cur.get("x", 0), cur.get("y", 0)
+        for mon in layers.values():
+            for lv in mon.get("levels", {}).values():
+                for l in lv:
+                    mine = l.get("pid") == os.getpid() and l.get("namespace") == "yumi-player"
+                    x, y, w, h = l["x"], l["y"], l["w"], l["h"]
+                    if mine and self.win.shape:    # своё окно — только видимая рамка, не прозрачная сцена
+                        x, y, w, h = x + self.win.shape[0], y + self.win.shape[1], self.win.shape[2], self.win.shape[3]
+                    if (mine or l.get("namespace") == "waybar") and x <= cx <= x + w and y <= cy <= y + h:
+                        return
+        self.quit()
+
     def do_command_line(self, cmdline):
         args = cmdline.get_arguments()[1:]
         if self.win is not None or "--close" in args:
             self.quit()        # повторный вызов (клик, бинд) закрывает открытый плеер
             return 0
         mode = "center" if "--center" in args else "bar"
+        if "--lyrics" in args and "--lyrics" not in sys.argv:
+            sys.argv.append("--lyrics")
         self.win = PlayerWindow(self, mode)
         self.win.present()
+        if not os.environ.get("YP_STAY"):           # щелчок мимо плеера закрывает его (как в меню yumi-panel)
+            sys.path.insert(0, os.path.join(HOME, ".local/lib/yumi-panel"))
+            from yumipanel import watch_mouse_clicks
+            watch_mouse_clicks(self.click_outside)
         return 0
 
 

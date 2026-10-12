@@ -176,7 +176,7 @@ def level(pct):
 
 
 # ---------- значки приложений ----------
-GLYPHS = {"firefox": "󰈹", "kitty": "󰄛", "code": "󰨞", "telegram": "", "python": "󰌠", "node": "󰎙",
+GLYPHS = {"zen": "󰖟", "firefox": "󰈹", "kitty": "󰄛", "code": "󰨞", "telegram": "", "python": "󰌠", "node": "󰎙",
           "claude": "󰚩", "hyprland": "", "waybar": "󰕮", "pipewire": "󰕾", "wireplumber": "󰕾",
           "solaar": "󰍽", "steam": "󰓓", "discord": "󰙯", "spotify": "󰓇", "chromium": "", "obs": "󰑋"}
 _icon_cache = {}
