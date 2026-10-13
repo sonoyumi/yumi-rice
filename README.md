@@ -221,6 +221,8 @@ Measured on my machine (MacBook Pro M1, 8 GB, Firefox, Telegram and terminals op
 ![Wallpaper change](assets/screenshots/v3/wallpaper-change.gif)
 <p align="center">One new wallpaper — and everything recolors together: Waybar, terminals, cava, the file manager, window borders</p>
 
+<p align="center">🎬 <a href="https://github.com/sonoyumi/yumi-rice/releases/download/v3.0/yumi-rice-3.0-showcase-1080p120.mp4"><b>Full showcase video</b></a> — 1080p, 120 fps, 1 min: windows, dwindle / master / scrolling layouts, workspaces, player with lyrics, wallpaper changes</p>
+
 | | |
 |:---:|:---:|
 | ![Pult (SUPER+Space)](assets/screenshots/v3/pult.png) | ![Pult: commands, files, web](assets/screenshots/v3/pult-search.png) |
@@ -690,6 +692,8 @@ Misurato sulla mia macchina (MacBook Pro M1, 8 GB, con Firefox, Telegram e termi
 
 Vedi la [galleria nella sezione inglese](#screenshots): prima la 3.0 (con la GIF del cambio di sfondo), poi le versioni precedenti.
 
+🎬 [Video completo](https://github.com/sonoyumi/yumi-rice/releases/download/v3.0/yumi-rice-3.0-showcase-1080p120.mp4) — 1080p, 120 fps, 1 min: finestre, layout dwindle / master / scrolling, spazi di lavoro, lettore con testi, cambio di sfondo.
+
 ### Tasti e gesti
 
 | Tasti | Azione |
@@ -1061,6 +1065,8 @@ MIT, vedi [LICENSE](LICENSE).
 
 Див. [галерею в англійському розділі](#screenshots): спершу 3.0 (з GIF зміни шпалер), далі попередні версії.
 
+🎬 [Повне відео-шоукейс](https://github.com/sonoyumi/yumi-rice/releases/download/v3.0/yumi-rice-3.0-showcase-1080p120.mp4) — 1080p, 120 к/с, 1 хв: вікна, розкладки dwindle / master / scrolling, робочі столи, плеєр з текстом, зміна шпалер.
+
 ### Клавіші й жести
 
 | Клавіші | Дія |
@@ -1431,6 +1437,8 @@ MIT — див. [LICENSE](LICENSE).
 ### Скриншоты
 
 См. [галерею в английском разделе](#screenshots): сначала 3.0 (с GIF смены обоев), потом прошлые версии.
+
+🎬 [Полное видео-шоукейс](https://github.com/sonoyumi/yumi-rice/releases/download/v3.0/yumi-rice-3.0-showcase-1080p120.mp4) — 1080p, 120 к/с, 1 мин: окна, раскладки dwindle / master / scrolling, рабочие столы, плеер с текстом, смена обоев.
 
 ### Клавиши и жесты
 
