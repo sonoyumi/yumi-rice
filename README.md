@@ -218,6 +218,9 @@ Measured on my machine (MacBook Pro M1, 8 GB, Firefox, Telegram and terminals op
 
 ### Screenshots
 
+https://github.com/user-attachments/assets/72154592-2090-4faa-a56b-40aeb462c0ba
+<p align="center">Showcase: windows, dwindle / master / scrolling layouts, workspaces, player with lyrics, wallpaper changes</p>
+
 ![Wallpaper change](assets/screenshots/v3/wallpaper-change.gif)
 <p align="center">One new wallpaper — and everything recolors together: Waybar, terminals, cava, the file manager, window borders</p>
 
@@ -688,7 +691,9 @@ Misurato sulla mia macchina (MacBook Pro M1, 8 GB, con Firefox, Telegram e termi
 
 ### Screenshot
 
-Vedi la [galleria nella sezione inglese](#screenshots): prima la 3.0 (con la GIF del cambio di sfondo), poi le versioni precedenti.
+https://github.com/user-attachments/assets/72154592-2090-4faa-a56b-40aeb462c0ba
+
+Video: finestre, layout dwindle / master / scrolling, spazi di lavoro, lettore con i testi, cambio di sfondo. Il resto è [nella galleria della sezione inglese](#screenshots).
 
 ### Tasti e gesti
 
@@ -1059,7 +1064,9 @@ MIT, vedi [LICENSE](LICENSE).
 
 ### Скриншоти
 
-Див. [галерею в англійському розділі](#screenshots): спершу 3.0 (з GIF зміни шпалер), далі попередні версії.
+https://github.com/user-attachments/assets/72154592-2090-4faa-a56b-40aeb462c0ba
+
+Відео: вікна, розкладки dwindle / master / scrolling, робочі столи, плеєр з текстом пісні, зміна шпалер. Решта — [у галереї англійського розділу](#screenshots).
 
 ### Клавіші й жести
 
@@ -1430,7 +1437,9 @@ MIT — див. [LICENSE](LICENSE).
 
 ### Скриншоты
 
-См. [галерею в английском разделе](#screenshots): сначала 3.0 (с GIF смены обоев), потом прошлые версии.
+https://github.com/user-attachments/assets/72154592-2090-4faa-a56b-40aeb462c0ba
+
+Видео: окна, раскладки dwindle / master / scrolling, рабочие столы, плеер с текстом песни, смена обоев. Остальное — [в галерее английского раздела](#screenshots).
 
 ### Клавиши и жесты
 
