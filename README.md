@@ -11,7 +11,7 @@
 
 **🇬🇧 [English](#en)** · **🇮🇹 [Italiano](#it)** · **🇺🇦 [Українська](#uk)** · **🇷🇺 [Русский](#ru)**
 
-![Desktop](assets/screenshots/v2.5/desktop.jpg)
+![Desktop](assets/screenshots/v3/desktop.jpg)
 
 <p align="center"><b>3.0</b> — entirely my own base, without HyDE: pult, doctor, wallpaper collections, SDDM theme<br><a href="https://github.com/sonoyumi/yumi-rice/releases/tag/v2.5">2.5</a> — AirPods, music with lyrics, GTK4 control center · <a href="https://github.com/sonoyumi/yumi-rice/releases/tag/v2.1">2.1</a> — lighter: events instead of polling, monitors in one file · <a href="https://github.com/sonoyumi/yumi-rice/releases/tag/v2.0">2.0</a> — GTK4 menus, accent from the wallpaper, new lock screen · <a href="https://github.com/sonoyumi/yumi-rice/releases/tag/v1.0">1.0</a> — rofi menus, HyDE themes</p>
 
@@ -218,7 +218,40 @@ Measured on my machine (MacBook Pro M1, 8 GB, Firefox, Telegram and terminals op
 
 ### Screenshots
 
-> Screenshots of 3.0 are coming soon.
+![Wallpaper change](assets/screenshots/v3/wallpaper-change.gif)
+<p align="center">One new wallpaper — and everything recolors: Waybar, the terminal, VS Code, Telegram, window borders</p>
+
+| | |
+|:---:|:---:|
+| ![Pult (SUPER+Space)](assets/screenshots/v3/pult.png) | ![Pult: commands, files, web](assets/screenshots/v3/pult-search.png) |
+| Pult (SUPER+Space) | Pult: commands, files, web |
+| ![Control center](assets/screenshots/v3/menu-control.png) | ![System menu with Doctor](assets/screenshots/v3/menu-system.png) |
+| Control center | System menu with Doctor |
+| ![Sound](assets/screenshots/v3/menu-sound.png) | ![Bluetooth](assets/screenshots/v3/menu-bluetooth.png) |
+| Sound | Bluetooth |
+| ![Wi-Fi](assets/screenshots/v3/menu-wifi.png) | ![VPN: WARP / Proton + Tailscale](assets/screenshots/v3/menu-vpn.png) |
+| Wi-Fi | VPN: WARP / Proton + Tailscale |
+| ![Calendar](assets/screenshots/v3/menu-calendar.png) | ![Clipboard](assets/screenshots/v3/menu-clipboard.png) |
+| Calendar | Clipboard |
+| ![Power and work modes](assets/screenshots/v3/menu-power.png) | ![Session](assets/screenshots/v3/menu-session.png) |
+| Power and work modes | Session |
+| ![Mouse](assets/screenshots/v3/menu-mouse.png) | ![Workspaces](assets/screenshots/v3/menu-workspaces.png) |
+| Mouse | Workspaces |
+| ![Apps](assets/screenshots/v3/menu-launcher.png) | ![Emoji and glyphs](assets/screenshots/v3/menu-picker.png) |
+| Apps | Emoji and glyphs |
+| ![Web search](assets/screenshots/v3/menu-websearch.png) | ![Tray](assets/screenshots/v3/menu-tray.png) |
+| Web search | Tray |
+
+![Wallpapers and collections](assets/screenshots/v3/menu-wallpaper.png)
+<p align="center">Wallpaper picker with collections</p>
+
+![Two monitors](assets/screenshots/v3/two-monitors.jpg)
+<p align="center">MacBook (2560×1600) and MSI (1920×1080 @ 165 Hz) side by side</p>
+
+![Login screen](assets/screenshots/v3/sddm.jpg)
+<p align="center">Login screen: my own SDDM theme</p>
+
+> Private data in the screenshots is blurred; VPN and clipboard show demo data.
 
 <details>
 <summary><b>2.5 and earlier</b></summary>
@@ -655,7 +688,7 @@ Misurato sulla mia macchina (MacBook Pro M1, 8 GB, con Firefox, Telegram e termi
 
 ### Screenshot
 
-> Gli screenshot della 3.0 arriveranno presto. La galleria delle versioni precedenti è [nella sezione inglese](#screenshots).
+Vedi la [galleria nella sezione inglese](#screenshots): prima la 3.0 (con la GIF del cambio di sfondo), poi le versioni precedenti.
 
 ### Tasti e gesti
 
@@ -1026,7 +1059,7 @@ MIT, vedi [LICENSE](LICENSE).
 
 ### Скриншоти
 
-> Скриншоти 3.0 незабаром. Галерея попередніх версій — [в англійському розділі](#screenshots).
+Див. [галерею в англійському розділі](#screenshots): спершу 3.0 (з GIF зміни шпалер), далі попередні версії.
 
 ### Клавіші й жести
 
@@ -1397,7 +1430,7 @@ MIT — див. [LICENSE](LICENSE).
 
 ### Скриншоты
 
-> Скриншоты 3.0 скоро появятся. Галерея прошлых версий — [в английском разделе](#screenshots).
+См. [галерею в английском разделе](#screenshots): сначала 3.0 (с GIF смены обоев), потом прошлые версии.
 
 ### Клавиши и жесты
 
