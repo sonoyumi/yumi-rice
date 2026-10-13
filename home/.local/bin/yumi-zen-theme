@@ -26,6 +26,7 @@ NOTE_ID = os.path.join(OUTDIR, ".notify-id")
 WAITER = os.path.join(OUTDIR, ".notify.pid")
 ICON = "zen-browser"
 ZEN = os.path.join(HOME, ".config/zen")
+CHROME_MARK = "/* yumi-zen: интерфейс Zen в цветах обоев (генерирует yumi-zen-theme при смене обоев, не править) */"
 CONTENT_MARK = "/* yumi-zen-theme: служебные страницы Zen в цветах обоев (генерируется при смене обоев, не править) */"
 
 
@@ -102,10 +103,63 @@ def user_content():
 """
 
 
+def user_chrome():
+    """userChrome.css: переменные Zen из темы Pywalfox (меняются сразу, без перезапуска); запасные — цвета обоев.
+    Без условия :-moz-lwtheme — в Firefox 117+ его нет, и весь блок с ним отбрасывался (Zen оставался серым)."""
+    xa = ["#" + c.upper() for c in open(os.path.join(ACC_DIR, "accent.txt")).read().split()]
+    deep, bg, btn, _hov = ["#" + c.upper() for c in open(os.path.join(ACC_DIR, "bg.txt")).read().split()[:4]]
+    return f"""{CHROME_MARK}
+/* Имена переменных темы — из LightweightThemeConsumer: frame → --lwt-accent-color, toolbar → --toolbar-background-color,
+   popup → --panel-background-color, icons (AccentPrimary) → --lwt-toolbarbutton-icon-fill,
+   toolbar_field_border_focus → --toolbar-field-border-color-focus. Откат: yumi-uninstall zen-theme */
+:root {{
+  --yumi-accent: var(--lwt-toolbarbutton-icon-fill, {xa[6]});
+  --yumi-frame: var(--lwt-accent-color, {deep});
+  --yumi-toolbar: var(--toolbar-background-color, {bg});
+  --yumi-field: var(--toolbar-field-background-color, {btn});
+  --yumi-panel: var(--panel-background-color, {bg});
+  --yumi-base: color-mix(in srgb, var(--yumi-accent) 28%, var(--yumi-frame));
+  --zen-main-browser-background: var(--yumi-base) !important;
+  --zen-main-browser-background-toolbar: var(--yumi-base) !important;
+  --zen-themed-toolbar-bg: var(--yumi-base) !important;
+  --zen-themed-toolbar-bg-transparent: var(--yumi-base) !important;
+  --zen-primary-color: var(--yumi-accent) !important;
+  --zen-colors-primary: color-mix(in srgb, var(--yumi-accent) 30%, var(--yumi-toolbar)) !important;
+  --zen-colors-secondary: color-mix(in srgb, var(--yumi-accent) 40%, var(--yumi-field)) !important;
+  --zen-colors-tertiary: color-mix(in srgb, var(--yumi-accent) 18%, var(--yumi-frame)) !important;
+  --zen-colors-border: color-mix(in srgb, var(--yumi-accent) 60%, transparent) !important;
+  --zen-dialog-background: color-mix(in srgb, var(--yumi-accent) 18%, var(--yumi-panel)) !important;
+  --zen-toolbar-element-bg: color-mix(in srgb, var(--yumi-accent) 30%, transparent) !important;
+}}
+/* Zen 1.23 пишет фон (градиент пространства) прямо в style этих элементов — наследование от :root его не перебьёт;
+   !important из userChrome сильнее записи скриптом */
+#zen-browser-background, #zen-toolbar-background {{
+  --zen-main-browser-background: var(--yumi-base) !important;
+  --zen-main-browser-background-old: var(--yumi-base) !important;
+  --zen-main-browser-background-toolbar: var(--yumi-base) !important;
+  --zen-main-browser-background-toolbar-old: var(--yumi-base) !important;
+}}
+"""
+
+
+def write_marked(path, css, mark):
+    """Записать, только если файла нет или он наш (первая строка — наша метка): свой файл пользователя не трогаем."""
+    try:
+        with open(path) as f:
+            if not f.readline().startswith(mark[:12]):
+                return
+    except OSError:
+        pass
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(css)
+    os.replace(tmp, path)
+
+
 def write_user_content():
     """В каждый профиль Zen с chrome/userChrome.css. Свой (не наш) userContent.css не перезаписываем."""
     try:
-        css = user_content()
+        css, chrome_css = user_content(), user_chrome()
     except (OSError, ValueError):
         return
     try:
@@ -116,17 +170,8 @@ def write_user_content():
         chrome = os.path.join(prof, "chrome")
         if not os.path.exists(os.path.join(chrome, "userChrome.css")):
             continue
-        path = os.path.join(chrome, "userContent.css")
-        try:
-            with open(path) as f:
-                if not f.readline().startswith(CONTENT_MARK[:30]):
-                    continue
-        except OSError:
-            pass
-        tmp = path + ".tmp"
-        with open(tmp, "w") as f:
-            f.write(css)
-        os.replace(tmp, path)
+        write_marked(os.path.join(chrome, "userContent.css"), css, CONTENT_MARK)
+        write_marked(os.path.join(chrome, "userChrome.css"), chrome_css, CHROME_MARK)
 
 
 def write(pal):
