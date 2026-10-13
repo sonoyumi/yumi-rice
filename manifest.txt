@@ -209,7 +209,6 @@
 .config/yumi/colors/templates/theme/swaync.dcol
 .config/yumi/colors/templates/theme/waybar.dcol
 .config/yumi/control/variant
-.config/yumi/darkreader.json
 .config/yumi/monitors.conf
 .config/yumi/music/menu.css
 .config/yumi/notify/ignore.json

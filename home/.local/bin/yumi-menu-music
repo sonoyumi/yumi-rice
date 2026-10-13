@@ -1071,20 +1071,24 @@ class MusicWindow(Gtk.ApplicationWindow):
                                tooltip_text="SoundCloud" if src == "sc" else "YouTube Music"))
         g.append(Gtk.Label(label=fmt(t.get("dur")), css_classes=["ym-d"], width_chars=5, xalign=1))
         if nxt:
-            more = Gtk.Button(label="󰐒", tooltip_text="Следующим в очередь", css_classes=["ym-more"], focusable=False)
-            more.connect("clicked", nxt)
-            g.append(more)
+            g.append(self.row_btn("󰐒", "Следующим в очередь", nxt))
         if t.get("_pl"):                          # 󰐕 — в свой плейлист (локально, см. yumi-music pl-add)
-            plb = Gtk.Button(label="󰐕", tooltip_text="В плейлист", css_classes=["ym-more"], focusable=False)
-            plb.connect("clicked", lambda *_: self.pl_menu(t["_pl"]))
-            g.append(plb)
+            g.append(self.row_btn("󰐕", "В плейлист", lambda *_: self.pl_menu(t["_pl"])))
         if t.get("_rm"):                          # 󰆴 — только у треков, добавленных вручную
-            rm = Gtk.Button(label="󰆴", tooltip_text="Убрать из плейлиста", css_classes=["ym-more"], focusable=False)
-            rm.connect("clicked", lambda *_: self.pl_remove(*t["_rm"]))
-            g.append(rm)
+            g.append(self.row_btn("󰆴", "Убрать из плейлиста", lambda *_: self.pl_remove(*t["_rm"])))
         b.set_child(g)
         b.connect("clicked", cb)
         return b
+
+    def row_btn(self, icon, tip, fn):
+        """Кнопка внутри строки-кнопки: щелчок забираем ещё на спуске (CAPTURE + CLAIMED) — иначе его получает
+        и строка, и вместо действия кнопки трек просто включается."""
+        btn = Gtk.Button(label=icon, tooltip_text=tip, css_classes=["ym-more"], focusable=False)
+        click = Gtk.GestureClick(propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        click.connect("pressed", lambda gst, *_: gst.set_state(Gtk.EventSequenceState.CLAIMED))
+        click.connect("released", lambda gst, _n, x, y: btn.contains(x, y) and fn(btn))
+        btn.add_controller(click)
+        return btn
 
     def render_queue(self):
         self.h2("Очередь")

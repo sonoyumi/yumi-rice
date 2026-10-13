@@ -84,16 +84,19 @@ def palette(img):
     try:
         out = open(cache).read()
     except OSError:
-        out = subprocess.run(["magick", img, "-resize", "200x200>", "+dither", "-kmeans", "8",
+        out = subprocess.run(["magick", img, "-resize", "200x200>", "-depth", "8", "+dither", "-kmeans", "8",
                               "-format", "%c", "histogram:info:"], capture_output=True, text=True).stdout
         os.makedirs(os.path.dirname(cache), exist_ok=True)
         with open(cache, "w") as f:
             f.write(out)
     cols = []
     for line in out.splitlines():
-        m = re.match(r"\s*(\d+):.*#([0-9A-Fa-f]{6})", line)
+        # 16-битные картинки (старый кэш без -depth 8): #RRRRGGGGBBBB — старшие байты каждого канала
+        m = re.match(r"\s*(\d+):.*#([0-9A-Fa-f]{12}|[0-9A-Fa-f]{6})\b", line)
         if m:
             n, hx = int(m.group(1)), m.group(2)
+            if len(hx) == 12:
+                hx = hx[0:2] + hx[4:6] + hx[8:10]
             cols.append((n, int(hx[0:2], 16), int(hx[2:4], 16), int(hx[4:6], 16)))
     total = sum(c[0] for c in cols) or 1
     return [(n / total, r, g, b) for n, r, g, b in cols]

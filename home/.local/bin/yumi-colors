@@ -614,7 +614,8 @@ BUNDLE_FILES = [
 ]
 BUNDLE_DIRS = [".local/share/icons/Wallbash-Icon", ".local/share/icons/Yumi-Folders/places"]
 BUNDLE_GLOBS = [".vscode/extensions/yumi.wallbash-theme-*/themes/wallbash.json",
-                ".local/share/icons/Yumi-Folders/icon-theme.cache"]
+                ".local/share/icons/Yumi-Folders/icon-theme.cache",
+                ".config/zen/*/chrome/userContent.css"]          # страницы Zen (yumi-zen-theme)
 # хуки, которые правят часть чужого файла — при смене из комплекта запускаются в общий момент
 ACCENT_HOOKS = os.path.join(XDG_CONFIG, "yumi/accent/hooks.d")
 INPLACE = ["cava", "discord"]                                    # шаблоны: их хук-скрипты

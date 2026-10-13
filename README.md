@@ -68,7 +68,7 @@ without HyDE. Plus a sync script that keeps the repository and the system in ste
 - **Terminal:** kitty with CaskaydiaCove Nerd Font Mono, a two-line starship prompt in the terminal palette, zoxide
   (`z` / `zi`), atuin on `Ctrl+R` (local only, no sync), eza aliases. fastfetch with a text logo (a bow and arrow),
   framed sections and a Japanese quote of the day with a translation.
-- **Zen** is the default browser (Firefox removed), colored from the wallpaper (`yumi-zen-theme`); Dark Reader only for Gmail.
+- **Zen** is the default browser (Firefox removed), colored from the wallpaper (`yumi-zen-theme`), including its settings pages.
 - **Also:** a fullscreen player (`yumi-player-full`) and a queue in the player, a devices page inside the control
   center, mouse and AirPods battery notifications, `yumi-update` with a 30-minute cache (Waybar no longer runs
   `checkupdates` every time), the Yumi-Folders icon theme, the VS Code theme as its own extension.
@@ -498,7 +498,7 @@ mia, senza HyDE. In più, uno script che tiene allineati repository e sistema, c
 - **Terminale:** kitty con CaskaydiaCove Nerd Font Mono, un prompt starship su due righe nei colori della palette del
   terminale, zoxide (`z` / `zi`), atuin su `Ctrl+R` (solo locale, senza sincronizzazione), alias di eza. fastfetch con
   un logo di testo (arco e freccia), sezioni incorniciate e una citazione giapponese del giorno con traduzione.
-- **Zen** è il browser predefinito (Firefox rimosso), con i colori dello sfondo (`yumi-zen-theme`); Dark Reader solo per Gmail.
+- **Zen** è il browser predefinito (Firefox rimosso), con i colori dello sfondo (`yumi-zen-theme`), comprese le pagine delle impostazioni.
 - **E inoltre:** un lettore a schermo intero (`yumi-player-full`) e una coda nel lettore, una pagina dei dispositivi
   dentro il centro di controllo, notifiche della batteria del mouse e degli AirPods, `yumi-update` con una cache di 30
   minuti (Waybar non lancia più `checkupdates` ogni volta), il tema di icone delle cartelle Yumi-Folders, il tema di
@@ -875,7 +875,7 @@ MIT, vedi [LICENSE](LICENSE).
 - **Термінал:** kitty з CaskaydiaCove Nerd Font Mono, дворядкове запрошення starship у кольорах палітри терміналу,
   zoxide (`z` / `zi`), atuin на `Ctrl+R` (лише локально, без синхронізації), аліаси eza. fastfetch з текстовим
   значком (лук і стріла), розділами в рамках і японською цитатою дня з перекладом.
-- **Zen** — браузер за замовчуванням (Firefox видалено), у кольорах шпалер (`yumi-zen-theme`); Dark Reader — лише для Gmail.
+- **Zen** — браузер за замовчуванням (Firefox видалено), у кольорах шпалер (`yumi-zen-theme`), включно зі сторінками налаштувань.
 - **А також:** повноекранний плеєр (`yumi-player-full`) і черга в плеєрі, сторінка пристроїв усередині центру
   керування, сповіщення про заряд миші та AirPods, `yumi-update` з кешем на 30 хвилин (Waybar більше не запускає
   `checkupdates` щоразу), тема значків тек Yumi-Folders, тема VS Code як окреме розширення.
@@ -1245,7 +1245,7 @@ MIT — див. [LICENSE](LICENSE).
 - **Терминал:** kitty с CaskaydiaCove Nerd Font Mono, двухстрочное приглашение starship в цветах палитры терминала,
   zoxide (`z` / `zi`), atuin на `Ctrl+R` (только локально, без синхронизации), алиасы eza. fastfetch с текстовым
   значком (лук и стрела), разделами в рамках и японской цитатой дня с переводом.
-- **Zen** — браузер по умолчанию (Firefox удалён), в цветах обоев (`yumi-zen-theme`); Dark Reader — только для Gmail.
+- **Zen** — браузер по умолчанию (Firefox удалён), в цветах обоев (`yumi-zen-theme`), включая страницы настроек.
 - **А также:** полноэкранный плеер (`yumi-player-full`) и очередь в плеере, страница устройств внутри центра
   управления, уведомления о заряде мыши и AirPods, `yumi-update` с кэшем на 30 минут (Waybar больше не гоняет
   `checkupdates` каждый раз), тема значков папок Yumi-Folders, тема VS Code как отдельное расширение.

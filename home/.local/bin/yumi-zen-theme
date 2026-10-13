@@ -5,6 +5,8 @@
   yumi-zen-theme            записать палитру ~/.cache/wal/colors.json из ~/.cache/yumi-accent
   yumi-zen-theme --apply    записать и сразу перекрасить Zen (pywalfox update)
   yumi-zen-theme --notify   (для хука 90-zen) если Zen запущен — перекрасить молча; уведомление только при ошибке
+Заодно пишет chrome/userContent.css профиля Zen: служебные страницы (about:preferences, about:addons, about:config,
+загрузки…) в тех же цветах. Сайты НЕ трогает. Эти страницы Zen читает только при запуске — новые цвета после перезапуска.
 Pywalfox читает только этот файл и общается с расширением через локальный unix-сокет (без сети).
 Манифест Pywalfox — системный (/usr/lib/mozilla/native-messaging-hosts/pywalfox.json, пакет python-pywalfox);
 `pywalfox install` НЕ запускать — он создаёт ~/.mozilla.
@@ -23,6 +25,8 @@ AUTO_OK = os.path.join(OUTDIR, ".auto-ok")
 NOTE_ID = os.path.join(OUTDIR, ".notify-id")
 WAITER = os.path.join(OUTDIR, ".notify.pid")
 ICON = "zen-browser"
+ZEN = os.path.join(HOME, ".config/zen")
+CONTENT_MARK = "/* yumi-zen-theme: служебные страницы Zen в цветах обоев (генерируется при смене обоев, не править) */"
 
 
 def palette():
@@ -40,6 +44,89 @@ def palette():
         "special": {"background": deep, "foreground": "#EEEAF8", "cursor": xa[6]},
         "colors": {f"color{i}": c for i, c in enumerate(base)},
     }
+
+
+def user_content():
+    """CSS для about:-страниц: старые переменные in-content и новые токены дизайна Firefox — обе группы."""
+    xa = ["#" + c.upper() for c in open(os.path.join(ACC_DIR, "accent.txt")).read().split()]
+    deep, bg, btn, hov = ["#" + c.upper() for c in open(os.path.join(ACC_DIR, "bg.txt")).read().split()[:4]]
+    fg, acc, border = "#EEEAF8", xa[6], xa[4]
+    dim = f"color-mix(in srgb, {fg} 65%, {deep})"
+    v = {
+        # общие (common-shared.css)
+        "--in-content-page-background": deep, "--in-content-page-color": fg,
+        "--in-content-text-color": fg, "--in-content-deemphasized-text": dim,
+        "--in-content-box-background": bg, "--in-content-box-background-odd": deep,
+        "--in-content-box-border-color": f"color-mix(in srgb, {border} 45%, transparent)",
+        "--in-content-border-color": f"color-mix(in srgb, {border} 45%, transparent)",
+        "--in-content-table-background": bg, "--in-content-box-info-background": btn,
+        "--in-content-item-hover": f"color-mix(in srgb, {acc} 14%, transparent)",
+        "--in-content-item-selected": f"color-mix(in srgb, {acc} 26%, transparent)",
+        "--in-content-item-selected-text": fg,
+        "--in-content-button-background": btn, "--in-content-button-background-hover": hov,
+        "--in-content-button-background-active": hov, "--in-content-button-text-color": fg,
+        "--in-content-primary-button-background": acc, "--in-content-primary-button-text-color": deep,
+        "--in-content-primary-button-background-hover": xa[7], "--in-content-primary-button-background-active": xa[8],
+        "--in-content-accent-color": acc, "--in-content-accent-color-active": xa[7],
+        "--in-content-focus-outline-color": acc, "--in-content-link-color": acc,
+        "--in-content-link-color-hover": xa[7], "--in-content-link-color-active": xa[8],
+        "--in-content-icon-color": fg,
+        # токены дизайна (новые страницы: настройки, дополнения)
+        "--background-color-canvas": deep, "--text-color": fg, "--text-color-deemphasized": dim,
+        "--background-color-box": bg, "--background-color-box-info": btn,
+        "--border-color": f"color-mix(in srgb, {border} 45%, transparent)",
+        "--border-color-card": f"color-mix(in srgb, {border} 35%, transparent)",
+        "--border-color-deemphasized": f"color-mix(in srgb, {border} 25%, transparent)",
+        "--border-color-interactive": f"color-mix(in srgb, {border} 70%, transparent)",
+        "--color-accent-primary": acc, "--color-accent-primary-hover": xa[7], "--color-accent-primary-active": xa[8],
+        "--button-background-color": btn, "--button-background-color-hover": hov,
+        "--button-background-color-active": hov, "--button-text-color": fg,
+        "--button-background-color-primary": acc, "--button-background-color-primary-hover": xa[7],
+        "--button-background-color-primary-active": xa[8], "--button-text-color-primary": deep,
+        "--link-color": acc, "--link-color-hover": xa[7], "--link-color-active": xa[8],
+        "--focus-outline-color": acc, "--icon-color": fg,
+        "--card-background-color": bg, "--table-background-color": bg,
+        "--table-row-background-color-alternate": deep,
+    }
+    body = "\n".join(f"    {k}: {val} !important;" for k, val in v.items())
+    return f"""{CONTENT_MARK}
+@-moz-document url-prefix("about:") {{
+  :root {{
+{body}
+    color-scheme: dark !important;
+    scrollbar-color: {border} transparent !important;
+  }}
+  html, body {{ background-color: {deep} !important; color: {fg} !important; }}
+  ::selection {{ background-color: color-mix(in srgb, {acc} 40%, transparent) !important; }}
+}}
+"""
+
+
+def write_user_content():
+    """В каждый профиль Zen с chrome/userChrome.css. Свой (не наш) userContent.css не перезаписываем."""
+    try:
+        css = user_content()
+    except (OSError, ValueError):
+        return
+    try:
+        profiles = [os.path.join(ZEN, d) for d in os.listdir(ZEN)]
+    except OSError:
+        return
+    for prof in profiles:
+        chrome = os.path.join(prof, "chrome")
+        if not os.path.exists(os.path.join(chrome, "userChrome.css")):
+            continue
+        path = os.path.join(chrome, "userContent.css")
+        try:
+            with open(path) as f:
+                if not f.readline().startswith(CONTENT_MARK[:30]):
+                    continue
+        except OSError:
+            pass
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(css)
+        os.replace(tmp, path)
 
 
 def write(pal):
@@ -128,6 +215,7 @@ def main():
     if "--notify" in sys.argv:
         return notify_flow()
     write(palette())
+    write_user_content()
     if "--apply" in sys.argv:
         return 0 if apply_now() else 2
     print(WAL)

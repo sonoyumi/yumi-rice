@@ -844,6 +844,11 @@ def replace_versions(tracks):
             # обычный трек: залит в другой версии, чем официальная (текст не совпадает) → официальная запись;
             # не нашлась — трек остаётся как есть
             m = rep.get("ver:" + rk)
+            # загрузка с аккаунта самого артиста — это и есть его версия (на SoundCloud она бывает другой, чем на
+            # стримингах): не заменять из-за длины текста (13.10, «NO HOOK NO HOES»); ручные замены — как есть
+            if not (m and m.get("manual")) and _own_account(t.get("url") or "", t.get("artist") or ""):
+                out.append(t)
+                continue
             md = 0 if m else _lyrics_version(t)
             if not m and not md:
                 out.append(t)
