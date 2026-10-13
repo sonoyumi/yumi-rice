@@ -13,6 +13,9 @@
                                   VS Code, Zen, клавиатура…), не выполняется, а копится в очереди
   yumi-colors commit              выпустить очередь разом — все программы меняют цвет в один момент;
                                   хуки программ, которых нет на экране, доделываются после этого в фоне
+  yumi-colors early waybar        (между prepare и commit) выпустить заранее перезапуск Waybar и его стили
+  yumi-colors early-apps          (между prepare и commit) подменить заранее темы VS Code и Telegram —
+                                  им нужно ~0,2 с больше, чем kitty, чтобы перекраситься к общему моменту
   yumi-colors render [--only ИМЯ…] перерисовать шаблоны по текущей палитре без хуков (быстрая проверка шаблона)
   yumi-colors palette ОБОИ [-o FILE] [--thumb DIR]   только посчитать палитру (.dcol)
   yumi-colors sandbox --dcol FILE --dir DIR [--dirs D1:D2]   отрисовать шаблоны в песочницу DIR (хуки только
@@ -615,7 +618,8 @@ BUNDLE_FILES = [
 BUNDLE_DIRS = [".local/share/icons/Wallbash-Icon", ".local/share/icons/Yumi-Folders/places"]
 BUNDLE_GLOBS = [".vscode/extensions/yumi.wallbash-theme-*/themes/wallbash.json",
                 ".local/share/icons/Yumi-Folders/icon-theme.cache",
-                ".config/zen/*/chrome/userContent.css"]          # страницы Zen (yumi-zen-theme)
+                ".config/zen/*/chrome/userContent.css",          # страницы Zen (yumi-zen-theme)
+                ".config/zen/*/chrome/userChrome.css"]           # интерфейс Zen (yumi-zen-theme)
 # хуки, которые правят часть чужого файла — при смене из комплекта запускаются в общий момент
 ACCENT_HOOKS = os.path.join(XDG_CONFIG, "yumi/accent/hooks.d")
 INPLACE = ["cava", "discord"]                                    # шаблоны: их хук-скрипты
@@ -921,6 +925,62 @@ def cmd_early(args):
     log("заранее: %d команд (%s), подменено файлов: %d" % (len(now), pat, len(early)))
 
 
+# Окна, которым нужна фора перед общим моментом: VS Code замечает изменённый файл темы и перерисовывается
+# ~0,3–0,45 с, Telegram (следит за файлом темы через inotify, --notify в commit ему уже не нужен) — ~0,3–0,4 с,
+# а kitty по сигналу — ~0,15–0,3 с. yumi-wallpaper зовёт early-apps за YUMI_APPS_LEAD до commit — все три
+# заканчивают перекраску вместе
+EARLY_APPS = (".vscode*/extensions/yumi.wallbash-theme-*/themes/wallbash.json",
+              ".local/share/yumi-telegram/yumi.tdesktop-theme")
+
+
+def cmd_early_apps(args):
+    """Подменить заранее только файлы тем VS Code и Telegram: из комплекта — их *.yumi-next из staged.txt,
+    при полной смене — строки «mv -f …» из очереди (их пишут хуки VS Code). commit остальное делает как обычно,
+    эти файлы он уже не трогает (их нет ни в staged.txt, ни в очереди)."""
+    import fnmatch
+    import shlex
+
+    def ours(path):
+        rel = os.path.relpath(path, HOME)
+        return any(fnmatch.fnmatch(rel, g) for g in EARLY_APPS)
+    try:
+        staged = [x for x in open(STAGED).read().split("\n") if x]
+    except OSError:
+        staged = []
+    early = [d for d in staged if ours(d)]
+    for dst in early:
+        try:
+            os.replace(dst + ".yumi-next", dst)
+        except OSError:
+            pass
+    if early:
+        with open(STAGED, "w") as f:
+            f.write("".join(d + "\n" for d in staged if d not in early))
+    try:
+        lines = open(QUEUE).read().splitlines()
+    except OSError:
+        lines = []
+    moves = []
+    for line in lines:
+        if line.startswith("mv -f "):
+            try:
+                a = shlex.split(line)
+            except ValueError:
+                continue
+            if len(a) == 4 and ours(a[3]):
+                moves.append(line)
+    for line in dict.fromkeys(moves):              # VS Code в очереди дважды (code-colors.py и yumi-tone)
+        a = shlex.split(line)
+        try:
+            os.replace(a[2], a[3])
+        except OSError:
+            pass
+    if moves:
+        with open(QUEUE, "w") as f:
+            f.write("".join(l + "\n" for l in lines if l not in moves))
+    log("заранее: темы VS Code/Telegram, подменено файлов: %d" % (len(early) + len(set(moves))))
+
+
 def cmd_snapshot_later(args):
     """Через ~4 с после полной смены: сохранить комплект, если обои всё ещё те же."""
     sha, q = args[0], args[1]
@@ -1008,7 +1068,7 @@ def main():
     cmds = {"apply": cmd_apply, "prepare": cmd_prepare, "commit": cmd_commit, "render": cmd_render,
             "palette": cmd_palette, "sandbox": cmd_sandbox, "verify": cmd_verify, "is-cached": cmd_is_cached,
             "warm": cmd_warm, "snapshot-later": cmd_snapshot_later, "precache": cmd_precache,
-            "early": cmd_early}
+            "early": cmd_early, "early-apps": cmd_early_apps}
     if cmd not in cmds:
         sys.exit("неизвестная команда «%s» — yumi-colors --help" % cmd)
     cmds[cmd](args)

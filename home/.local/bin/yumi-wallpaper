@@ -13,7 +13,9 @@
 # Смена синхронная: сначала всё готовится (~0,4 с), потом новые обои «вырастают» из курсора, и под конец перехода
 # Waybar, kitty, рамки, VS Code, Zen и подсветка клавиатуры меняются в один момент (yumi-colors prepare/commit).
 # Программы, которых нет на экране, — следом в фоне. Настройки: YUMI_TRANSITION_SEC=0.4 (переход),
-# YUMI_FLIP_AT=0.6 (когда запускать перекраску — доля перехода; ~0,1 с уходит на сам запуск, так что цвета меняются к концу перехода).
+# YUMI_FLIP_AT=0.6 (когда запускать перекраску — доля перехода; ~0,1 с уходит на сам запуск, так что цвета меняются к концу перехода),
+# YUMI_APPS_LEAD=0.2 (на сколько секунд раньше общего момента отдать новые темы VS Code и Telegram — они перерисовываются
+# дольше kitty; 0 — вместе со всеми, как раньше; больше доли перехода не бывает).
 #   yumi-wallpaper start         при входе (служба yumi-wallpaper.service): поднять awww-daemon, показать
 #                                текущие обои без перехода; цвета пересчитать, только если они не от этих обоев
 # Папка обоев: ~/Pictures/Wallpapers. Свои картинки — просто положить туда (jpg/jpeg/png/gif).
@@ -123,7 +125,17 @@ apply() {   # apply ФАЙЛ [переход]
     "$COLORS" early waybar 9>&-
     sleep "${YUMI_BAR_LEAD:-0.15}"
     ensure_daemon && show "$wall" "${2:-grow}" "$h" 9>&-
-    sleep "$(awk -v d="$TRANS_SEC" -v f="${YUMI_FLIP_AT:-0.6}" 'BEGIN { printf "%.2f", d * f }')"
+    # VS Code и Telegram перерисовываются дольше kitty — их темы подменяются за YUMI_APPS_LEAD до общего момента;
+    # момент commit считается от конца show по часам, так что сам вызов early-apps его не сдвигает
+    local t0 flip lead
+    t0="${EPOCHREALTIME/,/.}"                       # с русской локалью там запятая
+    flip="$(awk -v d="$TRANS_SEC" -v f="${YUMI_FLIP_AT:-0.6}" 'BEGIN { printf "%.2f", d * f }')"
+    lead="$(awk -v l="${YUMI_APPS_LEAD:-0.2}" -v t="$flip" 'BEGIN { l += 0; if (l > t) l = t; if (l < 0) l = 0; printf "%.2f", l }')"
+    if [ "$lead" != "0.00" ]; then
+        sleep "$(awk -v t="$flip" -v l="$lead" 'BEGIN { printf "%.2f", t - l }')"
+        "$COLORS" early-apps 9>&-
+    fi
+    sleep "$(awk -v t0="$t0" -v now="${EPOCHREALTIME/,/.}" -v t="$flip" 'BEGIN { r = t - (now - t0); printf "%.3f", (r > 0 ? r : 0) }')"
     "$COLORS" commit 9>&-
     [ "$cached" = 1 ] && link_wall "$wall" "$h"
     # следующий переход — только когда этот закончился (наложение переходов роняет awww-daemon)
@@ -301,5 +313,5 @@ warm) warm ;;
 scan) scan ;;
 list) list_paths ;;
 start) start ;;
-*) sed -n '2,16s/^# \{0,1\}//p' "$0"; exit 1 ;;
+*) sed -n '2,18s/^# \{0,1\}//p' "$0"; exit 1 ;;
 esac

@@ -219,7 +219,7 @@ Measured on my machine (MacBook Pro M1, 8 GB, Firefox, Telegram and terminals op
 ### Screenshots
 
 ![Wallpaper change](assets/screenshots/v3/wallpaper-change.gif)
-<p align="center">One new wallpaper — and everything recolors: Waybar, the terminal, VS Code, Telegram, window borders</p>
+<p align="center">One new wallpaper — and everything recolors together: Waybar, the terminal, VS Code, cava, window borders</p>
 
 | | |
 |:---:|:---:|
