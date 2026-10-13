@@ -1,0 +1,364 @@
+#!/usr/bin/env python3
+"""yumi-menu-keys — шпаргалка горячих клавиш на GTK (каркас yumi-panel; замена `hyde-shell keybinds_hint`).
+  yumi-menu-keys [--center|--bar]   открыть / закрыть (повторный вызов закрывает)
+  yumi-menu-keys --close            закрыть
+  yumi-menu-keys --list             без окна: напечатать таблицу (для проверки)
+
+Откуда список: живые бинды Hyprland (`hyprctl binds -j`, через сокет). Группы — из описаний вида
+«[Группа|Подгруппа] текст» (hl.bind(..., { description = … }) в ~/.config/hypr/yumi/binds.lua и hyprland.lua).
+Названия групп переводятся словарём GROUPS; сами описания показаны как написаны в конфиге (перевода не выдумываем).
+Бинды с одинаковым описанием в одной группе собраны в одну строку (SUPER+1 и SUPER+KP_End и т. п.).
+
+Почему по Enter ничего не запускается: в Lua-конфиге у всех биндов dispatcher = «__lua», а arg — внутренний
+номер Lua-функции в Hyprland. `hyprctl dispatch` выполняет Lua-выражение (hl.dsp.…), а функции биндов
+снаружи недоступны, поэтому повторить бинд из меню честно нельзя (в HyDE пункт тоже ничего не делал).
+Вместо этого Enter / щелчок копирует сочетание в буфер — в записи конфига: «SUPER + SHIFT + slash».
+
+Клавиши: набор текста — поиск (по описанию, группе, клавише: «shift», «/», «звук»); ↓ — к списку;
+Enter в поиске — скопировать первое найденное; Esc — очистить поиск / закрыть.
+
+Переменные для проверки:
+  YP_DRYRUN=1          копирование только печатается (stderr), буфер не меняется
+  YP_KEYS_JSON=файл    взять бинды из файла (вывод `hyprctl binds -j`) вместо живого Hyprland
+  YP_SEARCH=текст      сразу ввести текст в поиск;  YP_KEYS_ENTER=1 — через 0,8 с «нажать» Enter (с YP_DRYRUN)
+  YP_PRINT_SHAPE=1     через 0,7 с напечатать в stderr «[shape] x y w h» — рамку меню в слое (для снимков)
+Откат: удалить этот файл (пункт «Горячие клавиши» в yumi-menu-system вернуть на `hyde-shell keybinds_hint`)"""
+import os
+import sys
+import json
+import re
+import subprocess
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+DRY = bool(os.environ.get("YP_DRYRUN"))
+
+# модификаторы Hyprland (modmask) в порядке показа
+MODS = [(64, "SUPER"), (4, "CTRL"), (8, "ALT"), (1, "SHIFT"), (2, "CAPS"), (16, "MOD2"), (32, "MOD3"), (128, "MOD5")]
+
+# группы и подгруппы из «[Группа|Подгруппа]» → по-русски (описания не переводим)
+GROUPS = {
+    "Launcher": "Запуск", "Apps": "Приложения", "Rofi menus": "Меню", "Menus": "Меню",
+    "Window Management": "Окна", "Group Navigation": "Группы окон", "Change focus": "Фокус",
+    "Resize Active Window": "Размер окна", "Move active window": "Перемещение окна",
+    "Drag & Resize with mouse": "Мышью",
+    "Utils": "Утилиты", "Utilities": "Утилиты",
+    "Workspaces": "Рабочие столы", "Navigation": "Переход", "Move window to workspace": "Перенос окна",
+    "Move window (Don't follow)": "Перенос окна без перехода", "Relative workspace": "Соседний стол",
+    "Mouse": "Колесо мыши", "Special workspace": "Скрытый стол (scratchpad)",
+    "Hardware Controls": "Кнопки устройства", "Audio": "Звук", "Media": "Медиа", "Brightness": "Яркость",
+    "Theming and Wallpaper": "Оформление и обои", "AI": "ИИ", "Layout": "Раскладка окон",
+    "Master": "Раскладка master", "Session": "Сессия", "Hardware": "Устройство",
+}
+NO_DESC = "Без описания"
+
+# названия клавиш (Hyprland пишет по-разному: LEFT/Left, RETURN/Return)
+KEYS = {
+    "left": "←", "right": "→", "up": "↑", "down": "↓", "return": "Enter", "enter": "Enter",
+    "escape": "Esc", "tab": "Tab", "delete": "Delete", "space": "Space", "backspace": "Backspace",
+    "slash": "/", "comma": ",", "period": ".", "grave": "`", "minus": "-", "equal": "=",
+    "semicolon": ";", "apostrophe": "'", "backslash": "\\", "bracketleft": "[", "bracketright": "]",
+    "print": "PrtSc", "scroll_lock": "ScrLk", "pause": "Pause",
+    "mouse:272": "ЛКМ", "mouse:273": "ПКМ", "mouse:274": "СКМ", "mouse_down": "колесо ↓", "mouse_up": "колесо ↑",
+    "xf86audiomute": "󰝟 звук", "xf86audiomicmute": "󰍭 микрофон", "xf86audiolowervolume": "󰝞 тише",
+    "xf86audioraisevolume": "󰝝 громче", "xf86audioplay": "󰐊 play", "xf86audiopause": "󰏤 пауза",
+    "xf86audionext": "󰒭 след.", "xf86audioprev": "󰒮 пред.", "xf86monbrightnessup": "󰃠 ярче",
+    "xf86monbrightnessdown": "󰃞 темнее", "xf86kbdbrightnessup": "󰌌 подсветка +",
+    "xf86kbdbrightnessdown": "󰌌 подсветка −", "xf86search": "󰍉 поиск", "xf86tools": "XF86Tools",
+    "xf86launch5": "XF86Launch5",
+}
+
+
+def key_label(key):
+    k = key.strip()
+    low = k.lower()
+    if low in KEYS:
+        return KEYS[low]
+    if low.startswith("switch:"):                       # switch:on:Apple SMC power/lid events
+        state = low.split(":")[1]
+        return "крышка: " + ("закрыта" if state == "on" else "открыта") if "lid" in low else k
+    if low.startswith("kp_"):
+        rest = k[3:]
+        return "Num " + rest
+    if low.startswith("mouse:"):
+        return "мышь " + k[6:]
+    if len(k) == 1:
+        return k.upper()
+    return k[:1].upper() + k[1:] if k.isupper() and len(k) > 3 else k
+
+
+def mods_of(mask):
+    return [name for bit, name in MODS if mask & bit]
+
+
+def combo_conf(b):
+    """Сочетание в записи конфига (как в binds.lua): «SUPER + SHIFT + slash»."""
+    return " + ".join(mods_of(b.get("modmask", 0)) + [b.get("key", "")])
+
+
+def parse_desc(desc):
+    """'[A|B] текст' → (['A','B'], 'текст'). Без скобок — группа «Без описания»/«Прочее»."""
+    m = re.match(r"^\s*\[([^\]]*)\]\s*(.*)$", desc or "")
+    if not m:
+        return ([NO_DESC] if not (desc or "").strip() else ["Прочее"]), (desc or "").strip()
+    parts = [p.strip() for p in m.group(1).split("|") if p.strip()] or ["Прочее"]
+    return parts, m.group(2).strip()
+
+
+def tr(name):
+    return GROUPS.get(name, name)
+
+
+def load_binds():
+    path = os.environ.get("YP_KEYS_JSON")
+    if path:
+        return json.load(open(path, encoding="utf-8"))
+    try:
+        out = subprocess.run(["hyprctl", "binds", "-j"], capture_output=True, text=True, timeout=3).stdout
+        return json.loads(out or "[]")
+    except Exception:
+        return []
+
+
+def build_entries(binds):
+    """[(группа, [записи])]; запись = {path, text, combos:[bind], flags}. Порядок — как в конфиге."""
+    groups = {}
+    index = {}
+    for b in binds:
+        if b.get("catch_all"):
+            continue
+        path, text = parse_desc(b.get("description", ""))
+        top = path[0]
+        sub = " · ".join(tr(p) for p in path[1:])
+        key = (tuple(path), text) if text else (tuple(path), "#" + combo_conf(b))
+        if key in index:
+            index[key]["combos"].append(b)
+            continue
+        flags = []
+        k = b.get("key", "").lower()
+        if k.startswith("mouse:") or (b.get("description", "").lower().find("hold to") >= 0):
+            flags.append("удерживать")
+        if b.get("repeat"):
+            flags.append("повтор")
+        if b.get("locked"):
+            flags.append("и при блокировке")
+        if b.get("release"):
+            flags.append("по отпусканию")
+        if b.get("longPress"):
+            flags.append("долгое нажатие")
+        if b.get("submap"):
+            flags.append(f"подрежим {b['submap']}")
+        e = {"group": tr(top), "sub": sub, "text": text or "описания нет", "combos": [b], "flags": flags}
+        index[key] = e
+        groups.setdefault(tr(top), []).append(e)
+    order = sorted(groups.items(), key=lambda kv: kv[0] == NO_DESC)     # «Без описания» — в конец
+    return order
+
+
+if "--list" in sys.argv:                          # проверка без окна и без GTK
+    _entries = build_entries(load_binds())
+    for _g, _items in _entries:
+        print(f"## {_g} ({len(_items)})")
+        for _e in _items:
+            _c = " | ".join(" ".join(mods_of(b["modmask"]) + [key_label(b["key"])]) for b in _e["combos"])
+            print(f"  {_c:<34} {_e['text']}" + (f"  [{_e['sub']}]" if _e["sub"] else "")
+                  + (f"  ({', '.join(_e['flags'])})" if _e["flags"] else ""))
+    sys.exit(0)
+
+
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi/panel"))
+import yumipanel as yp  # noqa: E402  (сам перезапускает процесс с layer-shell)
+from yumipanel import Gtk, Gdk, GLib, Pango, Layer  # noqa: E402
+
+yp.WIDTH = 560                 # каркас берёт ширину окна и шапки из yp.WIDTH
+LIST_H = 470                   # высота списка (постоянная — окно не меняет размер при поиске)
+CHIPS_W = 180                  # ширина колонки с клавишами
+
+CSS = """
+.yk-note { background: alpha(@yp-accent, 0.10); border-radius: 14px; padding: 7px 12px; }
+.yk-note-icon { color: @yp-accent; font-size: 12pt; }
+.yk-note-text { font-size: 8.8pt; color: @yp-fg2; }
+.yk-list scrollbar { background: transparent; border: none; }
+.yk-group { font-size: 9pt; font-weight: 800; letter-spacing: 1px; color: @yp-accent; margin: 8px 6px 2px 6px; }
+.yk-group-n { font-size: 8pt; color: alpha(@yp-fg2, 0.55); margin: 8px 6px 2px 0; }
+.yk-row { background: transparent; color: @yp-fg; border: none; box-shadow: none; border-radius: 12px;
+          padding: 4px 8px; transition: background 150ms; }
+.yk-row:hover { background: @yp-btn; }
+.yk-row:focus-visible { background: @yp-hover; box-shadow: inset 0 0 0 1px alpha(@yp-accent, 0.7); outline: none; }
+.yk-row.first { box-shadow: inset 0 0 0 1px alpha(@yp-accent, 0.45); }
+.yk-chip { font-size: 8.3pt; font-weight: 700; color: @yp-fg; background: alpha(@yp-fg, 0.10);
+           border: 1px solid alpha(@yp-fg, 0.16); border-bottom-width: 2px;
+           border-radius: 6px; padding: 0 6px; min-height: 18px; }
+.yk-chip.key { color: @yp-on-acc; background: @yp-accent; border-color: alpha(black, 0.25); }
+.yk-plus { font-size: 8pt; color: alpha(@yp-fg2, 0.45); }
+.yk-or { font-size: 7.5pt; color: alpha(@yp-fg2, 0.5); }
+.yk-text { font-size: 9.8pt; }
+.yk-meta { font-size: 7.8pt; color: alpha(@yp-fg2, 0.6); }
+.yk-empty { color: alpha(@yp-fg2, 0.6); font-size: 10pt; padding: 18px 6px; }
+.yk-dry { color: @yp-accent; font-size: 8.5pt; font-weight: 700; letter-spacing: 1px; padding: 0 6px; }
+"""
+
+
+def chip(text, key=False):
+    return Gtk.Label(label=text, valign=Gtk.Align.CENTER, css_classes=["yk-chip"] + (["key"] if key else []))
+
+
+def combo_box(b):
+    box = Gtk.Box(spacing=3, halign=Gtk.Align.START)
+    for i, m in enumerate(mods_of(b.get("modmask", 0))):
+        box.append(chip(m))
+    box.append(chip(key_label(b.get("key", "")), key=True))
+    return box
+
+
+class Keys:
+    def __init__(self, panel, body):
+        self.panel = panel
+        panel.add_css(CSS)
+        self.groups = build_entries(load_binds())
+        self.total = sum(len(i) for _g, i in self.groups)
+        self.n_binds = sum(len(e["combos"]) for _g, i in self.groups for e in i)
+        self.first = None
+
+        if os.environ.get("YP_KEYBOARD") != "none":
+            Layer.set_keyboard_mode(panel, Layer.KeyboardMode.EXCLUSIVE)
+
+        note = Gtk.Box(spacing=10, css_classes=["yk-note"])
+        note.append(Gtk.Label(label="󰆏", valign=Gtk.Align.START, css_classes=["yk-note-icon"]))
+        note.append(Gtk.Label(label="Бинды — Lua-функции Hyprland, запустить их отсюда нельзя. "
+                                    "Enter или щелчок копирует сочетание (как в binds.lua).",
+                              xalign=0, wrap=True, max_width_chars=1, hexpand=True, css_classes=["yk-note-text"]))
+        body.append(note)
+
+        self.search = Gtk.SearchEntry(placeholder_text="Поиск: описание, группа или клавиша…", hexpand=True,
+                                      css_classes=["yp-entry"])
+        self.search.connect("search-changed", lambda *_: self.render())
+        self.search.connect("activate", lambda *_: self.first and self.first())
+        self.search.set_key_capture_widget(panel)
+        keys = Gtk.EventControllerKey(propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        keys.connect("key-pressed", self.on_key)
+        self.search.add_controller(keys)
+        body.append(self.search)
+
+        self.list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        sw = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, css_classes=["yk-list"])
+        h = round(LIST_H * panel.k)
+        sw.set_min_content_height(h)
+        sw.set_max_content_height(h)
+        sw.set_child(self.list)
+        self.scroll = sw
+        body.append(sw)
+        if DRY:
+            body.append(Gtk.Label(label="ПРОВЕРКА: БУФЕР ОБМЕНА НЕ МЕНЯЕТСЯ", xalign=0, css_classes=["yk-dry"]))
+
+        prev_hook = getattr(panel, "on_key_hook", None)
+        panel.on_key_hook = lambda kv: self.on_esc(kv) or (prev_hook and prev_hook(kv))
+
+        if os.environ.get("YP_SEARCH"):
+            self.search.set_text(os.environ["YP_SEARCH"])
+        self.render()
+        GLib.timeout_add(80, self.focus_search)
+        if os.environ.get("YP_PRINT_SHAPE"):
+            GLib.timeout_add(700, lambda: print("[shape]", *(panel.shape or ()), file=sys.stderr, flush=True) and False)
+        if DRY and os.environ.get("YP_KEYS_ENTER"):
+            GLib.timeout_add(800, lambda: (self.first and self.first()) and False)
+
+    def focus_search(self):
+        self.search.grab_focus()
+        self.search.set_position(-1)
+        return False
+
+    # ---------- клавиши ----------
+    def on_esc(self, keyval):
+        if Gdk.keyval_name(keyval) == "Escape" and self.search.get_text():
+            self.search.set_text("")
+            self.search.grab_focus()
+            return True
+        return False
+
+    def on_key(self, _c, keyval, *_):
+        if Gdk.keyval_name(keyval) == "Down" and self.first_btn is not None:
+            self.first_btn.grab_focus()
+            return True
+        return False
+
+    # ---------- список ----------
+    @staticmethod
+    def haystack(e):
+        parts = [e["group"], e["sub"], e["text"], " ".join(e["flags"])]
+        for b in e["combos"]:
+            parts += [combo_conf(b), key_label(b.get("key", ""))]
+        return " ".join(parts).lower()
+
+    def render(self):
+        while (c := self.list.get_first_child()):
+            self.list.remove(c)
+        words = self.search.get_text().lower().split()
+        self.first = None
+        self.first_btn = None
+        shown = 0
+        for group, items in self.groups:
+            hits = [e for e in items if all(w in self.haystack(e) for w in words)]
+            if not hits:
+                continue
+            head = Gtk.Box(spacing=6)
+            head.append(Gtk.Label(label=group.upper(), xalign=0, css_classes=["yk-group"]))
+            head.append(Gtk.Label(label=str(len(hits)), xalign=0, css_classes=["yk-group-n"]))
+            self.list.append(head)
+            for e in hits:
+                self.list.append(self.row(e))
+                shown += 1
+        if not shown:
+            msg = "Ничего не найдено" if words else "Бинды не получены — Hyprland не ответил на `hyprctl binds -j`"
+            self.list.append(Gtk.Label(label=msg, xalign=0, wrap=True, max_width_chars=1, css_classes=["yk-empty"]))
+        self.scroll.get_vadjustment().set_value(0)
+        sub = (f"Найдено: {shown} из {self.total}" if words
+               else f"{self.n_binds} биндов · {len(self.groups)} групп · из hyprctl binds")
+        self.panel.set_subtitle(sub, live=True)
+
+    def row(self, e):
+        k = self.panel.k
+        box = Gtk.Box(spacing=10)
+        chips = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3, valign=Gtk.Align.CENTER)
+        chips.set_size_request(round(CHIPS_W * k), -1)
+        for i, b in enumerate(e["combos"]):
+            if i:
+                chips.append(Gtk.Label(label="или", xalign=0, css_classes=["yk-or"]))
+            chips.append(combo_box(b))
+        box.append(chips)
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1, hexpand=True, valign=Gtk.Align.CENTER)
+        col.append(Gtk.Label(label=e["text"], xalign=0, wrap=True, max_width_chars=1, hexpand=True,
+                             css_classes=["yk-text"]))
+        meta = " · ".join(x for x in [e["sub"]] + e["flags"] if x)
+        if meta:
+            col.append(Gtk.Label(label=meta, xalign=0, ellipsize=Pango.EllipsizeMode.END, max_width_chars=1,
+                                 css_classes=["yk-meta"]))
+        box.append(col)
+        conf = combo_conf(e["combos"][0])
+        btn = Gtk.Button(child=box, css_classes=["yk-row"],
+                         tooltip_text="Скопировать: " + "  /  ".join(combo_conf(b) for b in e["combos"]))
+        btn.connect("clicked", lambda *_: self.copy(conf))
+        if self.first is None:
+            self.first = lambda: self.copy(conf)
+            self.first_btn = btn
+            btn.add_css_class("first")
+        return btn
+
+    # ---------- действие ----------
+    def copy(self, text):
+        if DRY:
+            print(f"[dry-run] wl-copy «{text}»", file=sys.stderr, flush=True)
+            self.panel.toast(f"Имитация: скопировано {text}", hold=4)
+            return
+        try:
+            p = subprocess.Popen(["wl-copy"], stdin=subprocess.PIPE, start_new_session=True, env=yp.CHILD_ENV)
+            p.stdin.write(text.encode())
+            p.stdin.close()
+            self.panel.toast(f"Скопировано: {text}", hold=4)
+        except OSError as err:
+            self.panel.toast(f"Не скопировано: {err}", error=True, hold=4)
+
+
+if __name__ == "__main__":
+    app = yp.PanelApp("org.yumi.panel.keys", "Горячие клавиши", "󰌌", lambda panel, body: Keys(panel, body))
+    sys.exit(app.run(sys.argv))

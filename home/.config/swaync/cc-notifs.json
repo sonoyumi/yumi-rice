@@ -54,7 +54,7 @@
       "actions": [
         {
           "label": "󰁍",
-          "command": "@HOME@/.local/bin/cc view compact"
+          "command": "@HOME@/.local/bin/yumi-cc view compact"
         },
         {
           "label": "󰂛",
@@ -68,15 +68,15 @@
       "label": "󰕾",
       "min": 0,
       "max": 100,
-      "cmd_setter": "@HOME@/.local/bin/cc vol $value",
-      "cmd_getter": "@HOME@/.local/bin/cc vol get"
+      "cmd_setter": "@HOME@/.local/bin/yumi-cc vol $value",
+      "cmd_getter": "@HOME@/.local/bin/yumi-cc vol get"
     },
     "slider#mic": {
       "label": "󰍬",
       "min": 0,
       "max": 100,
-      "cmd_setter": "@HOME@/.local/bin/cc micvol $value",
-      "cmd_getter": "@HOME@/.local/bin/cc micvol get"
+      "cmd_setter": "@HOME@/.local/bin/yumi-cc micvol $value",
+      "cmd_getter": "@HOME@/.local/bin/yumi-cc micvol get"
     },
     "backlight": {
       "label": "󰃟",

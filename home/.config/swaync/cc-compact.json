@@ -59,47 +59,47 @@
         {
           "label": "󰖩",
           "type": "toggle",
-          "command": "@HOME@/.local/bin/cc wifi toggle",
-          "update-command": "@HOME@/.local/bin/cc wifi state"
+          "command": "@HOME@/.local/bin/yumi-cc wifi toggle",
+          "update-command": "@HOME@/.local/bin/yumi-cc wifi state"
         },
         {
           "label": "󰂯",
           "type": "toggle",
-          "command": "@HOME@/.local/bin/cc bt toggle",
-          "update-command": "@HOME@/.local/bin/cc bt state"
+          "command": "@HOME@/.local/bin/yumi-cc bt toggle",
+          "update-command": "@HOME@/.local/bin/yumi-cc bt state"
         },
         {
           "label": "󰖂",
           "type": "toggle",
-          "command": "@HOME@/.local/bin/cc vpn toggle",
-          "update-command": "@HOME@/.local/bin/cc vpn state"
+          "command": "@HOME@/.local/bin/yumi-cc vpn toggle",
+          "update-command": "@HOME@/.local/bin/yumi-cc vpn state"
         },
         {
           "label": "󰍬",
           "type": "toggle",
-          "command": "@HOME@/.local/bin/cc mic toggle",
-          "update-command": "@HOME@/.local/bin/cc mic state"
+          "command": "@HOME@/.local/bin/yumi-cc mic toggle",
+          "update-command": "@HOME@/.local/bin/yumi-cc mic state"
         },
         {
           "label": "󰌪",
           "type": "toggle",
-          "command": "@HOME@/.local/bin/cc saver toggle",
-          "update-command": "@HOME@/.local/bin/cc saver state"
+          "command": "@HOME@/.local/bin/yumi-cc saver toggle",
+          "update-command": "@HOME@/.local/bin/yumi-cc saver state"
         },
         {
           "label": "󰅶",
           "type": "toggle",
-          "command": "@HOME@/.local/bin/cc caffeine toggle",
-          "update-command": "@HOME@/.local/bin/cc caffeine state",
+          "command": "@HOME@/.local/bin/yumi-cc caffeine toggle",
+          "update-command": "@HOME@/.local/bin/yumi-cc caffeine state",
           "tooltip": "Не засыпать"
         },
         {
           "label": "󰂚",
-          "command": "@HOME@/.local/bin/cc view notifs"
+          "command": "@HOME@/.local/bin/yumi-cc view notifs"
         },
         {
           "label": "󰌢",
-          "command": "@HOME@/.local/bin/cc menu devices",
+          "command": "@HOME@/.local/bin/yumi-cc menu devices",
           "tooltip": "Устройства: мышь (DPI, частота) и клавиатура (подсветка)"
         }
       ]

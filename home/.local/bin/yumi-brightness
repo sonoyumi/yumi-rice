@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# yumi-brightness — яркость экрана с уведомлением (замена `hyde-shell brightnesscontrol`)
+#   yumi-brightness i|-i [шаг]   ярче      yumi-brightness d|-d [шаг]   темнее      (шаг по умолчанию 5 %)
+# Поведение как у HyDE: ниже 10 % шаг 1 %; на 1 % «темнее» ставит ровно 1 % (экран не гаснет).
+# Устройство — по умолчанию brightnessctl (как было), YUMI_BACKLIGHT=имя — задать явно.
+# Уведомление — как у HyDE: knob-N.svg, «60...», имя устройства; одно окно (-r 7) на 0,8 с;
+# отправитель «Звук и яркость» (YUMI_OSD_APP) — его не пишет в журнал ~/.config/yumi/notify/ignore.json.
+# DRY=1 — ничего не менять, только напечатать команды. Откат: вернуть `hyde-shell brightnesscontrol` в binds.lua
+
+ICONS=${YUMI_OSD_ICONS:-${XDG_DATA_HOME:-$HOME/.local/share}/icons/Wallbash-Icon/media}
+APP=${YUMI_OSD_APP:-Звук и яркость}
+dev=(); [[ -n $YUMI_BACKLIGHT ]] && dev=(-d "$YUMI_BACKLIGHT")
+
+run() { if [[ -n $DRY ]]; then printf 'DO:'; printf ' %q' "$@"; echo; else "$@"; fi; }
+get() { brightnessctl "${dev[@]}" -m | grep -o '[0-9]\+%' | head -n1 | tr -d '%'; }
+
+notify() {
+    local b name angle bar
+    b=$(brightnessctl "${dev[@]}" info | grep -oP '(?<=\()\d+(?=%)' | head -n1)
+    name=$(brightnessctl "${dev[@]}" info | awk -F "'" '/Device/ {print $2; exit}')
+    angle=$(((b + 2) / 5 * 5)); ((angle > 100)) && angle=100
+    bar=$(seq -s "." $((b / 15)) 2>/dev/null | sed 's/[0-9]//g')
+    run notify-send -a "$APP" -r 7 -t 800 -i "$ICONS/knob-$angle.svg" "$b$bar" "$name"
+}
+
+step=${2:-${YUMI_BRIGHTNESS_STEP:-5}}
+[[ $step =~ ^[0-9]+$ ]] || { echo "шаг — целое число" >&2; exit 2; }
+cur=$(get)
+case $1 in
+    i | -i)
+        ((cur < 10)) && step=1
+        run brightnessctl "${dev[@]}" -q set "+$step%"
+        ;;
+    d | -d)
+        ((cur <= 10)) && step=1
+        if ((cur <= 1)); then run brightnessctl "${dev[@]}" -q set "$step%"
+        else run brightnessctl "${dev[@]}" -q set "$step%-"; fi
+        ;;
+    *) echo "использование: yumi-brightness i|d [шаг]" >&2; exit 2 ;;
+esac
+notify

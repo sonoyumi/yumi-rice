@@ -1,0 +1,55 @@
+# Yumi-Rice: подсказка в две строки (вариант C).
+# Цвета — именами палитры терминала (yellow, bright-black…): kitty перекрашивает палитру вместе с обоями,
+# поэтому и подсказка меняет цвета сама.
+"$schema" = 'https://starship.rs/config-schema.json'
+add_newline = true
+format = """
+[╭─](bright-black) $directory$git_branch$git_status$python$cmd_duration$status$fill$time
+[╰─](bright-black)$character"""
+
+[fill]
+symbol = " "
+
+[character]
+success_symbol = "[❯](bold yellow)"
+error_symbol = "[❯](bold red)"
+
+[directory]
+style = "bold yellow"
+truncation_length = 4
+truncation_symbol = "…/"
+read_only = " 󰌾"
+format = "[$path]($style)[$read_only]($read_only_style) "
+
+[git_branch]
+symbol = " "
+style = "green"
+format = "[on](bright-black) [$symbol$branch]($style) "
+
+[git_status]
+style = "red"
+format = "([$all_status$ahead_behind]($style) )"
+
+[python]
+symbol = " "
+style = "blue"
+format = "[$symbol$virtualenv]($style) "
+detect_extensions = []
+detect_files = []
+
+[cmd_duration]
+min_time = 2000
+style = "bright-black"
+format = "[took $duration]($style) "
+
+[status]
+disabled = false
+symbol = "✗ "
+style = "red"
+format = "[$symbol$status]($style) "
+
+[time]
+disabled = false
+time_format = "%H:%M"
+style = "bright-black"
+format = "[$time]($style)"

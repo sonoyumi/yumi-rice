@@ -9,15 +9,15 @@
 справа — «Текст» (синхронный, клик по строке — перемотка) и «Далее» (очередь mpv); снизу — «Сейчас играет»:
 обложка, перемешать, назад/пауза/вперёд, повтор, прогресс, эквалайзер, громкость.
 Поле поиска: фильтрует открытый список; в YouTube/SoundCloud — Enter ищет; ссылка на плейлист + Enter — импорт.
-Цвета — только из обоев: @yp-* из ~/.config/yumi-player/colors.css (wallbash) и accent.css (yumi-accent),
-меняются на лету. Свои правки стиля — ~/.config/yumi-music/menu.css.
+Цвета — только из обоев: @yp-* из ~/.config/yumi/player/colors.css (wallbash) и accent.css (yumi-accent),
+меняются на лету. Свои правки стиля — ~/.config/yumi/music/menu.css.
 Эквалайзер читает уровни из $XDG_RUNTIME_DIR/yumi-eq.levels (12 байт, пишет модуль yumi-eq в Waybar).
 Проверка: YP_DRYRUN=1 (команды плееру не шлются), YP_STAY=1, YP_KEYBOARD=none, YP_MONITOR=DP-1, YM_LEVELS=файл.
 Откат: yumi-uninstall music-menu"""
 import os
 import sys
 
-sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-panel"))
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi/panel"))
 import yumipanel as yp  # noqa: E402  (сам перезапускает процесс с layer-shell)
 from yumipanel import Gtk, Gdk, Gio, GLib, Pango, Layer  # noqa: E402
 
@@ -38,14 +38,14 @@ _SHIFT = [0.2, 0.0]
 
 
 def lyrics_shift():
-    """Сдвиг подсветки текста, как в yumi-player: 0.2 + offset − поправка на Bluetooth (~/.config/yumi-player/
+    """Сдвиг подсветки текста, как в yumi-player: 0.2 + offset − поправка на Bluetooth (~/.config/yumi/player/
     lyrics.conf); перечитывается раз в 10 с — смена наушников/динамиков учитывается без перезапуска."""
     now = _time.monotonic()
     if now - _SHIFT[1] < 10:
         return _SHIFT[0]
     conf = {"offset": 0.0, "bluetooth": 0.1}
     try:
-        with open(os.path.expanduser("~/.config/yumi-player/lyrics.conf")) as f:
+        with open(os.path.expanduser("~/.config/yumi/player/lyrics.conf")) as f:
             for line in f:
                 k, _, v = line.partition("=")
                 if k.strip() in conf:
@@ -83,9 +83,9 @@ CONFIG = os.environ.get("XDG_CONFIG_HOME", os.path.join(HOME, ".config"))
 CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.join(HOME, ".cache")), "yumi-music")
 CLI = os.path.join(HOME, ".local/bin/yumi-music")
 SOCK = os.path.join(RUN, "yumi-music.sock")
-PLAYLISTS = os.path.join(CONFIG, "yumi-music/playlists.json")
-COLOR_DIR = os.path.join(CONFIG, "yumi-player")          # colors.css (wallbash) + accent.css (yumi-accent)
-MENU_CSS = os.path.join(CONFIG, "yumi-music/menu.css")    # свои правки стиля меню (необязательно)
+PLAYLISTS = os.path.join(CONFIG, "yumi/music/playlists.json")
+COLOR_DIR = os.path.join(CONFIG, "yumi/player")          # colors.css (wallbash) + accent.css (yumi-accent)
+MENU_CSS = os.path.join(CONFIG, "yumi/music/menu.css")    # свои правки стиля меню (необязательно)
 COVERS = os.path.join(CACHE, "covers")                    # 544×544 (их качает cover.lua плеера) и наши догрузки
 MINI = os.path.join(CACHE, "mini")                        # 120×120 от старого меню
 SCALED = os.path.join(CACHE, "menu-thumbs")               # квадратные уменьшенные копии под физические px
@@ -207,6 +207,12 @@ scale.ym-scale:hover > trough > slider { opacity: 1; }
 .ym-toast { background: alpha(shade(@yp-bg, 0.5), 0.95); color: @yp-fg; border: 1px solid alpha(@yp-border, 0.5);
             border-radius: 10px; padding: 7px 14px; margin-bottom: 14px; font-size: 9.5pt; }
 .ym-toast.err { border-color: #e06c75; }
+/* выбор плейлиста для 󰐕 — внутри окна поверх затемнения (щелчок мимо окна закрывает всё меню) */
+.ym-dim { background: alpha(shade(@yp-bg, 0.4), 0.55); }
+.ym-sheet { background: alpha(shade(@yp-bg, 0.7), 0.97); border: 1px solid alpha(@yp-border, 0.5); border-radius: 14px;
+  padding: 14px; }
+.ym-sheet-t { font-size: 11pt; font-weight: 700; color: @yp-fg; }
+.ym-sheet-s { font-size: 9pt; color: alpha(@yp-fg, 0.55); margin-bottom: 6px; }
 """
 
 
@@ -626,6 +632,8 @@ class MusicWindow(Gtk.ApplicationWindow):
         frame.append(self.build_now())
         self.toast_l = Gtk.Label(css_classes=["ym-toast"], halign=Gtk.Align.CENTER, valign=Gtk.Align.END, visible=False)
         overlay.add_overlay(self.toast_l)
+        self.sheet = None
+        self.overlay = overlay
         # Окно НЕ растёт никогда: обёртка с политикой EXTERNAL не передаёт окну минимальный размер содержимого
         # (иначе широкая страница раздувала слой, а Hyprland анимирует изменение размера — шлейф)
         outer = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.EXTERNAL, vscrollbar_policy=Gtk.PolicyType.EXTERNAL)
@@ -790,6 +798,7 @@ class MusicWindow(Gtk.ApplicationWindow):
         self.t_next = self.tbtn("󰲸", "Далее", lambda: self.toggle_right("next"))
         right.append(self.t_lyr)
         right.append(self.t_next)
+        right.append(self.tbtn("󰊓", "Во весь экран", self.open_full))
         right.append(Gtk.Label(label="󰕾", css_classes=["ym-vol-ic"]))
         self.vol = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL, draw_value=False, css_classes=["ym-scale", "vol"],
                              focusable=False, valign=Gtk.Align.CENTER)
@@ -804,6 +813,13 @@ class MusicWindow(Gtk.ApplicationWindow):
         b = Gtk.Button(label=icon, tooltip_text=tip, css_classes=["ym-c"] + ([extra] if extra else []), focusable=False)
         b.connect("clicked", lambda *_: fn())
         return b
+
+    def open_full(self):
+        """Полноэкранный плеер (yumi-player-full); меню закрывается."""
+        if not DRY:
+            subprocess.Popen([os.path.join(HOME, ".local/bin/yumi-player-full")], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        self.app.quit()
 
     def tbtn(self, icon, tip, fn):
         b = Gtk.Button(label=icon, tooltip_text=tip, css_classes=["ym-tog"], focusable=False)
@@ -866,7 +882,8 @@ class MusicWindow(Gtk.ApplicationWindow):
             d = load_json(os.path.join(CACHE, f"pl-{p['id']}.json"), {})
             name = (d.get("name") or p.get("name") or p["id"]).replace(" (SoundCloud)", "")
             out.append({"id": p["id"], "name": name, "short": name.split("/")[0].strip(),
-                        "src": {"sc": "SoundCloud", "mix": "SoundCloud + Apple Music"}.get(p.get("src"), "YouTube Music")
+                        "src": {"sc": "SoundCloud", "mix": "SoundCloud + Apple Music",
+                                                 "local": "Мой плейлист"}.get(p.get("src"), "YouTube Music")
                         if not (p.get("src") == "mix" and all(x.get("type") == "apple" for x in p.get("sources", [])))
                         else "Apple Music → SoundCloud",
                         "tracks": d.get("tracks") or []})
@@ -998,6 +1015,8 @@ class MusicWindow(Gtk.ApplicationWindow):
         q = self.search.get_text().strip().lower()
         if q:
             rows = [(i, t) for i, t in rows if q in (t.get("title", "") + " " + t.get("artist", "")).lower()]
+        rows = [(i, dict(t, _pl=t, _rm=(p["id"], t.get("key") or t["id"]) if t.get("added") else None))
+                for i, t in rows]
         self.track_list([(t, i, bool(playing) and (t.get("key") or t.get("id")) == playing,
                           lambda *_, i=i: self.play_list(p["id"], False, i),
                           lambda *_, t=t: self.add(t.get("url") or t["id"], False)) for i, t in rows],
@@ -1055,6 +1074,14 @@ class MusicWindow(Gtk.ApplicationWindow):
             more = Gtk.Button(label="󰐒", tooltip_text="Следующим в очередь", css_classes=["ym-more"], focusable=False)
             more.connect("clicked", nxt)
             g.append(more)
+        if t.get("_pl"):                          # 󰐕 — в свой плейлист (локально, см. yumi-music pl-add)
+            plb = Gtk.Button(label="󰐕", tooltip_text="В плейлист", css_classes=["ym-more"], focusable=False)
+            plb.connect("clicked", lambda *_: self.pl_menu(t["_pl"]))
+            g.append(plb)
+        if t.get("_rm"):                          # 󰆴 — только у треков, добавленных вручную
+            rm = Gtk.Button(label="󰆴", tooltip_text="Убрать из плейлиста", css_classes=["ym-more"], focusable=False)
+            rm.connect("clicked", lambda *_: self.pl_remove(*t["_rm"]))
+            g.append(rm)
         b.set_child(g)
         b.connect("clicked", cb)
         return b
@@ -1068,7 +1095,7 @@ class MusicWindow(Gtk.ApplicationWindow):
             items = [t for t in self.queue if q in (t["title"] + " " + t["artist"]).lower()]
         else:                                    # окно вокруг играющего
             items = self.queue[max(self.cur_idx - 3, 0):]
-        self.track_list([(t, t["i"], t["i"] == self.cur_idx, lambda *_, n=t["i"]: self.play_index(n), None)
+        self.track_list([(dict(t, _pl=t), t["i"], t["i"] == self.cur_idx, lambda *_, n=t["i"]: self.play_index(n), None)
                          for t in items], empty="В очереди не найдено. Откройте «YouTube Music» — искать везде.")
 
     def render_recent(self):
@@ -1077,8 +1104,8 @@ class MusicWindow(Gtk.ApplicationWindow):
         q = self.search.get_text().strip().lower()
         if q:
             rec = [t for t in rec if q in (t["title"] + " " + t["artist"]).lower()]
-        self.track_list([(t, i, False, lambda *_, u=t["url"]: self.add(u, True), lambda *_, u=t["url"]: self.add(u, False))
-                         for i, t in enumerate(rec)],
+        self.track_list([(dict(t, _pl=t), i, False, lambda *_, u=t["url"]: self.add(u, True),
+                          lambda *_, u=t["url"]: self.add(u, False)) for i, t in enumerate(rec)],
                         empty="Здесь появятся треки, которые играли, пока было открыто это окно.")
 
     def render_yt(self):
@@ -1098,7 +1125,7 @@ class MusicWindow(Gtk.ApplicationWindow):
             if r.get("thumb"):
                 self.covers.thumbs.setdefault(key, r["thumb"])
             target = r["url"] if tab == "sc" else r["id"]
-            items.append(({"key": key, "title": r["title"], "artist": r["artist"], "dur": r["dur"]}, i, False,
+            items.append(({"key": key, "title": r["title"], "artist": r["artist"], "dur": r["dur"], "_pl": r}, i, False,
                           lambda *_, v=target: self.add(v, True), lambda *_, v=target: self.add(v, False)))
         self.track_list(items)
 
@@ -1153,6 +1180,92 @@ class MusicWindow(Gtk.ApplicationWindow):
         cli("add", target, *(["--now"] if now else []),
             cb=lambda ok, out: (self.toast(("Включаю…" if now else "Будет следующим") if ok else "Не удалось", 3, not ok),
                                 GLib.timeout_add(600, self.after_change)))
+
+    # ----- свои плейлисты: 󰐕 «В плейлист» -----
+    def pl_menu(self, track):
+        """Выбор плейлиста поверх окна: список плейлистов + поле «Новый плейлист»."""
+        self.close_sheet()
+        s = self.s
+        dim = Gtk.Box(css_classes=["ym-dim"], hexpand=True, vexpand=True)
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=s(2), css_classes=["ym-sheet"],
+                       halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER, hexpand=True, vexpand=True)
+        card.set_size_request(s(320), -1)
+        dim.append(card)
+        card.append(Gtk.Label(label="Добавить в плейлист", xalign=0, css_classes=["ym-sheet-t"]))
+        who = f"{track.get('artist')} — {track.get('title')}" if track.get("artist") else (track.get("title") or "")
+        card.append(Gtk.Label(label=who, xalign=0, css_classes=["ym-sheet-s"], ellipsize=Pango.EllipsizeMode.END,
+                              max_width_chars=1))
+        lst = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=s(2))
+        for p in self.playlists():
+            lst.append(self.sheet_item(p, track))
+        sw = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, propagate_natural_height=True)
+        sw.set_max_content_height(s(300))
+        sw.set_child(lst)
+        card.append(sw)
+        entry = Gtk.Entry(placeholder_text="＋ Новый плейлист — имя и Enter", css_classes=["ym-search"],
+                          margin_top=s(8))
+        entry.connect("activate", lambda e: e.get_text().strip() and self.pl_new(e.get_text().strip(), track))
+        card.append(entry)
+        click = Gtk.GestureClick()                # щелчок по затемнению (не по карточке) — закрыть выбор
+
+        def pressed(_g, _n, x, y):
+            ok, b = card.compute_bounds(dim)
+            if ok and not (b.get_x() <= x <= b.get_x() + b.get_width() and b.get_y() <= y <= b.get_y() + b.get_height()):
+                self.close_sheet()
+        click.connect("pressed", pressed)
+        dim.add_controller(click)
+        self.overlay.add_overlay(dim)
+        self.sheet = dim
+
+    def sheet_item(self, p, track):
+        b = Gtk.Button(css_classes=["ym-nav"])
+        box = Gtk.Box(spacing=self.s(10))
+        box.append(self.square(self.first_key(p["tracks"]), 28, "ym-mini"))
+        box.append(Gtk.Label(label=p["short"], xalign=0, hexpand=True, ellipsize=Pango.EllipsizeMode.END,
+                             max_width_chars=1))
+        box.append(Gtk.Label(label=str(len(p["tracks"])), css_classes=["ym-cnt"]))
+        b.set_child(box)
+        b.connect("clicked", lambda *_: self.pl_add(p["id"], track))
+        return b
+
+    def close_sheet(self):
+        if self.sheet:
+            self.overlay.remove_overlay(self.sheet)
+            self.sheet = None
+            return True
+        return False
+
+    def pl_add(self, pid, track):
+        self.close_sheet()
+        t = {k: track.get(k) for k in ("id", "url", "key", "title", "artist", "dur", "thumb") if track.get(k)}
+        self.toast("Добавляю…", 10)
+
+        def done(ok, out):
+            if not ok:
+                return self.toast(f"Не удалось: {out[-60:]}", 4, True)
+            d = json.loads(out)
+            name = d["name"].replace(" (SoundCloud)", "")
+            self.toast(f"Уже есть в «{name}»" if d["dup"] else f"Добавлено в «{name}»", 3)
+            self.after_playlists()
+        cli("pl-add", pid, json.dumps(t, ensure_ascii=False), cb=done)
+
+    def pl_new(self, name, track):
+        self.close_sheet()
+
+        def done(ok, out):
+            if not ok:
+                return self.toast(f"Не удалось: {out[-60:]}", 4, True)
+            self.pl_add(json.loads(out)["id"], track)
+        cli("pl-new", name, cb=done)
+
+    def pl_remove(self, pid, key):
+        cli("pl-remove", pid, key, cb=lambda ok, out: (self.toast("Убрано из плейлиста" if ok else "Не удалось", 2, not ok),
+                                                     self.after_playlists()))
+
+    def after_playlists(self):
+        self.fill_side_playlists()
+        if self.view in ("pl", "lists"):
+            self.render(keep=True)
 
     def play_index(self, n):
         ipc("playlist-play-index", n)
@@ -1462,7 +1575,9 @@ class MusicWindow(Gtk.ApplicationWindow):
     # ----- клавиатура -----
     def on_key(self, _c, keyval, _code, _state):
         if (Gdk.keyval_name(keyval) or "") == "Escape":
-            if self.search.get_text():
+            if self.close_sheet():
+                pass
+            elif self.search.get_text():
                 self.search.set_text("")
             else:
                 self.app.quit()

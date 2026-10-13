@@ -3,59 +3,62 @@
   yumi-menu-system [--bar|--center]   открыть / закрыть
   yumi-menu-system --close            закрыть открытое меню
 Разделы:
-  ОБНОВЛЕНИЯ   — число, как у пилюли custom/updates (HyDE system.update: кеш $XDG_RUNTIME_DIR/hyde/update_info.json,
+  ОБНОВЛЕНИЯ   — число, как у пилюли custom/updates (yumi-update check: кеш $XDG_RUNTIME_DIR/yumi/update_info.json,
                  pacman = checkupdates, AUR = paru -Qua, flatpak); список пакетов — на подстранице;
-                 «Обновить систему» — kitty с интерактивным system.update.py (сам спросит «Apply updates now?»).
-  СНИМКИ BTRFS — snapper (конфиги root и home, их настроил setup-snapshots); «Сделать снимок сейчас» — оба конфига.
-  ОФОРМЛЕНИЕ   — обои, анимации (SUPER+SHIFT+Y), экран блокировки (SUPER+SHIFT+U), перезапуск Waybar, yumi-accent.
-  СИСТЕМА      — диск /, память, батарея, температура; btop, Arch Wiki, подсказка клавиш HyDE.
+                 «Обновить систему» — yumi-update run: kitty, сам спросит «Обновить сейчас?».
+  СНИМКИ BTRFS — snapper (конфиги root и home, их настроил yumi-setup-snapshots); «Сделать снимок сейчас» — оба конфига.
+  ОФОРМЛЕНИЕ   — обои, перезапуск Waybar, yumi-accent.
+  СИСТЕМА      — «Доктор» (yumi-doctor --json в фоне: зелёный/жёлтый/красный; подстраница — все проверки,
+                 «Починить» = yumi-doctor --fix, «Подробно в терминале» = kitty --hold -e yumi-doctor -v);
+                 диск /, память, батарея, температура; btop, Arch Wiki, горячие клавиши.
 
 Отладка:
   YP_DRYRUN=1          ничего не запускается и не меняется: команда пишется в stderr, меню показывает имитацию
-  YP_SYS_PAGE=updates|snapshots   сразу открыть подстраницу
-  YP_SYS_ACT=ключ      через 0,8 с «нажать» действие (update, snapshot, wallpaper, animations, hyprlock,
-                       waybar, accent, btop, wiki, keys) — только вместе с YP_DRYRUN=1
+  YP_SYS_PAGE=updates|snapshots|doctor   сразу открыть подстраницу
+  YUMI_DOCTOR=путь     другой yumi-doctor (проверка новой версии до подключения)
+  YP_SYS_ACT=ключ      через 0,8 с «нажать» действие (update, snapshot, wallpaper, waybar, accent,
+                       btop, wiki, keys, doctor-fix, doctor-term) — только вместе с YP_DRYRUN=1
 Откат: rm ~/.local/bin/yumi-menu-system (и убрать on-click у custom/archlogo)"""
 import json
 import os
 import shlex
 import shutil
+import subprocess
 import sys
 import threading
 import time
 
-sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-panel"))
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi/panel"))
 import yumipanel as yp  # noqa: E402  (сам перезапускает процесс с layer-shell)
 from yumipanel import Gtk, GLib, Pango  # noqa: E402
+yp.WIDTH = 424                 # шире обычного меню: ряды кнопок «Обои», плитки btop/Wiki/клавиши (каркас держит ширину окна)
 
 HOME = os.path.expanduser("~")
 DRY = yp.DRY
-HYDE_LIB = os.path.join(HOME, ".local/lib/hyde")
-HYDE_SHELL = shutil.which("hyde-shell") or os.path.join(HOME, ".local/bin/hyde-shell")
-UPDATE_INFO = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "hyde/update_info.json")
+UPDATE_INFO = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "yumi/update_info.json")  # пишет yumi-update check
 SYS_BAT = "/sys/class/power_supply/macsmc-battery"
 RED, ORANGE, GREEN = "#ed8796", "#f5a97f", "#a6da95"
 MGR_NAME = {"pacman": "pacman", "paru": "AUR", "yay": "AUR", "flatpak": "flatpak"}
 
 # действие → (значок, текст, команда, меняет систему?)
 ACTIONS = {
-    "update":     ("󰚰", "Обновить систему",
-                   ["kitty", "--title", "systemupdate", "-e", sys.executable,
-                    os.path.join(HYDE_LIB, "system.update.py"), "interactive"], False),
+    "update":     ("󰚰", "Обновить систему", [os.path.join(HOME, ".local/bin/yumi-update"), "run"], False),
     "wallpaper":  ("󰸉", "Обои", [os.path.join(HOME, ".local/bin/yumi-menu-wallpaper"), "--center"], False),
-    "animations": ("󰪐", "Анимации", [HYDE_SHELL, "animations", "--select"], False),
-    "hyprlock":   ("󰌾", "Экран блокировки", [HYDE_SHELL, "hyprlock", "--select"], False),
-    "waybar":     ("󰑓", "Перезапустить Waybar", ["systemctl", "--user", "restart", "hyde-Hyprland-bar.service"], True),
+    "waybar":     ("󰑓", "Перезапустить Waybar", ["systemctl", "--user", "restart", "waybar.service"], True),
     "accent":     ("󰏘", "Пересчитать цвета", [os.path.join(HOME, ".local/bin/yumi-accent")], True),
     "btop":       ("󰄨", "Системный монитор (btop)", ["kitty", "--title", "btop", "-e", "btop"], False),
     "wiki":       ("󰖟", "Arch Wiki", ["xdg-open", "https://wiki.archlinux.org"], False),
-    "keys":       ("󰌌", "Горячие клавиши", [HYDE_SHELL, "keybinds_hint"], False),
+    "keys":       ("󰌌", "Горячие клавиши", [os.path.join(HOME, ".local/bin/yumi-menu-keys"), "--center"], False),
 }
-KEYS_HINT = {"animations": "Super ⇧ Y", "hyprlock": "Super ⇧ U"}
-TILE_TEXT = {"hyprlock": "Экран\nблокировки", "animations": "Анимации", "wallpaper": "Обои",
+TILE_TEXT = {"wallpaper": "Обои",
              "waybar": "Перезапустить\nWaybar", "accent": "Пересчитать\nцвета",
              "btop": "Монитор\nbtop", "wiki": "Arch\nWiki", "keys": "Горячие\nклавиши"}
 SNAP_DESC = "Вручную из меню «Система»"
+DOCTOR = os.environ.get("YUMI_DOCTOR") or os.path.join(HOME, ".local/bin/yumi-doctor")
+DOCTOR_CACHE = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "yumi/doctor.json")   # последний результат —
+                                       # меню показывает его сразу, пока идёт новая проверка
+DOC_ICON = {"ok": "󰗠", "info": "󰋼", "warn": "󰀪", "fail": "󰅙", "run": "󰔟"}
+DOC_TITLE = {"ok": "Всё хорошо", "warn": "Есть предупреждения", "fail": "Есть проблемы"}
 
 CSS = f"""
 .ysy-tile {{ background: @yp-btn; color: @yp-fg; border-radius: 16px; border: none; box-shadow: none;
@@ -101,6 +104,19 @@ CSS = f"""
 .ysy-pkg-name {{ color: @yp-fg; }}
 .ysy-pkg-ver {{ color: alpha(@yp-fg2, 0.65); font-size: 8.5pt; }}
 .ysy-list {{ background: alpha(@yp-btn, 0.4); border-radius: 16px; padding: 6px 8px; }}
+.ysy-doc {{ padding: 7px 14px; }}
+.ysy-doc-icon {{ font-size: 18pt; min-width: 34px; color: alpha(@yp-fg2, 0.6); }}
+.ysy-doc-title {{ font-size: 10.5pt; font-weight: 700; }}
+.ysy-doc-sub {{ font-size: 8.5pt; color: alpha(@yp-fg2, 0.7); }}
+.ysy-doc.ok .ysy-doc-icon, .ysy-chk.ok .ysy-chk-icon {{ color: {GREEN}; }}
+.ysy-doc.warn .ysy-doc-icon, .ysy-chk.warn .ysy-chk-icon {{ color: {ORANGE}; }}
+.ysy-doc.fail .ysy-doc-icon, .ysy-chk.fail .ysy-chk-icon {{ color: {RED}; }}
+.ysy-doc.fail {{ box-shadow: inset 0 0 0 1px alpha({RED}, 0.55); }}
+.ysy-chk {{ padding: 4px 4px; }}
+.ysy-chk-icon {{ font-size: 12pt; color: alpha(@yp-fg2, 0.55); min-width: 22px; }}
+.ysy-chk-title {{ font-size: 9.5pt; font-weight: 700; }}
+.ysy-chk-sum {{ font-size: 9pt; color: alpha(@yp-fg2, 0.8); }}
+.ysy-chk-hint {{ font-size: 8.5pt; color: alpha(@yp-fg2, 0.6); }}
 .ysy-dry {{ font-size: 9pt; color: alpha(@yp-fg2, 0.8); background: alpha(@yp-fg, 0.06);
             border-radius: 12px; padding: 6px 10px; }}
 """
@@ -145,7 +161,7 @@ def plural(n, one, few, many):
 
 
 def cached_updates():
-    """Число обновлений из кеша HyDE (тот же файл, что у пилюли custom/updates). None — кеша нет."""
+    """Число обновлений из кеша yumi-update (тот же файл, что у пилюли custom/updates). None — кеша нет."""
     try:
         with open(UPDATE_INFO) as f:
             data = json.load(f)
@@ -316,6 +332,9 @@ class SystemMenu:
         self.app.connect("shutdown", lambda *_: setattr(self, "closed", True))
         self.snaps = {}
         self.upd_list = None                   # кеш списка пакетов (подстраница)
+        self.doc = None                        # последний отчёт yumi-doctor --json
+        self.doc_running = False
+        self.doc_page = None                   # открытая подстраница доктора (обновляется по готовности)
 
         panel.set_subtitle(subtitle())
         GLib.timeout_add_seconds(20, self.tick_subtitle)
@@ -333,11 +352,12 @@ class SystemMenu:
 
         # ОФОРМЛЕНИЕ
         body.append(yp.section("ОФОРМЛЕНИЕ"))
-        body.append(self.tiles([("wallpaper", 0, 0, 3), ("animations", 3, 0, 3),   # без «Экран блокировки»: запускал настоящий hyprlock
-                                ("waybar", 0, 1, 3), ("accent", 3, 1, 3)]))
+        # без «Анимаций» и «Экрана блокировки» (hyde-shell; второй запускал настоящий hyprlock)
+        body.append(self.tiles([("wallpaper", 0, 0, 2), ("waybar", 2, 0, 2), ("accent", 4, 0, 2)]))
 
         # СИСТЕМА
         body.append(yp.section("СИСТЕМА"))
+        body.append(self.make_doctor())
         body.append(self.make_stats())
         body.append(self.tiles([("btop", 0, 0, 2), ("wiki", 2, 0, 2), ("keys", 4, 0, 2)]))
 
@@ -347,15 +367,20 @@ class SystemMenu:
         self.refresh_stats()
         GLib.timeout_add_seconds(5, self.refresh_stats)
         threading.Thread(target=self.load_snapshots, daemon=True).start()
+        self.run_doctor()
 
         page = os.environ.get("YP_SYS_PAGE")
         if page == "updates":
             GLib.timeout_add(300, lambda: self.open_updates() and False)
         elif page == "snapshots":
             GLib.timeout_add(600, lambda: self.open_snapshots() and False)
+        elif page == "doctor":
+            GLib.timeout_add(300, lambda: self.open_doctor() and False)
         act = os.environ.get("YP_SYS_ACT")
         if act and DRY:
-            GLib.timeout_add(800, lambda: (self.make_snapshot() if act == "snapshot" else self.launch(act)) and False)
+            special = {"snapshot": self.make_snapshot, "doctor-fix": lambda: self.run_doctor(fix=True),
+                       "doctor-term": self.doctor_terminal}
+            GLib.timeout_add(800, lambda: (special[act]() if act in special else self.launch(act)) and False)
 
     # ---------- элементы ----------
     def row(self, icon, text, cb, meta="", chevron=False):
@@ -379,8 +404,7 @@ class SystemMenu:
             box.append(Gtk.Label(label=icon, css_classes=["ysy-tile-icon"]))
             box.append(Gtk.Label(label=TILE_TEXT.get(k, text), justify=Gtk.Justification.LEFT, xalign=0,
                                  css_classes=["ysy-tile-text"]))
-            tip = text + (f" — {KEYS_HINT[k]}" if k in KEYS_HINT else "")
-            b = Gtk.Button(child=box, css_classes=["ysy-tile"], tooltip_text=tip, hexpand=True)
+            b = Gtk.Button(child=box, css_classes=["ysy-tile"], tooltip_text=text, hexpand=True)
             b.connect("clicked", lambda *_, k=k: self.launch(k))
             grid.attach(b, col, row, span, 1)
         return grid
@@ -452,7 +476,7 @@ class SystemMenu:
         while (c := self.snap_box.get_first_child()):
             self.snap_box.remove(c)
         if not snaps:
-            self.snap_box.append(Gtk.Label(label="snapper не настроен — запустите setup-snapshots", xalign=0,
+            self.snap_box.append(Gtk.Label(label="snapper не настроен — запустите yumi-setup-snapshots", xalign=0,
                                            wrap=True, max_width_chars=1, css_classes=["ysy-snap-time"]))
             return False
         for cfg, tag in (("root", "/"), ("home", "home")):
@@ -542,6 +566,7 @@ class SystemMenu:
                                 max_content_height=round(560 * self.panel.k))
         sw.set_child(content)
         box.append(sw)
+        box.append(yp.hint(self.snap_note()))
         box.append(self.make_action("update", "primary"))
         self.panel.push("󰮯  Обновления", box, "pacman, AUR и flatpak")
 
@@ -604,6 +629,171 @@ class SystemMenu:
         page.append(yp.action_button("󰄄  Сделать снимок сейчас", lambda *_: self.make_snapshot(), "primary"))
         total = sum(len(v) for v in self.snaps.values())
         self.panel.push("󰋊  Снимки btrfs", page, f"snapper · {total} {plural(total, 'снимок', 'снимка', 'снимков')}")
+
+    def snap_note(self):
+        """Строка под списком обновлений: снимок до/после делает snap-pac (pacman-хук), последний снимок /."""
+        last = (self.snaps.get("root") or [None])[0]
+        tail = f" Последний снимок /: {when(last['date'])}." if last else ""
+        if os.path.isfile("/usr/share/libalpm/hooks/05-snap-pac-pre.hook"):
+            return "Снимок / до и после обновления snap-pac сделает сам — откатить можно из «Снимков btrfs»." + tail
+        return "snap-pac не установлен: обновление пройдёт без снимка. Сначала «Сделать снимок сейчас»." + tail
+
+    # ---------- доктор ----------
+    def make_doctor(self):
+        box = Gtk.Box(spacing=10)
+        self.doc_icon = Gtk.Label(label=DOC_ICON["run"], css_classes=["ysy-doc-icon"], xalign=0.5)
+        box.append(self.doc_icon)
+        texts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER, hexpand=True)
+        self.doc_title = Gtk.Label(label="Доктор: проверяю…", xalign=0, css_classes=["ysy-doc-title"],
+                                   ellipsize=Pango.EllipsizeMode.END, max_width_chars=1)
+        self.doc_sub = Gtk.Label(label="службы, конфиг, цвета, обои, диск, снимки", xalign=0,
+                                 css_classes=["ysy-doc-sub"], ellipsize=Pango.EllipsizeMode.END, max_width_chars=1)
+        texts.append(self.doc_title)
+        texts.append(self.doc_sub)
+        box.append(texts)
+        box.append(Gtk.Label(label="󰅂", css_classes=["ysy-chev"]))
+        self.doc_btn = Gtk.Button(child=box, css_classes=["yp-row", "ysy-doc"], tooltip_text="Все проверки yumi-doctor")
+        self.doc_btn.connect("clicked", lambda *_: self.open_doctor())
+        try:                                   # прошлый результат — сразу, пока идёт новая проверка
+            with open(DOCTOR_CACHE) as f:
+                self.show_doctor(json.load(f), stale=True)
+        except (OSError, ValueError):
+            pass
+        return self.doc_btn
+
+    def run_doctor(self, fix=False):
+        """yumi-doctor --json [--fix] в фоне; в пробном режиме меню --fix ничего не меняет (YUMI_DOCTOR_DRY)."""
+        if self.doc_running:
+            return
+        self.doc_running = True
+        self.doc_icon.set_label(DOC_ICON["run"])
+        if fix:
+            self.panel.busy += 1
+            self.panel.toast("Имитация: чиню…" if DRY else "Чиню…", hold=30)
+        if self.doc_page:
+            self.doc_page["fix"].set_sensitive(False)
+            self.doc_page["spin"].set_visible(True)
+
+        def work():
+            env = dict(yp.CHILD_ENV, **({"YUMI_DOCTOR_DRY": "1"} if DRY and fix else {}))
+            cmd = [DOCTOR, "--json"] + (["--fix"] if fix else [])
+            if DRY and fix:
+                print(f"yumi-menu-system [dry-run] Доктор: {shlex.join(cmd)} (YUMI_DOCTOR_DRY=1)", file=sys.stderr, flush=True)
+            try:
+                p = subprocess.run(cmd, capture_output=True, text=True, timeout=300 if fix else 120, env=env)
+                rep = json.loads(p.stdout)
+            except (OSError, ValueError, subprocess.SubprocessError) as e:
+                rep = {"status": "fail", "summary": "доктор не запустился", "checks": [], "error": str(e)}
+            GLib.idle_add(done, rep)
+
+        def done(rep):
+            self.doc_running = False
+            if fix:
+                self.panel.busy = max(0, self.panel.busy - 1)
+                fixed = rep.get("fixed") or []
+                bad = [f["cmd"] for f in fixed if not f.get("ok")]
+                self.panel.toast(("Имитация: " if DRY else "") + (f"не удалось: {bad[0]}"[:70] if bad else
+                                 f"починено пунктов: {len(fixed)}" if fixed else "чинить нечего"),
+                                 error=bool(bad), hold=6)
+            if self.closed:
+                return False
+            if rep.get("checks"):
+                try:
+                    os.makedirs(os.path.dirname(DOCTOR_CACHE), exist_ok=True)
+                    with open(DOCTOR_CACHE, "w") as f:
+                        json.dump(rep, f, ensure_ascii=False)
+                except OSError:
+                    pass
+            self.show_doctor(rep)
+            return False
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def show_doctor(self, rep, stale=False):
+        self.doc = rep
+        st = rep.get("status", "fail")
+        for c in ("ok", "warn", "fail"):
+            (self.doc_btn.add_css_class if c == st else self.doc_btn.remove_css_class)(c)
+        self.doc_icon.set_label(DOC_ICON["run"] if stale else DOC_ICON.get(st, DOC_ICON["fail"]))
+        self.doc_title.set_label("Доктор: " + (rep.get("summary") or DOC_TITLE.get(st, "?")).lower())
+        n = len(rep.get("checks") or [])
+        bits = [f"{n} {plural(n, 'проверка', 'проверки', 'проверок')}"] if n else []
+        bad = [c["title"] for c in rep.get("checks") or [] if c.get("status") in ("warn", "fail")]
+        if bad:
+            bits.append(", ".join(bad))
+        elif rep.get("error"):
+            bits.append(rep["error"])
+        when_ = time.strftime("%H:%M", time.localtime(rep.get("time", time.time())))
+        bits.append(f"проверяю… (прошлая в {when_})" if stale else f"в {when_}")
+        self.doc_sub.set_label(" · ".join(bits))
+        if self.doc_page and not stale:
+            self.fill_doctor_page()
+
+    def open_doctor(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        lst = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, css_classes=["ysy-list"])
+        sw = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, propagate_natural_height=True,
+                                max_content_height=round(560 * self.panel.k))
+        sw.set_child(lst)
+        box.append(sw)
+        spin = yp.spinner_row("Проверяю…")
+        box.append(spin)
+        btns = Gtk.Box(spacing=8, homogeneous=True)
+        fix = yp.action_button("󰁨  Починить", lambda *_: self.run_doctor(fix=True), "primary")
+        btns.append(fix)
+        term = yp.action_button("󰆍  В терминале", lambda *_: self.doctor_terminal(), "plain")
+        term.set_tooltip_text("Подробно в терминале: kitty --hold -e yumi-doctor -v")
+        btns.append(term)
+        box.append(btns)
+        self.doc_page = {"list": lst, "spin": spin, "fix": fix}
+        self.panel.push("󰓙  Доктор", box, "yumi-doctor", on_leave=lambda: setattr(self, "doc_page", None))
+        self.fill_doctor_page()
+
+    def fill_doctor_page(self):
+        pg, rep = self.doc_page, self.doc or {}
+        lst = pg["list"]
+        while (c := lst.get_first_child()):
+            lst.remove(c)
+        pg["spin"].set_visible(self.doc_running)
+        checks = rep.get("checks") or []
+        if not checks:
+            lst.append(yp.hint(rep.get("error") or "Ещё нет результата — проверяю…"))
+        order = {"fail": 0, "warn": 1, "info": 2, "ok": 3}
+        for c in sorted(checks, key=lambda c: order.get(c.get("status"), 9)):
+            st = c.get("status", "info")
+            row = Gtk.Box(spacing=10, css_classes=["ysy-chk", st])
+            row.append(Gtk.Label(label=DOC_ICON.get(st, "•"), css_classes=["ysy-chk-icon"], valign=Gtk.Align.START))
+            col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True)
+            col.append(Gtk.Label(label=c.get("title", c.get("id", "?")), xalign=0, css_classes=["ysy-chk-title"],
+                                 ellipsize=Pango.EllipsizeMode.END, max_width_chars=1))
+            col.append(Gtk.Label(label=c.get("summary", ""), xalign=0, wrap=True, max_width_chars=1,
+                                 css_classes=["ysy-chk-sum"]))
+            if st in ("warn", "fail") and c.get("hint"):
+                col.append(Gtk.Label(label="→ " + c["hint"], xalign=0, wrap=True, max_width_chars=1,
+                                     css_classes=["ysy-chk-hint"]))
+            row.append(col)
+            tip = "\n".join(c.get("details") or [])
+            row.set_tooltip_text(tip or None)
+            lst.append(row)
+        fixable = rep.get("fixable", 0)
+        pg["fix"].set_sensitive(bool(fixable) and not self.doc_running)
+        pg["fix"].set_tooltip_text(f"yumi-doctor --fix: {fixable} {plural(fixable, 'пункт', 'пункта', 'пунктов')}"
+                                   if fixable else "Безопасно чинить нечего")
+        if self.panel.pages:                   # страница доктора открыта (с неё некуда идти дальше)
+            self.panel.set_subtitle(rep.get("summary", "yumi-doctor") +
+                                    (f" · можно починить: {fixable}" if fixable else ""), live=True)
+
+    def doctor_terminal(self):
+        cmd = ["kitty", "--title", "Доктор Yumi-Rice", "--hold", "-e", DOCTOR, "-v"]
+        if DRY:
+            print(f"yumi-menu-system [dry-run] Доктор: {shlex.join(cmd)}", file=sys.stderr, flush=True)
+            self.panel.toast("Имитация: доктор в терминале", hold=3)
+            self.dry_rev.get_child().set_label(f"Пробный режим, команда не выполнена:\n{shlex.join(cmd)}")
+            self.dry_rev.set_reveal_child(True)
+            return
+        self.panel.set_visible(False)
+        yp.spawn(*cmd)
+        self.app.quit()
 
     # ---------- действия ----------
     def launch(self, key):

@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""yumi-zen-theme — браузер Zen в цветах обоев через Pywalfox (живой акцент yumi-accent).
+(до 13.10.2026 — yumi-firefox-theme; Firefox удалён, палитра та же)
+
+  yumi-zen-theme            записать палитру ~/.cache/wal/colors.json из ~/.cache/yumi-accent
+  yumi-zen-theme --apply    записать и сразу перекрасить Zen (pywalfox update)
+  yumi-zen-theme --notify   (для хука 90-zen) если Zen запущен — перекрасить молча; уведомление только при ошибке
+Pywalfox читает только этот файл и общается с расширением через локальный unix-сокет (без сети).
+Манифест Pywalfox — системный (/usr/lib/mozilla/native-messaging-hosts/pywalfox.json, пакет python-pywalfox);
+`pywalfox install` НЕ запускать — он создаёт ~/.mozilla.
+Откат: yumi-uninstall zen-theme"""
+import json
+import os
+import subprocess
+import sys
+
+HOME = os.path.expanduser("~")
+ACC_DIR = os.path.join(HOME, ".cache/yumi-accent")
+WAL = os.path.join(os.getenv("XDG_CACHE_HOME", os.path.join(HOME, ".cache")), "wal", "colors.json")
+WALL = os.path.join(HOME, ".cache/yumi/theme/wall.set")
+OUTDIR = os.path.join(os.getenv("XDG_CACHE_HOME", os.path.join(HOME, ".cache")), "yumi-zen-theme")  # служебные файлы
+AUTO_OK = os.path.join(OUTDIR, ".auto-ok")
+NOTE_ID = os.path.join(OUTDIR, ".notify-id")
+WAITER = os.path.join(OUTDIR, ".notify.pid")
+ICON = "zen-browser"
+
+
+def palette():
+    xa = ["#" + c.upper() for c in open(os.path.join(ACC_DIR, "accent.txt")).read().split()]
+    deep, bg, btn, hov = ["#" + c.upper() for c in open(os.path.join(ACC_DIR, "bg.txt")).read().split()[:4]]
+    # раскладка под Pywalfox: color0 — фон, color15 — текст, 1–6 — акценты, 8 — приглушённый фон
+    base = [deep, xa[6], xa[4], xa[7], xa[5], xa[3], xa[8], xa[8], hov, xa[6], xa[4], xa[7], xa[5], xa[3], xa[8], "#EEEAF8"]
+    try:
+        wall = os.path.realpath(WALL)
+    except OSError:
+        wall = ""
+    return {
+        "wallpaper": wall,
+        "alpha": "100",
+        "special": {"background": deep, "foreground": "#EEEAF8", "cursor": xa[6]},
+        "colors": {f"color{i}": c for i, c in enumerate(base)},
+    }
+
+
+def write(pal):
+    os.makedirs(os.path.dirname(WAL), exist_ok=True)
+    tmp = WAL + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(pal, f, indent=4)
+    os.replace(tmp, WAL)
+
+
+def apply_now():
+    try:
+        r = subprocess.run(["pywalfox", "update"], capture_output=True, text=True, timeout=8)
+        return r.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def zen_running():
+    # процесс Zen — zen-bin (pkill/pgrep только с -x, см. память zen-browser)
+    return subprocess.run(["pgrep", "-x", "zen-bin"], capture_output=True).returncode == 0
+
+
+def notify(title, body, action=None, timeout_ms=0):
+    cmd = ["notify-send", "-a", "Zen", "-i", ICON, "-p", "-t", str(timeout_ms)]
+    try:
+        old = open(NOTE_ID).read().strip()
+        if old.isdigit():
+            cmd += ["-r", old]
+    except OSError:
+        pass
+    if action:
+        cmd += ["-A", action]
+    cmd += [title, body]
+    try:
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True)
+    except OSError:
+        return None
+    nid = p.stdout.readline().strip()
+    if nid.isdigit():
+        with open(NOTE_ID, "w") as f:
+            f.write(nid)
+    if not action:
+        p.wait()
+        return None
+    try:
+        out, _ = p.communicate(timeout=1800)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        return None
+    return out.strip() or None
+
+
+def notify_flow():
+    if not zen_running():
+        return 0
+    try:
+        old = int(open(WAITER).read().strip())
+        if old != os.getpgrp():
+            os.killpg(old, 15)
+    except (OSError, ValueError, ProcessLookupError):
+        pass
+    with open(WAITER, "w") as f:
+        f.write(str(os.getpgrp()))
+    try:
+        # применяем молча; уведомление — только если не получилось
+        if apply_now():
+            open(AUTO_OK, "w").close()
+        else:
+            notify("Zen: тема не обновилась", "Pywalfox не ответил: расширение выключено или не подключено "
+                                                 "(в его окне нажмите «Fetch Pywal colors»).", timeout_ms=10000)
+        return 0
+    finally:
+        try:
+            if int(open(WAITER).read().strip()) == os.getpgrp():
+                os.remove(WAITER)
+        except (OSError, ValueError):
+            pass
+
+
+def main():
+    if "-h" in sys.argv or "--help" in sys.argv:
+        print(__doc__)
+        return 0
+    os.makedirs(OUTDIR, exist_ok=True)
+    if "--notify" in sys.argv:
+        return notify_flow()
+    write(palette())
+    if "--apply" in sys.argv:
+        return 0 if apply_now() else 2
+    print(WAL)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

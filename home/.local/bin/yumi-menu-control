@@ -10,7 +10,7 @@
 Плеер — модуль yumiplayercard (если установлен), уведомления — модуль yuminotify (журнал yumi-notify-log;
 всплывающие по-прежнему показывает swaync — конфликта нет: мы только читаем историю).
 
-Оформление: ~/.config/yumi-control/variant — «a» (плитки), «b» (компакт), «c» (стекло); YCC_VARIANT перекрывает.
+Оформление: ~/.config/yumi/control/variant — «a» (плитки), «b» (компакт), «c» (стекло); YCC_VARIANT перекрывает.
 Проверка: YP_DRYRUN=1 — ничего не переключать; YP_STAY=1 YP_KEYBOARD=none — не закрываться (снимки).
 Откат: yumi-uninstall control"""
 import os
@@ -20,13 +20,13 @@ import threading
 import subprocess
 
 T0 = time.monotonic()
-sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-panel"))
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi/panel"))
 import yumipanel as yp  # noqa: E402  (сам перезапускает процесс с layer-shell)
 from yumipanel import Gtk, GLib, Pango  # noqa: E402
 
 HOME = os.path.expanduser("~")
 BIN = os.path.join(HOME, ".local/bin")
-CONF = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.join(HOME, ".config")), "yumi-control")
+CONF = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.join(HOME, ".config")), "yumi/control")
 SCREEN_BL = "apple-panel-bl"
 KBD_BL = "kbd_backlight"
 
@@ -139,7 +139,9 @@ TILES = [("wifi",     "󰖩", "󰖪", "Wi-Fi",       st_wifi,     tg_wifi,     "
          ("vpn",      "󰖂", "󰖂", "VPN",         st_vpn,      tg_vpn,      "yumi-menu-vpn"),
          ("mic",      "󰍬", "󰍭", "Микрофон",    st_mic,      tg_mic,      "yumi-menu-sound"),
          ("saver",    "󰌪", "󰌪", "Экономия",    st_saver,    tg_saver,    "yumi-menu-power"),
-         ("caffeine", "󰅶", "󰾪", "Кофеин",      st_caffeine, tg_caffeine, None)]
+         ("caffeine", "󰅶", "󰾪", "Кофеин",      st_caffeine, tg_caffeine, None),
+         # не переключатель: щелчок открывает меню (мышь — DPI, частота; клавиатура — подсветка), как плитка старого центра swaync
+         ("devices",  "󰌢", "󰌢", "Устройства",  lambda: (False, "Мышь · клавиатура"), None, "yumi-menu-devices")]
 
 
 class Tile:
@@ -155,7 +157,7 @@ class Tile:
                         halign=Gtk.Align.CENTER if compact else Gtk.Align.FILL)
         self.icon = Gtk.Label(label=self.ic_off, css_classes=["ycc-tile-icon"],
                               xalign=0.5 if compact else 0)
-        short = {"Bluetooth": "BT", "Микрофон": "Микр.", "Экономия": "Эконом."}   # в кружках B место узкое
+        short = {"Bluetooth": "BT", "Микрофон": "Микр.", "Экономия": "Эконом.", "Устройства": "Устр."}   # в кружках B место узкое
         self.title = Gtk.Label(label=short.get(self.name, self.name) if compact else self.name,
                                css_classes=["ycc-tile-name"], xalign=0.5 if compact else 0,
                                ellipsize=Pango.EllipsizeMode.END, max_width_chars=1, hexpand=True)
@@ -172,8 +174,9 @@ class Tile:
             inner.append(self.icon)
             inner.append(self.title)
             inner.append(self.sub)
-        self.btn = Gtk.Button(child=inner, css_classes=["ycc-tile"], hexpand=True,
-                              tooltip_text=f"{self.name}: клик — вкл/выкл" + (", правый клик — меню" if self.menu else ""))
+        tip = (f"{self.name}: клик — меню" if self.flip is None
+               else f"{self.name}: клик — вкл/выкл" + (", правый клик — меню" if self.menu else ""))
+        self.btn = Gtk.Button(child=inner, css_classes=["ycc-tile"], hexpand=True, tooltip_text=tip)
         self.btn.connect("clicked", self.on_click)
         if self.menu:
             rc = Gtk.GestureClick(button=3)
@@ -203,6 +206,9 @@ class Tile:
         return False
 
     def on_click(self, *_):
+        if self.flip is None:                       # плитка-меню (Устройства)
+            self.open_menu()
+            return
         cur = bool(self.on)
         self.flip(cur)
         # мгновенный отклик, потом — реальное состояние (VPN подключается дольше)
@@ -215,8 +221,30 @@ class Tile:
             GLib.timeout_add(ms, lambda: self.refresh() or False)
 
     def open_menu(self):
+        if self.key == "devices" and open_devices_page(self.panel):
+            return
         fire(os.path.join(BIN, self.menu))
         self.panel.app.quit()
+
+
+def open_devices_page(panel):
+    """«Устройства» — страницей внутри центра (стрелка «назад»), а не отдельным окном: при отдельном окне
+    центр затухал рядом с новым меню и тянул за собой хвост подложки. Мышь и клавиатура — её подстраницы."""
+    try:
+        import importlib.machinery
+        import importlib.util
+        path = os.path.join(BIN, "yumi-menu-devices")
+        loader = importlib.machinery.SourceFileLoader("yumi_menu_devices", path)
+        spec = importlib.util.spec_from_loader("yumi_menu_devices", loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        mod.Devices(panel, box)
+        panel.push("󰍽  Устройства", box, "Мышь и клавиатура")
+        return True
+    except Exception as e:                      # что-то сломалось — откроем отдельным окном, как раньше
+        print("[yumi-menu-control] устройства:", e, file=sys.stderr, flush=True)
+        return False
 
 
 # ---------- ползунки яркости ----------
@@ -457,10 +485,15 @@ def build(panel, body):
     else:
         grid = Gtk.Grid(column_spacing=8, row_spacing=8, column_homogeneous=True, css_classes=["ycc-grid"])
         for i, t in enumerate(tiles):
-            grid.attach(t.btn, i % 3, i // 3, 1, 1)
+            if i == len(tiles) - 1 and i % 3 == 0:   # одинокая последняя плитка — на всю ширину ряда
+                grid.attach(t.btn, 0, i // 3, 3, 1)
+            else:
+                grid.attach(t.btn, i % 3, i // 3, 1, 1)
     body.append(wrap(grid, card))
     for t in tiles:
         t.refresh()
+    if os.environ.get("YCC_PAGE") == "devices":          # проверка: сразу открыть страницу «Устройства»
+        GLib.timeout_add(300, lambda: open_devices_page(panel) and False)
 
     # яркость
     sl = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8 if VAR == "a" else 6, css_classes=["ycc-sliders"])

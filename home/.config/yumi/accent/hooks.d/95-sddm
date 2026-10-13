@@ -1,0 +1,12 @@
+#!/bin/sh
+# yumi-sddm: фон, цвета и аватар экрана входа SDDM — по текущим обоям (тема «yumi», /var/lib/yumi-sddm).
+# yumi-accent не ждёт: синхронизация (magick, ~1–2 с) уходит в фон; одновременные запуски
+# yumi-sddm-sync выстраивает в очередь сам (flock). При смене обоев «из комплекта» этот хук
+# запускает yumi-colors (BG_AFTER), при полной смене — yumi-accent. Откат: удалить этот файл.
+[ -n "${YUMI_COLORS_WARM:-}" ] && exit 0     # прогрев кэша: wall.set временно указывает на чужие обои
+S="$HOME/.local/bin/yumi-sddm-sync"
+D="${YUMI_SDDM_DIR:-/var/lib/yumi-sddm}"
+[ -x "$S" ] || exit 0
+[ -d "$D" ] && [ -w "$D" ] || exit 0          # тема SDDM не установлена (или откачена) — молча
+setsid -f nice -n 10 "$S" -q "$D" >/dev/null 2>&1 </dev/null
+exit 0

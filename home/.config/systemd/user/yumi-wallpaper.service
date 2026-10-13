@@ -1,0 +1,15 @@
+[Unit]
+Description=yumi: текущие обои при входе (без перехода) и цвета, если обои сменились
+PartOf=graphical-session.target
+After=graphical-session.target yumi-awww.service
+Wants=yumi-awww.service
+Requisite=graphical-session.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=%h/.local/bin/yumi-wallpaper start
+Slice=app-graphical.slice
+
+[Install]
+WantedBy=graphical-session.target

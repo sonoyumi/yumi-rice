@@ -9,7 +9,7 @@
 B=/sys/class/power_supply/macsmc-battery
 END=$B/charge_control_end_threshold
 START=$B/charge_control_start_threshold
-CONF=${XDG_CONFIG_HOME:-$HOME/.config}/yumi-battery/limit
+CONF=${XDG_CONFIG_HOME:-$HOME/.config}/yumi/battery/limit
 export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
 export DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}
 

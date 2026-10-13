@@ -18,7 +18,7 @@ import socket
 import sys
 import threading
 
-sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-panel"))
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi/panel"))
 import yumipanel as yp  # noqa: E402  (сам перезапускает процесс с layer-shell)
 from yumipanel import Gtk, Gdk, GLib, Pango  # noqa: E402
 import gi  # noqa: E402

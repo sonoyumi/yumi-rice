@@ -1,0 +1,9 @@
+[Unit]
+Description=Sync wallpaper to hyprlock background
+
+[Service]
+ExecStart=%h/.local/bin/yumi-hyprlock-bg-watch
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# yumi-launch — запуск программ без HyDE (замена `hyde-shell app -T` и `hyde-shell open --fall …`)
+#   yumi-launch term [команда…]       терминал (SUPER+RETURN); с командой — она в терминале
+#   yumi-launch open ВИД [ЗАПАСНОЙ]   программа по умолчанию для вида (SUPER+E, SUPER+B):
+#         file-manager (inode/directory)  web-browser (text/html)  text-editor (text/plain)
+#         image-viewer  video-player  pdf-viewer  archive-manager — как словарь open.lua HyDE.
+#         Нет программы по умолчанию или не запустилась → ЗАПАСНОЙ (например: dolphin, zen-browser).
+# Всё запускается через `uwsm app` — каждое окно в своей области systemd (у HyDE то же делал app2unit).
+# Терминал — первый из ~/.config/xdg-terminals.list (сейчас kitty.desktop), иначе kitty.
+# DRY=1 — только напечатать команду. Откат: вернуть строки hyde-shell в binds.lua (replacements.tsv)
+
+run() { if [[ -n $DRY ]]; then printf 'DO:'; printf ' %q' "$@"; echo; else "$@"; fi; }
+
+terminal() {
+    local id
+    id=$(grep -v -E '^\s*(#|$)' "${XDG_CONFIG_HOME:-$HOME/.config}/xdg-terminals.list" 2>/dev/null | head -n1)
+    id=${id%.desktop}
+    [[ -n $id ]] && command -v "${id,,}" >/dev/null && { echo "${id,,}"; return; }
+    echo kitty
+}
+
+desktop_exists() {
+    local d
+    for d in "${XDG_DATA_HOME:-$HOME/.local/share}" ${XDG_DATA_DIRS//:/ } /usr/local/share /usr/share; do
+        [[ -f $d/applications/$1 ]] && return 0
+    done
+    return 1
+}
+
+declare -A MIME=(
+    [file-manager]=inode/directory [text-editor]=text/plain [web-browser]=text/html
+    [image-viewer]=image/webp [video-player]=video/mp4 [pdf-viewer]=application/pdf
+    [archive-manager]=application/x-compressed-tar [word-processor]=application/msword
+    [font-manager]=font/ttf [code-editor]=text/x-csrc [log-viewer]=text/x-log
+)
+
+case $1 in
+    term | -T)
+        shift
+        t=$(terminal)
+        if (($#)); then run uwsm app -- "$t" -e "$@"; else run uwsm app -- "$t"; fi
+        ;;
+    open)
+        kind=$2 fallback=$3
+        # совместимость со старой записью: open --fall ЗАПАСНОЙ ВИД
+        [[ $kind == --fall ]] && { fallback=$3; kind=$4; }
+        mime=${MIME[$kind]:-$kind}
+        desktop=$(xdg-mime query default "$mime" 2>/dev/null)
+        # uwsm app ждёт, пока программа работает, поэтому «не запустилась» проверяем заранее: есть ли .desktop
+        if [[ -n $desktop ]] && desktop_exists "$desktop"; then
+            run uwsm app -- "$desktop"
+            exit
+        fi
+        [[ -n $fallback ]] || { echo "нет программы для $mime" >&2; exit 1; }
+        run uwsm app -- "$fallback"
+        ;;
+    *) sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+esac

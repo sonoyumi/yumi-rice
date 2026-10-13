@@ -63,7 +63,7 @@ if "--commands" in sys.argv[1:]:          # до импорта каркаса: 
         print(f"{ACTIONS[a][1]:<13} {shlex.join(command(a))}")
     sys.exit(0)
 
-sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-panel"))
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi/panel"))
 import yumipanel as yp  # noqa: E402  (сам перезапускает процесс с layer-shell)
 from yumipanel import Gtk, Gdk, GLib, Pango  # noqa: E402
 import cairo  # noqa: E402

@@ -1,0 +1,9 @@
+[Unit]
+Description=yumi: следить за папкой обоев — новые картинки сразу готовить (миниатюры, палитра)
+
+[Path]
+PathChanged=%h/Pictures/Wallpapers
+Unit=yumi-wallpaper-scan.service
+
+[Install]
+WantedBy=default.target

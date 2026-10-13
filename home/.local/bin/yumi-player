@@ -8,39 +8,35 @@
 
 --bar     под пилюлей Waybar (по центру сверху, монитор под курсором), закрывается, если увести мышь
 --center  по центру экрана в фокусе (бинд SUPER+M)
-Цвета: ~/.config/yumi-player/colors.css (шаблон wallbash always/yumi-player.dcol), меняются на лету.
-Стиль: ~/.config/yumi-player/style.css. Откат: yumi-uninstall player
+Под карточкой — текст песни (󰉢 / L) или очередь yumi-music (󰲹 / Q): клик по треку очереди — сразу играть.
+Цвета: ~/.config/yumi/player/colors.css (шаблон wallbash always/yumi-player.dcol), меняются на лету.
+Стиль: ~/.config/yumi/player/style.css. Откат: yumi-uninstall player
 """
 import os
 import sys
 
 LAYER_LIB = "/usr/lib/libgtk4-layer-shell.so"
 HOME = os.path.expanduser("~")
-CONF = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.join(HOME, ".config")), "yumi-player")
+CONF = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.join(HOME, ".config")), "yumi/player")
 COLORS = os.path.join(CONF, "colors.css")
 ACCENT = os.path.join(CONF, "accent.css")      # живой акцент из обоев (yumi-accent), поверх wallbash
 STYLE = os.path.join(CONF, "style.css")
-TEMPLATE = os.path.join(HOME, ".config/hyde/wallbash/always/yumi-player.dcol")
-DCOL = os.path.join(HOME, ".cache/hyde/wall.dcol")
-STATERC = os.path.join(HOME, ".local/state/hyde/staterc")
+TEMPLATE = os.path.join(HOME, ".config/yumi/colors/templates/always/yumi-player.dcol")
+DCOL = os.path.join(HOME, ".cache/yumi/theme/wall.dcol")
+# режим цветов от обоев: 2 = как было в staterc HyDE (enableWallDcol="2"), то же значение даёт хукам yumi-colors
+WALL_DCOL = 2
 
 
 def render_colors():
     """То же, что делает wallbash для шаблона, — для первой установки без перезапуска всей темы."""
     import re
-    vals, mode, wall_dcol = {}, "dark", 0
+    vals, mode, wall_dcol = {}, "dark", WALL_DCOL
     with open(DCOL) as f:
         for line in f:
             m = re.match(r'^(dcol_\w+)="(.*)"\s*$', line)
             if m:
                 vals[m.group(1)] = m.group(2)
     mode = vals.get("dcol_mode", "dark")
-    try:
-        with open(STATERC) as f:
-            m = re.search(r'^enableWallDcol="?(\d)', f.read(), re.M)
-            wall_dcol = int(m.group(1)) if m else 0
-    except OSError:
-        pass
     invert = (wall_dcol == 2 and mode == "light") or (wall_dcol == 3 and mode == "dark")
 
     def name(n):
@@ -106,7 +102,7 @@ FALLBACK_COLORS = """
 """
 
 # Масштаб окна по монитору (как у экрана блокировки и rofi): на внешнем MSI всё ×0.8
-sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-panel"))
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi/panel"))
 import yumimon  # noqa: E402
 MONITOR_SCALE = yumimon.ui_scale()   # ~/.config/yumi/monitors.conf
 import yumilyrics  # noqa: E402
@@ -115,10 +111,15 @@ import yumimeta  # noqa: E402  чистые артист/название тре
 # Текст песни: включён ли (кнопка 󰉢 / клавиша L), запоминается между запусками
 LYRICS_STATE = os.path.join(os.environ.get("XDG_STATE_HOME", os.path.join(HOME, ".local/state")), "yumi-player", "lyrics")
 LYRICS_LEAD = 0.2      # строка подсвечивается чуть раньше — так глаз успевает за голосом
-# ~/.config/yumi-player/lyrics.conf: «offset = 0.0» (сдвиг, сек; + раньше) и «bluetooth = 0.2» — сколько
+# ~/.config/yumi/player/lyrics.conf: «offset = 0.0» (сдвиг, сек; + раньше) и «bluetooth = 0.2» — сколько
 # опаздывает звук в Bluetooth-наушниках (на столько же позже подсвечиваем строки, пока вывод — bluez)
 LYRICS_CONF = os.path.join(CONF, "lyrics.conf")
 LYRICS_MANUAL = 3.0    # после ручной прокрутки автоскролл ждёт столько секунд
+# Очередь yumi-music (кнопка 󰲹 / клавиша Q) — на месте текста песни: mpv по сокету, обложки из кэша yumi-music.
+# В файле LYRICS_STATE: on — текст, queue — очередь, off — ничего
+MUSIC_SOCK = os.path.join(GLib.get_user_runtime_dir(), "yumi-music.sock")
+MUSIC_COVERS = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.join(HOME, ".cache")), "yumi-music", "covers")
+QUEUE_MAX = 30         # сколько следующих треков показывать
 
 PLAYER_ICONS = {"firefox": "󰈹 Firefox", "spotify": "󰓇 Spotify", "mpv": "󰐹 mpv",
                 "chromium": " Chromium", "vlc": "󰕼 VLC"}
@@ -136,6 +137,35 @@ def run(*cmd):
         return subprocess.run(cmd, capture_output=True, text=True, timeout=2).stdout
     except Exception:
         return ""
+
+
+def mpv_ipc(*command):
+    """Команда mpv yumi-music → её data или None (сокета нет — yumi-music не запущен)."""
+    import socket
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as c:
+            c.settimeout(1.5)
+            c.connect(MUSIC_SOCK)
+            c.sendall((json.dumps({"command": list(command), "request_id": 7}) + "\n").encode())
+            buf = b""
+            while True:
+                chunk = c.recv(1 << 20)
+                if not chunk:
+                    return None
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    msg = json.loads(line)
+                    if msg.get("request_id") == 7:
+                        return msg.get("data")
+    except (OSError, ValueError):
+        return None
+
+
+def tracks_word(n):
+    if n % 10 == 1 and n % 100 != 11:
+        return "трек"
+    return "трека" if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14 else "треков"
 
 
 def square_texture(pixbuf, size):
@@ -259,6 +289,13 @@ class EqGlow(Gtk.Widget):
                                         r, r * 0.8, 0.0, 1.0, [s0, s1])
 
 
+def open_fullscreen():
+    """Полноэкранный плеер (yumi-player-full) — отдельным процессом; маленькое окно после этого закрывается."""
+    subprocess.Popen([os.path.join(os.path.expanduser("~"), ".local/bin/yumi-player-full")],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+
+
 class PlayerWindow(Gtk.ApplicationWindow):
     def __init__(self, app, mode):
         super().__init__(application=app, title="Плеер")
@@ -292,7 +329,14 @@ class PlayerWindow(Gtk.ApplicationWindow):
         self.eq_glow_a = self.eq_glow_b = white
         self.playing = False
         self.pos_base = (0, time.monotonic())     # (позиция мкс, когда её узнали) — для плавной подсветки строк
-        self.lyr_on = self.read_lyrics_state() or "--lyrics" in sys.argv
+        panel = "lyrics" if "--lyrics" in sys.argv else self.read_panel_state()
+        self.lyr_on = panel == "lyrics"
+        self.q_on = panel == "queue"
+        self.q_ok = False         # играет yumi-music — у него есть очередь
+        self.q_busy = False
+        self.q_sig = None         # (текущий, длина, url-ы следующих) — список перестраиваем только при изменении
+        self.q_covers = {}        # ключ трека → текстура обложки
+        self.q_images = {}        # ключ трека → [Gtk.Image] в списке
         self.lyr_shift = self.read_lyrics_shift()
         self.lyr_key = None
         self.lyr_meta = None
@@ -325,6 +369,7 @@ class PlayerWindow(Gtk.ApplicationWindow):
         GLib.timeout_add(500, self.tick)
         GLib.timeout_add(100, self.lyrics_tick)
         GLib.timeout_add(2000, self.refresh_volume)
+        GLib.timeout_add(3000, self.refresh_queue)     # добавили/убрали треки в меню «Музыка»
         if mode == "bar":   # мышь так и не дошла до окна — закрыть
             GLib.timeout_add(2500, lambda: (self.entered or self.app.quit()) and False)
 
@@ -443,7 +488,9 @@ class PlayerWindow(Gtk.ApplicationWindow):
         self.b_next = self.button("󰒭", "Вперёд", lambda *_: self.cmd("next"))
         self.b_switch = self.button("󰓃", "Другой плеер", self.on_switch)
         self.b_lyr = self.button("󰉢", "Текст песни (L)", self.on_lyrics_toggle, ["yp-lyr"])
-        for b in (self.b_prev, self.b_play, self.b_next, self.b_lyr, self.b_switch):
+        self.b_queue = self.button("󰲹", "Очередь (Q)", self.on_queue_toggle, ["yp-q"])
+        self.b_full = self.button("󰊓", "Во весь экран (F)", lambda *_: (open_fullscreen(), self.app.quit()))
+        for b in (self.b_prev, self.b_play, self.b_next, self.b_lyr, self.b_queue, self.b_full, self.b_switch):
             ctl.append(b)
 
         vol = Gtk.Box(spacing=8, css_classes=["yp-volume"])
@@ -460,6 +507,7 @@ class PlayerWindow(Gtk.ApplicationWindow):
             vol.append(w)
 
         body.append(self.build_lyrics())
+        body.append(self.build_queue())
         # Окно (layer-surface) размер НЕ меняет: в Hyprland изменение размера слоя анимируется как открытие —
         # цветной прямоугольник и шлейф. Сцена всегда размером «с текстом», видимая рамка внутри прижата
         # к верху (--bar) или к центру (--center) и сжимается мгновенно; щелчки принимает только рамка.
@@ -585,6 +633,9 @@ class PlayerWindow(Gtk.ApplicationWindow):
         changed = p is not self.player
         self.player = p
         self.b_switch.set_visible(len(self.players()) > 1)
+        self.q_ok = bool(p) and p.props.player_name == "mpv" and os.path.exists(MUSIC_SOCK)
+        self.b_queue.set_sensitive(self.q_ok or self.q_on)     # открытую очередь всегда можно закрыть
+        self.refresh_queue()
         if not p:
             self.head.set_label("󰝛 Тишина")
             self.title_l.set_label("ничего не играет")
@@ -704,10 +755,12 @@ class PlayerWindow(Gtk.ApplicationWindow):
     def fix_stage_size(self):
         """Размер сцены = рамка с включённым текстом (меряем один раз, уже со стилем)."""
         self.lyr_area.set_visible(True)
+        self.q_area.set_visible(False)           # очередь того же размера и вместо текста, не вместе с ним
         w = self.frame.measure(Gtk.Orientation.HORIZONTAL, -1)[1]
         h = self.frame.measure(Gtk.Orientation.VERTICAL, w)[1]
         self.stage.set_size_request(w, h)
         self.lyr_area.set_visible(self.lyr_on)
+        self.q_area.set_visible(self.q_on)
 
     def do_realize(self):
         Gtk.ApplicationWindow.do_realize(self)
@@ -752,12 +805,12 @@ class PlayerWindow(Gtk.ApplicationWindow):
         self.lyrics_msg("Ничего не играет")
         return self.lyr_area
 
-    def read_lyrics_state(self):
+    def read_panel_state(self):
         try:
             with open(LYRICS_STATE) as f:
-                return f.read().strip() != "off"
+                return {"off": None, "queue": "queue"}.get(f.read().strip(), "lyrics")
         except OSError:
-            return True
+            return "lyrics"
 
     def read_lyrics_shift(self):
         """Итоговый сдвиг подсветки, сек: LEAD + offset − задержка Bluetooth (если вывод — bluez)."""
@@ -774,19 +827,33 @@ class PlayerWindow(Gtk.ApplicationWindow):
         return LYRICS_LEAD + conf["offset"] - (conf["bluetooth"] if bt else 0.0)
 
     def on_lyrics_toggle(self, *_):
-        self.lyr_on = not self.lyr_on
+        self.set_panel(None if self.lyr_on else "lyrics")
+
+    def on_queue_toggle(self, *_):
+        self.set_panel(None if self.q_on else "queue")
+
+    def set_panel(self, panel):
+        """Под карточкой — текст песни, очередь или ничего (󰉢 / L, 󰲹 / Q); выбор запоминается."""
+        self.lyr_on, self.q_on = panel == "lyrics", panel == "queue"
         try:
             os.makedirs(os.path.dirname(LYRICS_STATE), exist_ok=True)
             with open(LYRICS_STATE, "w") as f:
-                f.write("on\n" if self.lyr_on else "off\n")
+                f.write({"lyrics": "on", "queue": "queue"}.get(panel, "off") + "\n")
         except OSError:
             pass
-        (self.b_lyr.add_css_class if self.lyr_on else self.b_lyr.remove_css_class)("active")
-        self.lyr_area.set_visible(self.lyr_on)   # рамка сжимается/растёт внутри сцены постоянного размера
+        for b, on in ((self.b_lyr, self.lyr_on), (self.b_queue, self.q_on)):
+            (b.add_css_class if on else b.remove_css_class)("active")
+        self.b_queue.set_sensitive(self.q_ok or self.q_on)
+        # рамка сжимается/растёт внутри сцены постоянного размера
+        self.lyr_area.set_visible(self.lyr_on)
+        self.q_area.set_visible(self.q_on)
         if self.lyr_on:
             if self.lyr_pending:
                 self.load_lyrics()
             self.lyr_cur, self.lyr_manual_until = -1, 0     # заново найти строку и докрутить до неё
+        if self.q_on:
+            self.q_sig = None
+            self.refresh_queue()
 
     def lyrics_msg(self, text, src=""):
         self.lyr_msg.set_label(text)
@@ -929,6 +996,144 @@ class PlayerWindow(Gtk.ApplicationWindow):
         self.lyr_rescroll = True
         self.seek_block_until = time.monotonic() + 0.8
         GLib.timeout_add(900, lambda: self.tick() and False)
+
+    # ---------- очередь yumi-music ----------
+    def build_queue(self):
+        w, h = round(440 * self.k), round(230 * self.k)
+        self.q_area = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, css_classes=["yp-lyrics", "yp-queue"])
+        self.q_area.set_size_request(w, h)
+        self.q_head = Gtk.Label(xalign=0, css_classes=["yp-queue-head"], label="Далее")
+        self.q_stack = Gtk.Stack(vexpand=True)
+        self.q_scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER,
+                                           vscrollbar_policy=Gtk.PolicyType.EXTERNAL, vexpand=True,
+                                           css_classes=["yp-lyrics-scroll"])
+        self.q_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=round(2 * self.k))
+        self.q_scroll.set_child(self.q_list)
+        self.q_msg = Gtk.Label(css_classes=["yp-lyrics-msg"], wrap=True, justify=Gtk.Justification.CENTER)
+        self.q_stack.add_named(self.q_scroll, "list")
+        self.q_stack.add_named(self.q_msg, "msg")
+        self.q_area.append(self.q_head)
+        self.q_area.append(self.q_stack)
+        self.q_area.set_visible(self.q_on)
+        if self.q_on:
+            self.b_queue.add_css_class("active")
+        return self.q_area
+
+    def queue_msg(self, text):
+        self.q_sig = None
+        self.q_head.set_label("Далее")
+        self.q_msg.set_label(text)
+        self.q_stack.set_visible_child_name("msg")
+
+    def refresh_queue(self):
+        """Плейлист mpv читаем в потоке (сокет может ответить не сразу); только пока очередь открыта."""
+        if not self.q_on or self.q_busy:
+            return True
+        if not self.q_ok:
+            self.queue_msg("Очередь есть только у yumi-music")
+            return True
+        self.q_busy = True
+        threading.Thread(target=lambda: GLib.idle_add(self.set_queue, mpv_ipc("get_property", "playlist")),
+                         daemon=True).start()
+        return True
+
+    def set_queue(self, pl):
+        self.q_busy = False
+        if not self.q_on:
+            return False
+        if not pl:
+            self.queue_msg("Очередь пуста")
+            return False
+        cur = next((i for i, e in enumerate(pl) if e.get("current")), -1)
+        nxt = list(enumerate(pl))[cur + 1:cur + 1 + QUEUE_MAX]
+        sig = (cur, len(pl), tuple(e.get("filename") for _, e in nxt))
+        if sig == self.q_sig:
+            return False
+        self.q_sig = sig
+        child = self.q_list.get_first_child()
+        while child:
+            self.q_list.remove(child)
+            child = self.q_list.get_first_child()
+        self.q_images = {}
+        left = len(pl) - cur - 1
+        if not left:
+            self.queue_msg("Это последний трек в очереди")
+            self.q_sig = sig
+            return False
+        self.q_head.set_label(f"Далее · {left} {tracks_word(left)}")
+        load = []
+        for i, e in nxt:
+            row, key = self.queue_row(i, e.get("filename", ""), e.get("title"))
+            self.q_list.append(row)
+            if key and key not in self.q_covers and os.path.exists(os.path.join(MUSIC_COVERS, key + ".jpg")):
+                load.append(key)
+        self.q_stack.set_visible_child_name("list")
+        self.q_scroll.get_vadjustment().set_value(0)
+        if load:
+            threading.Thread(target=self._load_queue_covers, args=(load,), daemon=True).start()
+        return False
+
+    def queue_row(self, n, url, raw):
+        m = yumimeta.lookup(url)
+        if m and m["title"]:
+            title, artist, dur = m["title"], m["artist"], m.get("dur") or 0
+        else:
+            raw = raw or os.path.basename(url)
+            artist, _, title = raw.partition(" — ") if " — " in raw else ("", "", raw)
+            dur = 0
+        b = Gtk.Button(css_classes=["yp-qrow"], focusable=False,
+                       tooltip_text=f"{title} — {artist}" if artist else title)
+        box = Gtk.Box(spacing=round(10 * self.k))
+        b.set_child(box)
+        px = round(36 * self.k)
+        cover_box = Gtk.Box(css_classes=["yp-qcover"], valign=Gtk.Align.CENTER)
+        cover_box.set_overflow(Gtk.Overflow.HIDDEN)
+        img = Gtk.Image(pixel_size=px)
+        cover_box.append(img)
+        box.append(cover_box)
+        key = yumimeta.key_for(url) if url else None
+        if key in self.q_covers:
+            img.set_from_paintable(self.q_covers[key])
+        elif key:
+            self.q_images.setdefault(key, []).append(img)
+        txt = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True, valign=Gtk.Align.CENTER)
+        txt.append(Gtk.Label(label=title, xalign=0, css_classes=["yp-qtitle"], max_width_chars=1, hexpand=True,
+                             ellipsize=Pango.EllipsizeMode.END))
+        if artist:
+            txt.append(Gtk.Label(label=artist, xalign=0, css_classes=["yp-qartist"], max_width_chars=1,
+                                 hexpand=True, ellipsize=Pango.EllipsizeMode.END))
+        box.append(txt)
+        box.append(Gtk.Label(label=fmt_time(dur * 1_000_000) if dur else "", css_classes=["yp-time"],
+                             valign=Gtk.Align.CENTER))
+        b.connect("clicked", lambda *_: self.play_queue(n))
+        return b, key
+
+    def _load_queue_covers(self, keys):
+        size = round(36 * self.k * 2)            # с запасом под HiDPI (×1.6 на экране ноутбука)
+        for key in keys:
+            try:
+                pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(os.path.join(MUSIC_COVERS, key + ".jpg"),
+                                                             size * 2, size * 2, True)
+            except Exception:
+                continue
+            GLib.idle_add(self._set_queue_cover, key, pb, size)
+
+    def _set_queue_cover(self, key, pb, size):
+        tex = square_texture(pb, size)
+        if len(self.q_covers) > 200:
+            self.q_covers.clear()
+        self.q_covers[key] = tex
+        for img in self.q_images.pop(key, []):
+            img.set_from_paintable(tex)
+        return False
+
+    def play_queue(self, n):
+        """Клик по треку — сразу играть его (окно остаётся открытым)."""
+        def go():
+            mpv_ipc("playlist-play-index", n)
+            mpv_ipc("set_property", "pause", False)
+            GLib.timeout_add(400, lambda: (self.refresh_queue(), self.schedule_update())[0] and False)
+        threading.Thread(target=go, daemon=True).start()
 
     # ---------- обложка ----------
     def set_art(self, url):
@@ -1180,8 +1385,13 @@ class PlayerWindow(Gtk.ApplicationWindow):
             self.cmd("next")
         elif ch in ("p", "з"):
             self.cmd("previous")
+        elif ch in ("f", "а"):
+            open_fullscreen()
+            self.app.quit()
         elif ch in ("l", "д"):
             self.on_lyrics_toggle()
+        elif ch in ("q", "й"):
+            self.on_queue_toggle()
         else:
             return False
         return True
@@ -1236,7 +1446,7 @@ class App(Gtk.Application):
         self.win = PlayerWindow(self, mode)
         self.win.present()
         if not os.environ.get("YP_STAY"):           # щелчок мимо плеера закрывает его (как в меню yumi-panel)
-            sys.path.insert(0, os.path.join(HOME, ".local/lib/yumi-panel"))
+            sys.path.insert(0, os.path.join(HOME, ".local/lib/yumi/panel"))
             from yumipanel import watch_mouse_clicks
             watch_mouse_clicks(self.click_outside)
         return 0

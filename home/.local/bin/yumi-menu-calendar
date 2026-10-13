@@ -6,7 +6,7 @@
 дня и ближайшие 7 дней. Клик по дню — выбрать, повторный клик (или Enter) — страница дня.
 Клавиши: стрелки — дни, PageUp/PageDown — месяцы, Home или T — сегодня, Enter — открыть день,
 N — новый план на выбранный день, Esc — назад/закрыть. В записи Ctrl+Enter — сохранить.
-Планы — ~/.local/share/yumi-calendar/events.json (формат — в ~/.local/lib/yumi-calendar/calstore.py),
+Планы — ~/.local/share/yumi-calendar/events.json (формат — в ~/.local/lib/yumi/calendar/calstore.py),
 напоминания шлёт yumi-calendar-remind (таймер systemd --user).
 
 Отладка:
@@ -21,8 +21,8 @@ import os
 import sys
 from datetime import date, datetime, timedelta
 
-sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-panel"))
-sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-calendar"))
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi/panel"))
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi/calendar"))
 import yumipanel as yp  # noqa: E402  (сам перезапускает процесс с layer-shell)
 from yumipanel import Gtk, Gdk, Gio, GLib, Pango  # noqa: E402
 import calstore as cs  # noqa: E402

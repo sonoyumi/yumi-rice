@@ -1,0 +1,15 @@
+# Настройки тачбара (поверх /usr/share/tiny-dfr/config.toml). Откат: удалить папку /etc/tiny-dfr
+# 08.10: мягкие цвета (музыка и звук — нейтральные), папка → Dolphin (Search), ☕ → F13/XF86Tools, часы → F14/XF86Launch5 → календарь; без микрофона, подсветки и «трек назад»
+MediaLayerDefault = true
+MediaLayerKeys = [
+    { Icon = "yumi-brightness_low",  Action = "BrightnessDown" },
+    { Icon = "yumi-brightness_high", Action = "BrightnessUp"   },
+    { Icon = "yumi-folder",          Action = "Search"         },
+    { Icon = "yumi-coffee",          Action = "F13"            },
+    { Time = "%H:%M · %-d.%m",       Action = "F14", Stretch = 3 },   # касание → календарь (F14 = XF86Launch5)
+    { Icon = "yumi-play_pause",      Action = "PlayPause"      },
+    { Icon = "yumi-fast_forward",    Action = "NextSong"       },
+    { Icon = "yumi-volume_off",      Action = "Mute"           },
+    { Icon = "yumi-volume_down",     Action = "VolumeDown"     },
+    { Icon = "yumi-volume_up",       Action = "VolumeUp"       }
+]

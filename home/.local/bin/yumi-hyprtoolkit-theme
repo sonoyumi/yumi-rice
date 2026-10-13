@@ -138,7 +138,7 @@ def build():
     }
     lines = [
         "# yumi-hyprtoolkit: генерируется yumi-hyprtoolkit-theme из цветов обоев — НЕ ПРАВИТЬ вручную,",
-        "# файл перезапишется при смене обоев (хук ~/.config/yumi-accent/hooks.d/25-hyprtoolkit).",
+        "# файл перезапишется при смене обоев (хук ~/.config/yumi/accent/hooks.d/25-hyprtoolkit).",
         "# Откат: yumi-uninstall hyprtoolkit",
         "",
         "# цвета (hyprlang: rgb(RRGGBB))",

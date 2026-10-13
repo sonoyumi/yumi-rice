@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# yumi-screenshot — снимки экрана (замена `hyde-shell screenshot` + grimblast HyDE), на grim/slurp/hyprpicker/satty
+#   p   все мониторы (Print)              s   область или окно (SUPER+F10)
+#   sf  область/окно на «замороженном» экране (SUPER+F11)
+#   m   монитор с фокусом (SUPER+F12)     sc  распознать текст (OCR, tesseract) → в буфер (SUPER+CTRL+S)
+# Как было у HyDE: снимок сразу копируется в буфер (PNG) и открывается в satty; файл появляется, когда
+# в satty нажать «сохранить» — ~/Pictures/Screenshots/ГГММДД_ЧЧhММmССs_screenshot.png, после этого
+# уведомление «saved in …» с миниатюрой. В режиме s/sf один щелчок по окну снимает окно целиком.
+# Отмена выделения (Esc) — уведомление «Screenshot Error» (так делал HyDE; YUMI_SHOT_CANCEL_NOTIFY=0 — молча).
+# Отправитель уведомлений «Скриншот» (YUMI_OSD_ALERT): ignore.json по нему не пишет «saved in» в журнал.
+# Переменные для проверки без побочных эффектов:
+#   YUMI_SHOT_DIR=папка  YUMI_SHOT_EDIT=0 (без satty, файл сразу)  YUMI_SHOT_COPY=0 (буфер не трогать)
+#   YUMI_SHOT_NOTIFY=0 (без уведомлений)  DRY=1 (только печать команд, ничего не снимать)
+#   YUMI_OCR_LANGS="eng rus ukr ita" (языки tesseract через пробел; osd добавляется сам, как у HyDE)
+# Откат: вернуть `hyde-shell screenshot …` в binds.lua (строки — в replacements.tsv)
+
+DIR=${YUMI_SHOT_DIR:-${XDG_PICTURES_DIR:-$HOME/Pictures}/Screenshots}
+FILE="$DIR/$(date +'%y%m%d_%Hh%Mm%Ss_screenshot.png')"
+TMP="${XDG_RUNTIME_DIR:-/tmp}/yumi-screenshot.png"
+LOCK="${XDG_RUNTIME_DIR:-/tmp}/yumi-screenshot.lock"
+ALERT=${YUMI_OSD_ALERT:-Скриншот}
+read -r -a LANGS <<<"${YUMI_OCR_LANGS:-eng rus ukr ita}"
+LANGS+=(osd)
+
+run() { if [[ -n $DRY ]]; then printf 'DO:'; printf ' %q' "$@"; echo; else "$@"; fi; }
+note() { [[ ${YUMI_SHOT_NOTIFY:-1} == 0 ]] && return 0; run notify-send "$@"; }
+fail() { note -a "$ALERT" "$@"; exit 1; }
+unfreeze() { [[ -n $FROZEN ]] && kill "$FROZEN" 2>/dev/null; FROZEN=""; }
+
+# Один снимок за раз (как lock-файл grimblast): второе нажатие во время выделения ничего не делает
+exec 9>"$LOCK"
+flock -n 9 || exit 2
+trap unfreeze EXIT
+[[ -n $HYPRLAND_INSTANCE_SIGNATURE ]] || { echo "нет Hyprland (HYPRLAND_INSTANCE_SIGNATURE)" >&2; exit 1; }
+
+# Окна на видимых столах — подсказки для slurp (тот же отбор, что у grimblast: без столов с полноэкранным окном,
+# кроме самого полноэкранного окна; для монитора со спецстолом — окна спецстола)
+window_rects() {
+    local fs ws
+    fs=$(hyprctl workspaces -j | jq -c 'map(select(.hasfullscreen) | .id)')
+    ws=$(hyprctl monitors -j | jq -c '[.[] | if .specialWorkspace.name == "" then .activeWorkspace.id else .specialWorkspace.id end]')
+    hyprctl clients -j | jq -r --argjson ws "$ws" --argjson fs "$fs" \
+        '.[] | select(((.workspace.id as $w | $ws | index($w)) and ((.workspace.id as $w | $fs | index($w)) | not)) or .fullscreen > 0)
+         | "\(.at[0]),\(.at[1]) \(.size[0])x\(.size[1]) \(.stableId)"'
+}
+
+# Снять в $TMP. $1: screen | output | area, $2: freeze
+grab() {
+    local target=$1 freeze=$2 out choice win
+    case $target in
+        screen) run grim "$TMP" ;;
+        output)
+            out=$(hyprctl monitors -j | jq -r '.[] | select(.focused) | .name')
+            run grim -o "$out" "$TMP" ;;
+        area)
+            if [[ $freeze == freeze && -z $DRY ]] && command -v hyprpicker >/dev/null; then
+                hyprpicker -rz >/dev/null 2>&1 &
+                FROZEN=$!
+                sleep 0.2
+            fi
+            if [[ -n $DRY ]]; then
+                echo "DO: slurp -o -f '%x,%y %wx%h|%l'  (подсказки: $(window_rects | wc -l) окон; заморозка: ${freeze:-нет})"
+                echo "DO: grim -g <область> | grim -T <окно> $TMP"
+                return 0
+            fi
+            choice=$(window_rects | slurp -o -f '%x,%y %wx%h|%l') || { unfreeze; return 1; }
+            [[ -z $choice ]] && { unfreeze; return 1; }
+            # щелчок по окну даёт его прямоугольник — снимаем его (grim -T ждёт идентификатор другого вида)
+            grim -g "${choice%|*}" "$TMP" || { unfreeze; return 1; }
+            unfreeze ;;
+    esac
+    [[ -n $DRY ]] && return 0
+    [[ -s $TMP ]] || return 1
+    [[ ${YUMI_SHOT_COPY:-1} == 0 ]] || wl-copy --type image/png <"$TMP"
+}
+
+shoot() {
+    run mkdir -p "$DIR"
+    if ! grab "$@"; then
+        [[ ${YUMI_SHOT_CANCEL_NOTIFY:-1} == 0 ]] && exit 1
+        fail "Screenshot Error" "Failed to take screenshot"
+    fi
+    if [[ ${YUMI_SHOT_EDIT:-1} != 0 ]] && command -v satty >/dev/null; then
+        # satty: «сохранить» → $FILE, «копировать» → wl-copy (как HyDE: annotation_tool=satty)
+        if [[ -n $DRY ]]; then run satty -o "$FILE" -f "$TMP" --copy-command wl-copy
+        else GSK_RENDERER="${GSK_RENDERER:-gl}" satty -o "$FILE" -f "$TMP" --copy-command wl-copy ||
+            note -r 9 -a "$ALERT" "Screenshot Error" "Failed to open annotation tool"; fi
+    else
+        run cp "$TMP" "$FILE"
+    fi
+    run rm -f "$TMP"
+    if [[ -n $DRY || -f $FILE ]]; then
+        note -r 9 -a "$ALERT" -i "$FILE" "saved in $DIR"
+        echo "$FILE"
+    fi
+}
+
+ocr() {
+    local pkg text
+    grab area freeze || fail "OCR: screenshot error" -e -i dialog-error
+    for pkg in "${LANGS[@]/#/tesseract-data-}" tesseract; do
+        pacman -Q "$pkg" >/dev/null 2>&1 && continue
+        fail "$(printf 'OCR: required package is not installed\n %s' "$pkg")" -e -i dialog-error
+    done
+    note "OCR" "Performing OCR on screenshot..." -i document-scan -r 9
+    local IFS=+
+    if [[ -n $DRY ]]; then run tesseract --psm 6 --oem 3 -l "${LANGS[*]}" "$TMP" stdout; return 0; fi
+    text=$(tesseract --psm 6 --oem 3 -l "${LANGS[*]}" "$TMP" stdout 2>/dev/null) ||
+        fail "OCR: extraction error" -e -i dialog-error
+    [[ ${YUMI_SHOT_COPY:-1} == 0 ]] && printf '%s\n' "$text" || printf '%s' "$text" | wl-copy
+    unset IFS
+    # снимок не удаляем: его показывает уведомление (как у HyDE)
+    note -a "$ALERT" "$(printf 'OCR: %d symbols recognized\n\nLanguages used%s' "${#text}" "$(printf '\n %s' "${LANGS[@]}")")" \
+        -i "$TMP" -e -r 9
+}
+
+case $1 in
+    p | printscreen) shoot screen ;;
+    s | snip)        shoot area ;;
+    sf | snapfreeze) shoot area freeze ;;
+    m | monitor)     shoot output ;;
+    sc | scan)       ocr ;;
+    *) sed -n '2,5p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+esac

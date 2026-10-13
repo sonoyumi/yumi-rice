@@ -1,0 +1,16 @@
+# Предупреждения о низком заряде (15 % и 5 %) для батареи Asahi macsmc-battery — вместо HyDE batterynotify.
+# Включить:  systemctl --user enable --now yumi-battery-notify.service
+# Отключить: systemctl --user disable --now yumi-battery-notify.service
+[Unit]
+Description=yumi-battery-notify — уведомления о низком заряде батареи
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/yumi-battery-notify
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=graphical-session.target

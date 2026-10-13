@@ -1,0 +1,305 @@
+#!/usr/bin/env bash
+# yumi-wallpaper — обои рабочего стола (awww) + цвета из них (yumi-colors). Замена смены обоев HyDE.
+#   yumi-wallpaper set ФАЙЛ      поставить обои
+#   yumi-wallpaper next | prev   следующие / предыдущие в папке (SUPER+ALT+→ / ←)
+#   yumi-wallpaper random        случайные
+#   yumi-wallpaper collection ИМЯ|off|get   коллекция (подпапка): next/prev/random ходят только внутри неё;
+#                                off — снова по всем; get — какая включена (пусто — никакая). ИМЯ — папка целиком
+#                                или её часть без учёта регистра («неон»). Хранится в ~/.local/state/yumi/wall-collection
+#   yumi-wallpaper get           путь к текущим
+#   yumi-wallpaper list          все обои папки (по пути, как в HyDE)
+#   yumi-wallpaper scan          новые картинки в папке: миниатюры и палитра в кэш (делает служба сама)
+#   yumi-wallpaper warm          собрать готовые цвета (комплекты) для всех обоев — потом смена мгновенная
+# Смена синхронная: сначала всё готовится (~0,4 с), потом новые обои «вырастают» из курсора, и под конец перехода
+# Waybar, kitty, рамки, VS Code, Zen и подсветка клавиатуры меняются в один момент (yumi-colors prepare/commit).
+# Программы, которых нет на экране, — следом в фоне. Настройки: YUMI_TRANSITION_SEC=0.4 (переход),
+# YUMI_FLIP_AT=0.6 (когда запускать перекраску — доля перехода; ~0,1 с уходит на сам запуск, так что цвета меняются к концу перехода).
+#   yumi-wallpaper start         при входе (служба yumi-wallpaper.service): поднять awww-daemon, показать
+#                                текущие обои без перехода; цвета пересчитать, только если они не от этих обоев
+# Папка обоев: ~/Pictures/Wallpapers. Свои картинки — просто положить туда (jpg/jpeg/png/gif).
+# Кэш: ~/.cache/yumi/theme/{wall.set,wall.thmb,thumbs/…} — его читают yumi-hyprlock-bg-watch, yumi-accent, меню обоев и т.д.
+set -uo pipefail
+
+WALLDIR="${YUMI_WALLDIR:-$HOME/Pictures/Wallpapers}"
+CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/yumi/theme"
+THUMBS="$CACHE/thumbs"
+LOCK="${XDG_RUNTIME_DIR:-/tmp}/yumi-wallpaper.lock"
+COLORS="$HOME/.local/bin/yumi-colors"
+SCALED="$CACHE/scaled"                          # копии обоев под разрешение экранов (scaled)
+TRANS_SEC="${YUMI_TRANSITION_SEC:-0.4}"      # длительность перехода обоев (как у HyDE)
+
+die() { echo "yumi-wallpaper: $*" >&2; exit 1; }
+
+# все обои по пути — тот же порядок, что у HyDE (get_hashmap: sha1sum … | sort -k2, т.е. по пути)
+list_paths() {
+    find -H "$(realpath "$WALLDIR")" -type f \( -iname '*.gif' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' \) \
+        ! -path '*/logo/*' ! -path '*/.*' | sort      # .preview.jpg коллекций и прочие скрытые — не обои
+}
+
+current() { readlink -f "$CACHE/wall.set"; }
+
+# миниатюры как у HyDE (wallpaper/cache.sh): .thmb — по ней считается палитра, .sqre/.quad — меню, .blur — фон
+thumbs() {
+    local wall="$1" h="$2"
+    mkdir -p "$THUMBS"
+    [ -e "$THUMBS/$h.thmb" ] || magick "$wall[0]" -strip -resize 1000 -gravity center -extent 1000 -quality 90 "$THUMBS/$h.thmb"
+    [ -e "$THUMBS/$h.sqre" ] || { magick "$wall[0]" -strip -thumbnail 500x500^ -gravity center -extent 500x500 "$THUMBS/$h.sqre.png" \
+        && mv "$THUMBS/$h.sqre.png" "$THUMBS/$h.sqre"; }
+    [ -e "$THUMBS/$h.blur" ] || magick "$wall[0]" -strip -scale 10% -blur 0x3 -resize 100% "$THUMBS/$h.blur"
+    [ -e "$THUMBS/$h.quad" ] || { magick "$THUMBS/$h.sqre" \( -size 500x500 xc:white -fill "rgba(0,0,0,0.7)" \
+        -draw "polygon 400,500 500,500 500,0 450,0" -fill black -draw "polygon 500,500 500,0 450,500" \) \
+        -alpha Off -compose CopyOpacity -composite "$THUMBS/$h.quad.png" && mv "$THUMBS/$h.quad.png" "$THUMBS/$h.quad"; }
+}
+
+# демон awww — служба yumi-awww.service (перезапускается сама, если упадёт). Сами его НЕ запускаем:
+# дочерний демон унаследовал бы блокировку и навсегда «повесил» смену обоев (так было 13.10)
+ensure_daemon() {
+    awww query >/dev/null 2>&1 && return 0
+    systemctl --user start yumi-awww.service 9>&- >/dev/null 2>&1
+    for _ in $(seq 40); do awww query >/dev/null 2>&1 && return 0; sleep 0.1; done
+    return 1
+}
+
+# экраны: «имя ширина высота герцы» (физические пиксели режима)
+monitors() {
+    hyprctl -j monitors 2>/dev/null | jq -r '.[] | "\(.name) \(.width) \(.height) \(.refreshRate|round)"' 2>/dev/null
+}
+
+# копия обоев ровно под экран: awww готовит её за ~45 мс вместо ~200 мс у оригинала 6600×3600
+# (заполнение с обрезкой по центру — как сам awww по умолчанию). gif — как есть (анимация)
+scaled() {   # scaled ФАЙЛ SHA ШИРИНА ВЫСОТА → путь
+    local wall="$1" out="$SCALED/$2-$3x$4.jpg"
+    case "${wall,,}" in *.gif) echo "$wall"; return ;; esac
+    if [ ! -s "$out" ]; then
+        mkdir -p "$SCALED"
+        magick "$wall[0]" -strip -resize "$3x$4^" -gravity center -extent "$3x$4" -quality 95 "$out.tmp.jpg" \
+            && mv "$out.tmp.jpg" "$out" || { echo "$wall"; return; }
+    fi
+    echo "$out"
+}
+
+# переход как у HyDE: вперёд — grow, назад — outer, из точки курсора. Каждый экран — своей копией и со своей
+# частотой кадров (MSI 165 Гц, встроенный — только 60: выше там бессмысленно), переходы идут параллельно
+show() {
+    local wall="$1" trans="${2:-grow}" h="${3:-}" pos name w hh hz n=0
+    pos="$(hyprctl cursorpos 2>/dev/null | grep -E '^[0-9]' || echo "0,0")"
+    [ -n "$h" ] || h="$(sha1sum "$wall" | cut -d' ' -f1)"
+    while read -r name w hh hz; do
+        [ -n "$name" ] || continue
+        n=$((n + 1))
+        awww img -o "$name" "$(scaled "$wall" "$h" "$w" "$hh")" --transition-bezier .43,1.19,1,.4 \
+            --transition-type "$trans" --transition-duration "$TRANS_SEC" --transition-fps "${hz:-60}" \
+            --invert-y --transition-pos "$pos" &
+    done < <(monitors)
+    if [ "$n" = 0 ]; then                       # hyprctl/jq не ответили — как раньше, одним вызовом
+        awww img "$wall" --transition-bezier .43,1.19,1,.4 --transition-type "$trans" --transition-duration "$TRANS_SEC" \
+            --transition-fps 60 --invert-y --transition-pos "$pos"
+    fi
+    wait
+}
+
+link_wall() {   # link_wall ФАЙЛ SHA — ссылки на текущие обои и их миниатюры
+    ln -sfn "$1" "$CACHE/wall.set"
+    for e in sqre thmb blur quad; do ln -sfn "$THUMBS/$2.$e" "$CACHE/wall.$e"; done
+}
+
+apply() {   # apply ФАЙЛ [переход]
+    local wall h cached=0
+    wall="$(realpath "$1")" || die "нет файла $1"
+    [ -f "$wall" ] || die "нет файла $wall"
+    h="$(sha1sum "$wall" | cut -d' ' -f1)"
+    thumbs "$wall" "$h"
+    "$COLORS" is-cached "$wall" 9>&- && cached=1
+    # Полная смена (комплекта ещё нет): хуки читают текущие обои по ссылке wall.set — ставим её сразу.
+    # Из комплекта: хуков нет — ссылки в самом конце, чтобы фон экрана блокировки (yumi-hyprlock-bg-watch,
+    # тяжёлый magick) пересчитывался ПОСЛЕ перехода, а не во время него.
+    [ "$cached" = 1 ] || link_wall "$wall" "$h"
+    # подготовить цвета: из комплекта — разложить готовые файлы (~0,05 с), иначе хуки; всё видимое — в очередь
+    "$COLORS" prepare "$wall" >/dev/null 9>&-              # 9>&- — детям не достаётся блокировка смены обоев
+    # анимация обоев идёт на свободном процессоре, а цвета выпускаются под её конец (YUMI_FLIP_AT — доля
+    # длительности перехода): если стартовать всё разом, перезапуск Waybar и перерисовка окон рвут кадры
+    # Waybar перезапускается ~160 мс и потом проявляется — запускаем его ДО перехода и даём ему фору
+    # YUMI_BAR_LEAD, чтобы новый бар появлялся вместе с обоями, а не последним
+    "$COLORS" early waybar 9>&-
+    sleep "${YUMI_BAR_LEAD:-0.15}"
+    ensure_daemon && show "$wall" "${2:-grow}" "$h" 9>&-
+    sleep "$(awk -v d="$TRANS_SEC" -v f="${YUMI_FLIP_AT:-0.6}" 'BEGIN { printf "%.2f", d * f }')"
+    "$COLORS" commit 9>&-
+    [ "$cached" = 1 ] && link_wall "$wall" "$h"
+    # следующий переход — только когда этот закончился (наложение переходов роняет awww-daemon)
+    sleep "$(awk -v d="$TRANS_SEC" -v f="${YUMI_FLIP_AT:-0.6}" 'BEGIN { f = 1 - f; printf "%.2f", (f > 0 ? d * f : 0) + 0.05 }')"
+}
+
+# Сканирование новых обоев (служба yumi-wallpaper-scan.path следит за папкой): миниатюры, палитра, анализ
+# акцента — в кэш, без изменений на экране. Полный комплект соберётся при первой смене на эти обои.
+scan() {
+    # одна обработка за раз: служба yumi-wallpaper-scan.path срабатывает на новые файлы, а scan зовут и руками
+    exec 8>"${XDG_RUNTIME_DIR:-/tmp}/yumi-wallpaper-scan.lock"; flock 8
+    local w h n=0 name mw mh hz
+    local -a mons
+    mapfile -t mons < <(monitors)
+    while IFS= read -r w; do
+        h="$(sha1sum "$w" | cut -d' ' -f1)"
+        for m in "${mons[@]}"; do                      # копии под экраны — у всех обоев, и у старых тоже
+            read -r name mw mh hz <<< "$m"
+            [ -s "$SCALED/$h-${mw}x${mh}.jpg" ] || nice -n 10 bash -c "$(declare -f scaled); SCALED='$SCALED'; scaled \"\$1\" '$h' '$mw' '$mh'" _ "$w" >/dev/null
+        done
+        [ -e "$THUMBS/$h.thmb" ] && [ -e "$CACHE/dcols/$h.dcol" ] && continue
+        n=$((n + 1))
+        nice -n 10 bash -c "$(declare -f thumbs); THUMBS='$THUMBS'; thumbs \"\$1\" '$h'" _ "$w"
+        nice -n 10 "$COLORS" precache "$w"
+        nice -n 10 "$HOME/.local/bin/yumi-accent" --precache "$w"
+    done < <(list_paths)
+    [ "$n" -gt 0 ] && notify-send -t 3000 -a "Обои" "Новые обои готовы" "Подготовлено: $n" 2>/dev/null
+    echo "новых обоев: $n"
+}
+
+# Прогрев: собрать комплекты для всех обоев без них. Цвета программ при этом мелькают (хуки пишут живые
+# файлы), обои на экране не меняются. В конце возвращаются текущие обои — уже из комплекта.
+warm() {
+    exec 9>"$LOCK"; flock -w 10 9 || die "смена обоев занята"
+    local orig h n=0 total
+    orig="$(current)"
+    local -a list
+    mapfile -t list < <(list_paths)
+    total=${#list[@]}
+    systemctl --user stop yumi-hyprlock-bg.service 2>/dev/null     # не пересчитывать фон блокировки 30 раз
+    notify-send -t 4000 -a "Обои" "Готовлю цвета для обоев" "Цвета программ поморгают около минуты" 2>/dev/null
+    for w in "${list[@]}"; do
+        h="$(sha1sum "$w" | cut -d' ' -f1)"
+        "$COLORS" is-cached "$w" 9>&- && continue
+        n=$((n + 1))
+        echo "[$n] ${w##*/}"
+        thumbs "$w" "$h"
+        link_wall "$w" "$h"
+        "$COLORS" warm "$w" 9>&-
+    done
+    h="$(sha1sum "$orig" | cut -d' ' -f1)"
+    link_wall "$orig" "$h"
+    systemctl --user start yumi-hyprlock-bg.service 2>/dev/null
+    apply "$orig"                                               # вернуть текущие — из комплекта, всё разом
+    notify-send -t 3000 -a "Обои" "Цвета готовы" "Собрано комплектов: $n из $total" 2>/dev/null
+    echo "собрано комплектов: $n (всего обоев $total)"
+}
+
+# Быстрые нажатия схлопываются: каждый вызов добавляет свой шаг (+1/−1) в счётчик, а работает один —
+# тот, кто взял блокировку. Закончив переход, он забирает накопленные шаги и делает ОДИН переход сразу к цели.
+# Коллекция обоев: next/prev/random — только внутри неё (set ставит любые обои и коллекцию не сбрасывает)
+COLL_STATE="${XDG_STATE_HOME:-$HOME/.local/state}/yumi/wall-collection"
+
+active_collection() {   # имя включённой коллекции; пусто — никакой (или её папки больше нет)
+    local c
+    c="$(cat "$COLL_STATE" 2>/dev/null)"
+    [ -n "$c" ] && [ -d "$WALLDIR/$c" ] && printf '%s\n' "$c"
+}
+
+# обои для next/prev/random: в коллекции — только её, иначе все (порядок тот же — по пути)
+cycle_paths() {
+    local c
+    c="$(active_collection)"
+    if [ -n "$c" ]; then
+        list_paths | grep -F -- "$(realpath "$WALLDIR/$c")/"
+    else
+        list_paths
+    fi
+}
+
+collection() {   # collection ИМЯ|off|get
+    local q="${1:-get}" d name hits=()
+    case "$q" in
+    get) active_collection; return 0 ;;
+    off) rm -f "$COLL_STATE"; echo "коллекция выключена: обои по всем папкам"; return 0 ;;
+    esac
+    if [ -d "$WALLDIR/$q" ] && [ "${q#*/}" = "$q" ] && [ "${q#.}" = "$q" ]; then
+        hits=("$q")
+    else
+        shopt -s nocasematch
+        for d in "$WALLDIR"/*/; do
+            name="$(basename "$d")"
+            [[ "$name" == .* ]] && continue
+            [[ "$name" == *"$q"* ]] && hits+=("$name")
+        done
+        shopt -u nocasematch
+    fi
+    [ ${#hits[@]} -gt 0 ] || die "нет коллекции «$q» в $WALLDIR"
+    [ ${#hits[@]} -eq 1 ] || die "«$q» подходит к нескольким: $(printf '«%s» ' "${hits[@]}")"
+    mkdir -p "$(dirname "$COLL_STATE")"
+    printf '%s\n' "${hits[0]}" > "$COLL_STATE"
+    echo "${hits[0]}"
+}
+
+PENDING="${XDG_RUNTIME_DIR:-/tmp}/yumi-wallpaper.pending"
+
+add_pending() {   # add_pending ШАГ  (атомарно, под своей короткой блокировкой)
+    (
+        flock -w 2 8 || exit 0
+        local n; n="$(cat "$PENDING" 2>/dev/null || echo 0)"
+        echo $(( ${n:-0} + $1 )) > "$PENDING"
+    ) 8>"$PENDING.lock"
+}
+
+take_pending() {
+    (
+        flock -w 2 8 || { echo 0; exit 0; }
+        cat "$PENDING" 2>/dev/null || echo 0
+        echo 0 > "$PENDING"
+    ) 8>"$PENDING.lock"
+}
+
+step_to() {   # step_to N — сдвинуться на N обоев от текущих (в коллекции — только по ней)
+    local cur i n idx=0 found=0
+    local -a list
+    mapfile -t list < <(cycle_paths)
+    n=${#list[@]}; [ "$n" -gt 0 ] || die "в $WALLDIR нет обоев"
+    cur="$(current)"
+    for i in "${!list[@]}"; do [ "${list[$i]}" = "$cur" ] && { idx=$i; found=1; }; done
+    # текущие не из коллекции: вперёд — с первых, назад — с последних
+    [ "$found" = 1 ] || [ -z "$(active_collection)" ] || { [ "$1" -gt 0 ] && idx=-1 || idx=0; }
+    idx=$(( ((idx + $1) % n + n) % n ))
+    apply "${list[$idx]}" "$([ "$1" -gt 0 ] && echo grow || echo outer)"
+}
+
+step() {   # step +1|-1
+    add_pending "$1"
+    exec 9>"$LOCK"
+    flock -n 9 || exit 0                        # смена уже идёт — она заберёт и этот шаг
+    local s
+    while :; do
+        while s="$(take_pending)"; [ "${s:-0}" != 0 ]; do
+            step_to "$s"
+        done
+        flock -u 9                                  # отпустить — и проверить, не нажали ли в этот миг
+        [ "$(cat "$PENDING" 2>/dev/null || echo 0)" != 0 ] && flock -n 9 && continue
+        break
+    done
+}
+
+start() {
+    local wall h
+    wall="$(current)"
+    [ -f "$wall" ] || { wall="$(list_paths | head -1)"; [ -n "$wall" ] || die "нет обоев"; ln -sfn "$wall" "$CACHE/wall.set"; }
+    ensure_daemon || die "awww-daemon (yumi-awww.service) не запустился"
+    awww img "$wall" --transition-type none
+    h="$(sha1sum "$wall" | cut -d' ' -f1)"
+    # цвета уже от этих обоев — не трогаем (вход быстрее); иначе — полный пересчёт
+    if [ "$(cat "${XDG_CACHE_HOME:-$HOME/.cache}/yumi/colors/applied" 2>/dev/null)" != "$h" ]; then
+        thumbs "$wall" "$h"
+        "$COLORS" apply "$wall"
+    fi
+}
+
+case "${1:-}" in
+set) [ $# -ge 2 ] || die "использование: yumi-wallpaper set ФАЙЛ"
+    exec 9>"$LOCK"; flock -w 10 9 || die "смена обоев занята дольше 10 с"; apply "$2" ;;
+next) step 1 ;;
+prev) step -1 ;;
+random) mapfile -t l < <(cycle_paths); [ ${#l[@]} -gt 0 ] || die "нет обоев"
+    exec 9>"$LOCK"; flock -w 10 9 || die "смена обоев занята"; apply "${l[RANDOM % ${#l[@]}]}" ;;
+get) current ;;
+collection) collection "${2:-get}" ;;
+warm) warm ;;
+scan) scan ;;
+list) list_paths ;;
+start) start ;;
+*) sed -n '2,16s/^# \{0,1\}//p' "$0"; exit 1 ;;
+esac

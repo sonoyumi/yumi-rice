@@ -10,3 +10,18 @@
 /etc/systemd/user.conf.d/10-timeout.conf
 /etc/bluetooth/main.conf
 /etc/security/faillock.conf
+
+# 3.0: тема SDDM yumi (саму тему ставит ~/.local/share/yumi-sddm/install.sh), курсор на экране входа, тачбар
+/etc/sddm.conf.d/zz-yumi-theme.conf
+/etc/X11/xorg.conf.d/40-yumi-pointer.conf
+/etc/tiny-dfr/config.toml
+/etc/tiny-dfr/folder-yumi.svg
+/etc/tiny-dfr/yumi-brightness_high.svg
+/etc/tiny-dfr/yumi-brightness_low.svg
+/etc/tiny-dfr/yumi-coffee.svg
+/etc/tiny-dfr/yumi-fast_forward.svg
+/etc/tiny-dfr/yumi-folder.svg
+/etc/tiny-dfr/yumi-play_pause.svg
+/etc/tiny-dfr/yumi-volume_down.svg
+/etc/tiny-dfr/yumi-volume_off.svg
+/etc/tiny-dfr/yumi-volume_up.svg

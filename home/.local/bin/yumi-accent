@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""yumi-accent — живой цвет акцента из обоев для yumi-panel, yumi-player, Waybar, hyprlock, rofi, swaync.
+"""yumi-accent — живой цвет акцента из обоев для yumi-panel, yumi-player, Waybar, hyprlock, swaync.
 
 Wallbash HyDE строит акценты от САМОГО ТЁМНОГО цвета палитры (pry1) — у большинства обоев это
 сероватая синева, и акцент почти всегда сиреневый. Здесь акцент берётся из самого «живого» цвета
 картинки (насыщенный × заметный по площади), а яркость/насыщенность — по той же кривой, что у HyDE,
-поэтому стиль остаётся пастельным, как у wallbash. Палитру и фон HyDE НЕ трогает.
+поэтому стиль остаётся пастельным, как у wallbash. Палитру wall.dcol и цвета темы НЕ трогает.
 
-  yumi-accent [картинка]     пересчитать (по умолчанию текущие обои ~/.cache/hyde/wall.set) и записать файлы
+  yumi-accent [картинка]     пересчитать (по умолчанию текущие обои ~/.cache/yumi/theme/wall.set) и записать файлы
   yumi-accent --print FILE   только показать выбранный цвет (проверка)
   yumi-accent --from-wallbash  вызов из шаблона wallbash: единственный перезапуск Waybar и swaync на смену обоев
-Выход: ~/.config/yumi-player/accent.css (меню и плеер подхватывают на лету),
-       ~/.config/waybar/yumi-accent.css, ~/.cache/yumi-accent/accent.{conf,rasi,txt}
+Выход: ~/.config/yumi/player/accent.css (меню и плеер подхватывают на лету),
+       ~/.config/waybar/yumi-accent.css, ~/.cache/yumi-accent/accent.{conf,txt}
 Откат: yumi-uninstall accent"""
 import colorsys
 import os
@@ -19,18 +19,76 @@ import subprocess
 import sys
 
 HOME = os.path.expanduser("~")
-# сам файл обоев: HyDE переключает wall.set ПЕРВЫМ, а миниатюру wall.thmb — на ~1 с позже
-# (при вызове из wallbash миниатюра ещё старая — отсюда «акцент от прошлых обоев»)
-WALL = os.path.join(HOME, ".cache/hyde/wall.set")
+# сам файл обоев: смена обоев переключает wall.set ПЕРВЫМ, а миниатюру wall.thmb — позже
+# (при вызове из шаблона миниатюра ещё старая — отсюда «акцент от прошлых обоев»)
+WALL = os.path.join(HOME, ".cache/yumi/theme/wall.set")
+DCOL = os.path.join(HOME, ".cache/yumi/theme/wall.dcol")       # палитра обоев (формат wallbash)
 OUT = os.path.join(HOME, ".cache/yumi-accent")
 # кривая HyDE по умолчанию (wallbash.sh): ступени xa1…xa9 = (яркость %, насыщенность %)
 CURVE = [(32, 50), (42, 46), (49, 40), (56, 39), (64, 38), (76, 37), (90, 33), (94, 29), (100, 20)]
 
 
+
+def contrast(a, b):
+    """Контраст двух цветов по WCAG (1…21); текст читается от 4.5."""
+    def lum(h):
+        def f(c):
+            c /= 255
+            return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+        r, g, b_ = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+        return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b_)
+    la, lb = sorted((lum(a), lum(b)), reverse=True)
+    return (la + 0.05) / (lb + 0.05)
+
+
+
+def readable_text(bg):
+    """Цвет текста для наших тёмных панелей (меню, центр). Берём текст палитры обоев (txt1, 1xa9), но
+    для СВЕТЛЫХ обоев wallbash даёт почти чёрный txt1 — на тёмном фоне его не видно; тогда — светлый."""
+    pal = {}
+    try:
+        for line in open(DCOL):
+            m = re.match(r'dcol_(txt1|1xa9)="([0-9A-Fa-f]{6})"', line.strip())
+            if m:
+                pal[m.group(1)] = m.group(2).upper()
+    except OSError:
+        pass
+    fg, fg2 = pal.get("txt1", "FFFFFF"), pal.get("1xa9", "F2F2F2")
+    if contrast(fg, bg) < 4.5:
+        fg = "F2F2F2"
+    if contrast(fg2, bg) < 4.5:
+        fg2 = "D9D9D9"
+    return fg, fg2
+
+def kitty_readable(bg):
+    """Фон kitty здесь всегда тёмный, а тема wallbash для СВЕТЛЫХ обоев даёт почти чёрный текст (#0E0E0E) —
+    на тёмном фоне его не видно. Такой текст (и тусклый color8) заменяем светлым; на тёмных обоях ничего не меняется."""
+    out = ""
+    try:
+        theme = open(os.path.join(HOME, ".config/kitty/theme.conf")).read()
+    except OSError:
+        return out
+    for key, light, need in (("foreground", "F2F2F2", 4.5), ("color8", "8C8C8C", 3.0)):
+        m = re.search(r"^%s\s+#([0-9A-Fa-f]{6})" % key, theme, re.M)
+        if m and contrast(m.group(1), bg) < need:
+            out += f"{key} #{light}\n"
+    return out
+
 def palette(img):
-    """k-means на 8 цветов: [(доля, r, g, b)]."""
-    out = subprocess.run(["magick", img, "-resize", "200x200>", "+dither", "-kmeans", "8",
-                          "-format", "%c", "histogram:info:"], capture_output=True, text=True).stdout
+    """k-means на 8 цветов: [(доля, r, g, b)]. Для знакомых обоев — из кэша (путь + размер + время)."""
+    import hashlib
+    path = img[:-3] if img.endswith("[0]") else img      # «[0]» — первый кадр для magick, не часть имени
+    st = os.stat(path)
+    key = hashlib.sha1(f"{os.path.realpath(path)}:{st.st_size}:{st.st_mtime_ns}".encode()).hexdigest()
+    cache = os.path.join(OUT, "kmeans", key)
+    try:
+        out = open(cache).read()
+    except OSError:
+        out = subprocess.run(["magick", img, "-resize", "200x200>", "+dither", "-kmeans", "8",
+                              "-format", "%c", "histogram:info:"], capture_output=True, text=True).stdout
+        os.makedirs(os.path.dirname(cache), exist_ok=True)
+        with open(cache, "w") as f:
+            f.write(out)
     cols = []
     for line in out.splitlines():
         m = re.match(r"\s*(\d+):.*#([0-9A-Fa-f]{6})", line)
@@ -63,7 +121,7 @@ def wallbash_fallback():
     """Серые обои — оставить акцент HyDE (1xa1…1xa9 из wall.dcol)."""
     vals = {}
     try:
-        for line in open(os.path.join(HOME, ".cache/hyde/wall.dcol")):
+        for line in open(DCOL):
             m = re.match(r'^dcol_1xa(\d)="([0-9A-Fa-f]{6})"', line)
             if m:
                 vals[int(m.group(1))] = m.group(2).upper()
@@ -75,7 +133,7 @@ def wallbash_fallback():
 def wallbash_fallback_bg():
     vals = {}
     try:
-        for line in open(os.path.join(HOME, ".cache/hyde/wall.dcol")):
+        for line in open(DCOL):
             m = re.match(r'^dcol_(pry1|1xa2|1xa4)="([0-9A-Fa-f]{6})"', line)
             if m:
                 vals[m.group(1)] = m.group(2).upper()
@@ -89,6 +147,9 @@ def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     img = args[0] if args else os.path.realpath(WALL)
     img = img + "[0]"                               # первый кадр (gif/анимированные обои)
+    if "--precache" in sys.argv:                    # только посчитать и запомнить анализ цвета (новые обои)
+        palette(img)
+        return
     cols = palette(img)
     pick = pick_hue(cols)
     if pick:
@@ -119,7 +180,9 @@ def main():
         os.replace(tmp, path)            # атомарно: наблюдатели видят сразу целый файл
 
     head = "/* yumi-accent: живой акцент из обоев (генерируется, не править) */\n"
-    write(os.path.join(HOME, ".config/yumi-player/accent.css"), head +
+    fg, fg2 = readable_text(bg)
+    write(os.path.join(HOME, ".config/yumi/player/accent.css"), head +
+          f"@define-color yp-fg {rgba(fg)};\n@define-color yp-fg2 {rgba(fg2)};\n" +
           f"@define-color yp-accent {rgba(acc)};\n@define-color yp-border {rgba(acc5)};\n"
           f"@define-color yp-bg {rgba(bg, 0.85)};\n@define-color yp-on-acc {rgba(deep)};\n"
           f"@define-color yp-btn {rgba(btn, 0.55)};\n@define-color yp-hover {rgba(hov, 0.8)};\n")
@@ -129,12 +192,10 @@ def main():
     write(os.path.join(OUT, "accent.conf"), "# yumi-accent (hyprlock)\n" +
           "".join(f"$yumi_xa{i+1} = {rgba(c, 0.95)}\n" for i, c in enumerate(xa)) +
           f"$yumi_acc = {rgba(acc, 0.95)}\n$yumi_card = {rgba(deep, 0.42)}\n$yumi_deep = {rgba(deep, 0.95)}\n")
-    write(os.path.join(OUT, "accent.rasi"), "/* yumi-accent (rofi) */\n* {\n" +
-          f"    yumi-acc: #{acc}FF;\n    yumi-acc5: #{acc5}FF;\n    yumi-acc2: #{acc2}FF;\n"
-          f"    yumi-deep: #{deep}F0;\n    yumi-bg: #{bg}E6;\n    yumi-btn: #{btn}CC;\n    yumi-hover: #{hov}CC;\n}}\n")
     write(os.path.join(OUT, "accent-gtk.css"), head +
           f"@define-color yumi_acc #{acc};\n@define-color yumi_acc5 #{acc5};\n@define-color yumi_acc2 #{acc2};\n"
-          f"@define-color yumi_deep #{deep};\n@define-color yumi_bg #{bg};\n@define-color yumi_btn #{btn};\n@define-color yumi_hover #{hov};\n")
+          f"@define-color yumi_deep #{deep};\n@define-color yumi_bg #{bg};\n@define-color yumi_btn #{btn};\n@define-color yumi_hover #{hov};\n"
+          f"@define-color yumi_fg #{fg};\n@define-color yumi_fg2 #{fg2};\n")
     prev = ""
     try:
         prev = open(os.path.join(OUT, "accent.txt")).read().strip()
@@ -142,28 +203,94 @@ def main():
         pass
     write(os.path.join(OUT, "accent.txt"), " ".join(xa) + "\n")
     write(os.path.join(OUT, "bg.txt"), f"{deep} {bg} {btn} {hov}\n")
-    # терминал kitty: тёмный фон и выделение в тоне обоев (поверх темы HyDE)
+    # терминал kitty: тёмный фон и выделение в тоне обоев (поверх цветов theme.conf из шаблона kitty)
     write(os.path.join(HOME, ".config/kitty/yumi-colors.conf"),
           f"# yumi-accent: генерируется при смене обоев, не править\nbackground #{bg}\ncolor0 #{deep}\n"
-          f"selection_background #{btn}\nselection_foreground #FFFFFF\ncursor #{acc}\nactive_border_color #{acc}\n")
-    subprocess.run(["pkill", "-USR1", "-x", "kitty"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)   # перечитать цвета
-    # хуки: ~/.config/yumi-accent/hooks.d/* (исполняемые) — перекрасить приложения, рамки окон, VS Code…
-    hooks = os.path.join(HOME, ".config/yumi-accent/hooks.d")
+          f"selection_background #{btn}\nselection_foreground #FFFFFF\ncursor #{acc}\nactive_border_color #{acc}\n"
+          + kitty_readable(bg))
+    if not os.environ.get("YUMI_COMMIT_QUEUE"):     # при смене обоев kitty перечитывает цвета ОДИН раз (хук kitty)
+        subprocess.run(["pkill", "-USR1", "-x", "kitty"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if "--from-wallbash" in sys.argv:
+        # ЕДИНСТВЕННЫЙ перезапуск бара на смену обоев — СРАЗУ, как только его цвета записаны (theme.css пишет
+        # yumi-colors до хуков, yumi-accent.css — выше), а не после хуков ниже: так бар меняется вместе с kitty.
+        # Перечитывание стиля сигналом не годится: утечка памяти и «мёртвые» процессы модулей (проверено 13.10).
+        q = os.environ.get("YUMI_COMMIT_QUEUE")
+        if q:                                        # смена обоев yumi-colors: в общий момент со всеми
+            with open(q, "a") as f:
+                f.write("/usr/bin/systemctl --user restart waybar.service\n/usr/bin/swaync-client -rs\n")
+        else:
+            theme = os.path.join(HOME, ".config/waybar/theme.css")
+            wait = (f'for i in $(seq 30); do [ "{theme}" -nt "{os.path.realpath(WALL)}" ] && break; sleep 0.2; done; '
+                    'systemctl --user restart waybar.service; swaync-client -rs')
+            subprocess.Popen(["sh", "-c", wait], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+    # хуки: ~/.config/yumi/accent/hooks.d/* (исполняемые) — перекрасить приложения, рамки окон, VS Code…
+    # Видимые сейчас — дождаться; программы, которых нет на экране, — в фоне (см. split_hooks ниже)
+    hooks = os.path.join(HOME, ".config/yumi/accent/hooks.d")
     env = dict(os.environ, YUMI_ACC=acc, YUMI_ACC5=acc5, YUMI_ACC2=acc2, YUMI_DEEP=deep, YUMI_BG=bg,
                YUMI_BTN=btn, YUMI_HOVER=hov, YUMI_XA=" ".join(xa), YUMI_MONO="0" if pick else "1")
     if os.path.isdir(hooks):
-        for name in sorted(os.listdir(hooks)):
-            f = os.path.join(hooks, name)
-            if os.access(f, os.X_OK) and not name.startswith("."):
-                subprocess.run([f], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
-    if "--from-wallbash" in sys.argv:
-        # ЕДИНСТВЕННЫЙ перезапуск бара на смену обоев (шаблон HyDE waybar.dcol больше бар не перезапускает):
-        # ждём, пока HyDE допишет theme.css (новее wall.set, до 6 с), и перезапускаем один раз
-        theme = os.path.join(HOME, ".config/waybar/theme.css")
-        wait = (f'for i in $(seq 30); do [ "{theme}" -nt "{os.path.realpath(WALL)}" ] && break; sleep 0.2; done; '
-                'sleep 0.3; systemctl --user restart hyde-Hyprland-bar.service; swaync-client -rs')
-        subprocess.Popen(["sh", "-c", wait], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        names = [n for n in sorted(os.listdir(hooks))
+                 if not n.startswith(".") and os.access(os.path.join(hooks, n), os.X_OK)]
+        fg, bg = split_hooks(names)
+        # видимое — параллельно и дождаться (при смене обоев их видимые команды копятся в очереди yumi-colors)
+        procs = [subprocess.Popen([os.path.join(hooks, n)], env=env, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL) for n in fg]
+        for pr in procs:
+            try:
+                pr.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                pr.kill()
+        # невидимое — в фоне; при смене обоев — после общего момента (файл-сигнал от yumi-colors commit),
+        # без очереди и подменных команд: эти программы перекрашиваются сразу, как дойдёт очередь
+        if bg:
+            q = env.get("YUMI_COMMIT_QUEUE", "")
+            benv = {k: v for k, v in env.items() if k != "YUMI_COMMIT_QUEUE"}
+            benv["PATH"] = ":".join(x for x in benv.get("PATH", "").split(":") if not x.endswith("yumi-colors/defer"))
+            wait = (f'for i in $(seq 200); do [ -e "{q}.done" ] && break; sleep 0.05; done; ' if q else "")
+            run = " ".join(f'"{os.path.join(hooks, n)}" & ' for n in bg) + "wait"
+            subprocess.Popen(["sh", "-c", wait + run], env=benv, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
 
+
+# Какие хуки ждать (их результат виден сейчас), а какие — в фон. Хук программы из VISIBLE_ONLY ждём, только
+# если её окно сейчас на экране (рабочий стол, открытый на одном из мониторов). Новые хуки без правила — ждём.
+BACKGROUND = ("25-hyprtoolkit", "restart")                 # окно пароля polkit, скрытые программы — их не видно
+VISIBLE_ONLY = {
+    "50-vscode": ("code", "code-oss", "com.microsoft.vscode", "vscodium"),
+    "70-telegram": ("org.telegram.desktop", "telegramdesktop", "telegram-desktop"),
+    "75-vesktop": ("vesktop", "dev.vencord.vesktop"),
+    "90-zen": ("zen", "zen-browser", "zen-alpha"),
+}
+
+
+def visible_classes():
+    try:
+        import json
+        mons = json.loads(subprocess.run(["hyprctl", "-j", "monitors"], capture_output=True, text=True,
+                                         timeout=1).stdout)
+        ws = {m["activeWorkspace"]["id"] for m in mons} | {m["specialWorkspace"]["id"] for m in mons
+                                                            if m.get("specialWorkspace", {}).get("id")}
+        cl = json.loads(subprocess.run(["hyprctl", "-j", "clients"], capture_output=True, text=True,
+                                       timeout=1).stdout)
+        return {c["class"].lower() for c in cl if c["workspace"]["id"] in ws and c.get("mapped", True)}
+    except Exception:
+        return None                                       # не узнали — считаем видимым всё
+
+
+def split_hooks(names):
+    if os.environ.get("YUMI_COLORS_WARM"):                # прогрев кэша: всё сразу, кроме перезапуска программ
+        return [n for n in names if "restart" not in n], []
+    vis = visible_classes()
+    fg, bg = [], []
+    for n in names:
+        if any(b in n for b in BACKGROUND):
+            bg.append(n)
+        elif n in VISIBLE_ONLY and vis is not None and not (vis & set(VISIBLE_ONLY[n])):
+            bg.append(n)
+        else:
+            fg.append(n)
+    return fg, bg
 
 if __name__ == "__main__":
     main()

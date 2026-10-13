@@ -9,7 +9,7 @@
   yumi-telegram-theme --notify   (для хука 70-telegram) уведомление с кнопкой «Применить», ждёт нажатия;
                                  если автоматизация уже разрешена и стоит эта же тема — обновляет сразу
 Опции окружения: YUMI_TG_WALL=0 — без картинки-фона (сплошной цвет); YUMI_TG_DIM=80 — яркость обоев, %.
-Основа — встроенная ночная тема tdesktop v7.2.9 (~/.local/lib/yumi-telegram/base.colors): все её
+Основа — встроенная ночная тема tdesktop v7.2.9 (~/.local/lib/yumi/telegram/base.colors): все её
 голубые тона переводятся в оттенок обоев (OKLCH: светлота сохраняется, меняются тон и насыщенность),
 ссылки/активное — акцент yumi-accent; пары текст/фон доводятся до контраста ≥ 4.5.
 Откат: yumi-uninstall telegram"""
@@ -26,12 +26,12 @@ import sys
 import zipfile
 
 HOME = os.path.expanduser("~")
-BASE = os.path.join(HOME, ".local/lib/yumi-telegram/base.colors")
+BASE = os.path.join(HOME, ".local/lib/yumi/telegram/base.colors")
 OUTDIR = os.path.join(HOME, ".local/share/yumi-telegram")
 OUT = os.path.join(OUTDIR, "yumi.tdesktop-theme")
 AUTO_OK = os.path.join(OUTDIR, ".automation-ok")      # автоматизация в Telegram подтверждена
 ACC_DIR = os.path.join(HOME, ".cache/yumi-accent")
-WALL = os.path.join(HOME, ".cache/hyde/wall.set")
+WALL = os.path.join(HOME, ".cache/yumi/theme/wall.set")
 TG_WORKDIR = os.path.join(HOME, ".local/share/TelegramDesktop")
 
 # ключи с «чужими» осмысленными цветами — не перекрашивать (имена собеседников, графики, премиум…)
@@ -344,8 +344,8 @@ WAITER = os.path.join(OUTDIR, ".notify.pid")
 ICON = "org.telegram.desktop"
 
 
-def apply_now():
-    return tg_ctrl("theme-apply:" + base64.b64encode(OUT.encode()).decode(), show=True)
+def apply_now(show=True):
+    return tg_ctrl("theme-apply:" + base64.b64encode(OUT.encode()).decode(), show=show)
 
 
 def notify(title, body, action=None, timeout_ms=0, urgent=False):
@@ -399,7 +399,7 @@ def notify_flow():
         if os.path.exists(AUTO_OK):
             cur = tg_ctrl("theme")
             if cur.get("ok") and cur.get("path") == OUT:
-                res = apply_now()
+                res = apply_now(show=False)        # тихо: окно Telegram не всплывает при смене обоев
                 if res.get("ok"):
                     return 0                       # всё получилось — без уведомления (только ошибки)
         # автоматически не вышло (тема в Telegram сменена вручную, автоматизация выключена, ошибка) — спросить

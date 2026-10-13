@@ -1,0 +1,12 @@
+[Unit]
+Description=yumi: вернуть 180 Гц внешнему монитору после переключения терминала
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/python3 -I %h/.local/bin/yumi-hz-guard
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

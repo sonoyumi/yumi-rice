@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# yumi-volume — громкость динамиков/микрофона/плеера с уведомлением (замена `hyde-shell volumecontrol`)
+#   yumi-volume -o i|d|m [шаг]        выход (динамики/наушники по умолчанию)
+#   yumi-volume -i i|d|m [шаг]        вход (микрофон по умолчанию)
+#   yumi-volume -p ПЛЕЕР i|d|m [шаг]  громкость плеера через playerctl ('' — все плееры)
+#   -q — без уведомления. i — громче, d — тише, m — звук вкл/выкл. Шаг по умолчанию 5 (YUMI_VOLUME_STEP).
+# Принимает и старую запись из биндов HyDE: yumi-volume '-o' 'd'.
+# Вид уведомления — как был у HyDE: значок-«крутилка» knob-N.svg (шаг 5 %), заголовок «55...» (точка на
+# каждые 15 %), ниже имя устройства; одно и то же окно (-r 8) на 2 с. Выкл/вкл звука — muted-/unmuted-speaker
+# (или -microphone). Значки: YUMI_OSD_ICONS (по умолчанию Wallbash-Icon/media — их перекрашивает под обои wallbash).
+# Отправитель «Звук и яркость» (YUMI_OSD_APP): по нему ~/.config/yumi/notify/ignore.json не пишет громкость в журнал.
+# Предел 100 % (как у HyDE без VOLUME_BOOST); YUMI_VOLUME_LIMIT=1.5 — разрешить до 150 %.
+# DRY=1 — ничего не менять, только напечатать команды (чтение громкости при этом настоящее).
+# Откат: в binds.lua вернуть `hyde-shell volumecontrol …` (строки — в replacements.tsv).
+
+ICONS=${YUMI_OSD_ICONS:-${XDG_DATA_HOME:-$HOME/.local/share}/icons/Wallbash-Icon/media}
+APP=${YUMI_OSD_APP:-Звук и яркость}
+STEP=${YUMI_VOLUME_STEP:-5}
+LIMIT=${YUMI_VOLUME_LIMIT:-1.0}
+NOTIFY=1
+
+run() { if [[ -n $DRY ]]; then printf 'DO:'; printf ' %q' "$@"; echo; else "$@"; fi; }
+note() { ((NOTIFY)) || return 0; run notify-send -a "$APP" -r 8 -t 2000 "$@"; }
+usage() { sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+
+# Имя устройства, как в HyDE: node.description из wpctl, запасной вариант — pactl
+dev_name() {
+    local n
+    n=$(wpctl inspect "$1" 2>/dev/null | grep -oP 'node.description = "\K[^"]+' | head -1)
+    if [[ -z $n ]]; then
+        if [[ $1 == *SOURCE* ]]; then n=$(pactl get-default-source 2>/dev/null); else n=$(pactl get-default-sink 2>/dev/null); fi
+    fi
+    printf '%s' "$n"
+}
+
+# «55» → заголовок «55...» (seq-приём HyDE: N/15 чисел через точку, цифры вырезаны → N/15−1 точек)
+show_level() {
+    local vol=$1 name=$2 angle bar
+    angle=$(((vol + 2) / 5 * 5)); ((angle > 100)) && angle=100; ((angle < 0)) && angle=0
+    bar=$(seq -s "." $((vol / 15)) 2>/dev/null | sed 's/[0-9]//g')
+    note -i "$ICONS/knob-$angle.svg" "$vol$bar" "$name"
+}
+
+# --- разбор аргументов (как getopts HyDE: -i | -o | -p ПЛЕЕР, -q) ---
+kind="" target="" player=""
+while getopts "iop:q" opt; do
+    case $opt in
+        i) kind=source; target=@DEFAULT_AUDIO_SOURCE@ ;;
+        o) kind=sink;   target=@DEFAULT_AUDIO_SINK@ ;;
+        p) kind=player; player=$OPTARG ;;
+        q) NOTIFY=0 ;;
+        *) usage ;;
+    esac
+done
+shift $((OPTIND - 1))
+[[ -z $kind ]] && usage
+action=$1 step=${2:-$STEP}
+[[ $step =~ ^[0-9]+$ ]] || usage
+
+case "$kind:$action" in
+    sink:[id] | source:[id])
+        delta=-; [[ $action == i ]] && delta=+
+        run wpctl set-volume -l "$LIMIT" "$target" "$step%$delta"
+        vol=$(wpctl get-volume "$target" | awk '{printf "%d", $2 * 100 + 0.5}')
+        show_level "$vol" "$(dev_name "$target")"
+        ;;
+    sink:m | source:m)
+        run wpctl set-mute "$target" toggle
+        if [[ $kind == source ]]; then dev=microphone; src=(--default-source); else dev=speaker; src=(); fi
+        if [[ $(pamixer "${src[@]}" --get-mute) == true ]]; then
+            note -i "$ICONS/muted-$dev.svg" "muted" "$(dev_name "$target")"
+        else
+            note -i "$ICONS/unmuted-$dev.svg" "unmuted" "$(dev_name "$target")"
+        fi
+        ;;
+    player:[id])
+        delta=-; [[ $action == i ]] && delta=+
+        run playerctl --player="$player" volume "$(awk -v s="$step" 'BEGIN {print s/100}')$delta"
+        vol=$(playerctl --player="$player" volume 2>/dev/null | awk '{printf "%.0f", $0 * 100}')
+        show_level "${vol:-0}" "$(playerctl --list-all 2>/dev/null | grep -w -- "$player" | head -1)"
+        ;;
+    player:m)
+        last="${XDG_RUNTIME_DIR:-/tmp}/yumi-volume-last-${player:-all}"
+        cur=$(playerctl --player="$player" volume 2>/dev/null | awk '{printf "%.2f", $0}')
+        if [[ $cur != 0.00 ]]; then
+            [[ -n $DRY ]] || printf '%s' "$cur" >"$last"
+            run playerctl --player="$player" volume 0
+            note -i "$ICONS/muted-speaker.svg" "muted" "$player"
+        else
+            run playerctl --player="$player" volume "$(cat "$last" 2>/dev/null || echo 0.5)"
+            note -i "$ICONS/unmuted-speaker.svg" "unmuted" "$player"
+        fi
+        ;;
+    *) usage ;;
+esac

@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# yt-dlp для mpv (ytdl_hook-ytdl_path): ссылки SoundCloud — через прокси WARP yumi-music-proxy
+# (сеть режет SoundCloud), всё остальное — напрямую. Прокси не запущен — тоже напрямую.
+Y="$HOME/.local/share/yumi-music/venv/bin/yt-dlp"
+PROXY=http://127.0.0.1:40080
+if [[ " $* " == *soundcloud.com* ]] && (exec 3<>/dev/tcp/127.0.0.1/40080) 2>/dev/null; then
+    exec "$Y" --proxy "$PROXY" "$@"
+fi
+exec "$Y" "$@"

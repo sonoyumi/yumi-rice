@@ -1,17 +1,17 @@
 /* swaync — уведомления и центр управления в стиле меню yumi-panel и плеера.
    Цвета только из обоев: те же формулы, что у @yp-* (шаблон always/yumi-player.dcol),
-   но прямо из ~/.cache/hyde/wallbash/gtk.css — он всегда готов к перезагрузке swaync.
+   но прямо из ~/.cache/yumi/theme/wallbash/gtk.css — он всегда готов к перезагрузке swaync.
    Цвета состояний: красный #ed8796.
    Стиль HyDE (theme.css) перебивается повышенной конкретностью :not(.zN). */
 @import url("file://@HOME@/.config/swaync/kitty-colors.css");
-@import url("file://@HOME@/.cache/hyde/wallbash/gtk.css");
+@import url("file://@HOME@/.cache/yumi/theme/wallbash/gtk.css");
 @import url("file://@HOME@/.cache/yumi-accent/accent-gtk.css");   /* живой акцент (yumi-accent) */
 
 /* ── палитра (как у плеера и меню) ── */
 @define-color yn-bg      @yumi_bg;
 @define-color yn-border  @yumi_acc5;
-@define-color yn-fg      @wallbash_txt1;
-@define-color yn-fg2     @wallbash_1xa9;
+@define-color yn-fg      @yumi_fg;     /* читаемый текст от yumi-accent (на светлых обоях txt1 почти чёрный) */
+@define-color yn-fg2     @yumi_fg2;
 @define-color yn-accent  @yumi_acc;
 @define-color yn-btn     alpha(@yumi_btn, 0.55);
 @define-color yn-hover   alpha(@yumi_hover, 0.80);
@@ -22,7 +22,7 @@
 @define-color yn-card-cr mix(mix(@wallbash_pry1, @wallbash_1xa2, 0.55), #ed8796, 0.14);
 
 /* переменные, которыми пользуется theme.css HyDE */
-@define-color text-color @wallbash_txt1;
+@define-color text-color @yumi_fg;
 @define-color text-color-disabled alpha(@wallbash_txt1, 0.45);
 @define-color sw-cc-bg alpha(@wallbash_pry1, 0.94);
 @define-color sw-cc-border-color @wallbash_1xa5;
@@ -292,7 +292,7 @@ notificationwindow, blankwindow,
   border-radius: 28px 28px 0 0;
   background-image:
     linear-gradient(to bottom, alpha(@yn-bg, 0) 30%, alpha(@yn-bg, 0.94) 100%),
-    url("file://@HOME@/.cache/hyde/cc-header.png");
+    url("file://@HOME@/.cache/yumi/theme/cc-header.png");
   background-size: cover, cover;
   background-position: center, center;
   background-repeat: no-repeat, no-repeat;

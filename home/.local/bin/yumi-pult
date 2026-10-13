@@ -1,0 +1,1357 @@
+#!/usr/bin/env python3
+"""yumi-pult — «Пульт» Yumi (как Spotlight/Raycast): одно окно по центру, поиск сразу по всему.
+Две колонки: слева поле поиска, режимы и список, справа — предпросмотр выбранного и кнопки действий.
+  yumi-pult [--center]   открыть / закрыть (повторный вызов закрывает; бинд SUPER+Space)
+  yumi-pult --close      закрыть
+
+Что ищет:
+  программы   все .desktop (Hidden/NoDisplay/TryExec учтены — ~/.local/lib/yumi/panel/yumiapps.py, общий
+              с yumi-menu-launcher; частота запусков у них общая: ~/.cache/yumi-panel/launcher-usage.json)
+  команды     Yumi: режим работы, VPN, подсветка клавиатуры, ☕, скриншот, Waybar, Доктор, звук, меню,
+              обои и коллекции обоев (Enter — включить коллекцию и поставить случайные из неё,
+              Ctrl+Enter — открыть папку; `yumi-wallpaper collection`)
+  файлы       fd по домашней папке в фоне (предыдущий поиск отменяется), кроме .cache, корзины,
+              node_modules, .git, .venv, __pycache__ и т.п. (FD_EXCLUDE). Русские слова ищутся по основе
+              («обложка» найдёт «Обложки»). Enter — открыть, Ctrl+Enter — показать в Dolphin
+  счёт        «2+2*3», «=2^10», «sqrt(2)» — Enter копирует результат
+  эмодзи      «:кот» (база yumi-menu-picker), Enter — скопировать, Ctrl+Enter — вставить
+  веб         «?запрос» (поисковики yumi-menu-websearch; «?aw hyprland» — сразу Arch Wiki)
+Пустой ввод: сверху недавние (журнал пульта ~/.local/state/yumi/pult-history.json: частота + давность),
+ниже частые программы и недавние файлы (recently-used.xbel).
+Клавиши: ↑/↓ PgUp/PgDn — выбор, Enter — действие, Ctrl+Enter (или Shift+Enter) — второе действие,
+Tab / Shift+Tab — режим (Всё → Программы → Команды → Файлы → Эмодзи → Веб), Esc — очистить, повторно — закрыть.
+Ввод в другой раскладке и транслитом тоже находит («вол» → volume, «ащч» → fox).
+
+Проверка (ничего не меняет):
+  YP_DRYRUN=1         команды только печатаются в stderr, окно не закрывается, журнал не пишется
+  YP_SEARCH=текст     сразу ввести текст;  YP_TYPE=текст — «набрать» по букве (замер отклика)
+  YP_SELECT=file|cmd|app|…  выбрать первую строку этого вида (для снимков предпросмотра)
+  YP_KEYBOARD=none, YP_STAY=1, YP_MONITOR=DP-1 — как у всех меню yumi-panel
+  YP_TEST=enter|ctrl-enter  через 2,5 с «нажать» Enter / Ctrl+Enter на выбранной строке
+  YP_TIMING=1         замеры в stderr: загрузка, первый кадр, отклик на ввод
+  YP_PRINT_SHAPE=1    печатать рамку меню «[shape] x y w h» при каждом её изменении
+  YUMI_PULT_ID=x      отдельный экземпляр (org.yumi.panel.pultx) — проверка рядом с настоящим пультом
+Откат: удалить этот файл (и ~/.local/state/yumi/pult-history.json); бинд SUPER+Space — из binds.lua."""
+import ast
+import hashlib
+import json
+import math
+import operator
+import os
+import subprocess
+import sys
+import threading
+import time
+import urllib.parse
+import warnings
+from concurrent.futures import ThreadPoolExecutor
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+sys.dont_write_bytecode = True                  # не оставлять __pycache__ рядом с ~/.local/bin
+
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi/panel"))
+import yumipanel as yp  # noqa: E402  (сам перезапускает процесс с layer-shell)
+from yumipanel import Gtk, Gdk, GLib, Gio, Pango, Layer  # noqa: E402
+import gi  # noqa: E402
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import GdkPixbuf  # noqa: E402
+import yumiapps as ya  # noqa: E402  (разбор .desktop, поиск, частота запусков — общие с лаунчером)
+
+HOME = ya.HOME
+DRY = yp.DRY
+BIN = os.path.join(HOME, ".local/bin")
+WALLS = os.path.join(HOME, "Pictures/Wallpapers")
+DATA = os.path.join(HOME, ".local/share/yumi-panel/data")
+STATE = os.path.join(os.environ.get("XDG_STATE_HOME", os.path.join(HOME, ".local/state")), "yumi")
+HISTORY = os.path.join(STATE, "pult-history.json")
+WALL_COLL = os.path.join(STATE, "wall-collection")              # пишет `yumi-wallpaper collection`
+RUNTIME = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
+DOCTOR = os.path.join(BIN, "yumi-doctor")
+DOCTOR_CACHE = os.path.join(RUNTIME, "yumi/doctor.json")        # общий с меню «Система»
+DOCTOR_FRESH = 600                                              # кэш доктора моложе 10 мин — не перепроверять
+
+# размеры — логические px встроенного экрана; на MSI каркас умножает на UI-коэффициент (monitors.conf).
+# Окно НЕ меняет размер между состояниями: список и предпросмотр постоянной высоты.
+WIDTH = 860
+HEAD_H = 64
+LEFT_W = 470
+LIST_H = 430
+PREV_W = WIDTH - LEFT_W - 28 - 14 - 4       # минус поля тела и промежуток колонок
+IMG_H = 200                                 # миниатюра картинки в предпросмотре
+
+FD = "/usr/bin/fd"
+FD_EXCLUDE = (".cache", ".local/share/Trash", "node_modules", ".git", ".venv", "__pycache__",
+              ".local/share/flatpak", ".vscode/extensions", ".local/share/icons")
+FD_LIMIT = 1500                             # fd останавливается после стольких совпадений
+FD_MIN = {"all": 3, "files": 2}             # с какой длины запроса искать файлы
+EXT_IMG = (".jpg", ".jpeg", ".png", ".gif", ".webp")
+
+MODES = [("all", "󰍉", "Всё"), ("apps", "󰀻", "Программы"), ("cmds", "󰘳", "Команды"),
+         ("files", "󰈞", "Файлы"), ("emoji", "󰞅", "Эмодзи"), ("web", "󰖟", "Веб")]
+MODE_PH = {"all": "Программы, команды, файлы, счёт…", "apps": "Найти программу…",
+           "cmds": "Команда Yumi…", "files": "Имя файла или папки…", "emoji": "Эмодзи: сердце, кот, огонь…",
+           "web": "Что искать в интернете…"}
+LIMITS = {"all": dict(cmds=6, apps=6, files=5), "apps": dict(apps=80), "cmds": dict(cmds=60), "files": dict(files=60)}
+
+
+def b(name):
+    return os.path.join(BIN, name)
+
+
+def sh(*cmd):
+    return yp.run(*cmd, timeout=2).strip()
+
+
+def plural(n, one, few, many):
+    n = abs(n) % 100
+    if 10 < n < 20:
+        return many
+    return one if n % 10 == 1 else few if 2 <= n % 10 <= 4 else many
+
+
+def ago(t):
+    d = time.time() - t
+    if d < 90:
+        return "сейчас"
+    if d < 3600:
+        return f"{int(d // 60)} мин"
+    if d < 86400:
+        return f"{int(d // 3600)} ч"
+    return "вчера" if d < 2 * 86400 else f"{int(d // 86400)} дн"
+
+
+def cap(s):
+    return s[:1].upper() + s[1:]
+
+
+def read_text(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+# ---------- состояние системы (для подписей; только чтение) ----------
+def read_states():
+    """Медленные запросы (~10–35 мс каждый) — параллельно."""
+    with ThreadPoolExecutor(4) as ex:
+        fut = {k: ex.submit(sh, *cmd) for k, cmd in (("wf", (b("yumi-workflow"), "get")),
+                                                      ("wf_list", (b("yumi-workflow"), "list")),
+                                                      ("vpn", (b("yumi-vpn"), "state")),
+                                                      ("caf", (b("yumi-caffeine"), "state")))}
+        st = {k: f.result() for k, f in fut.items()}
+    st["wf"] = st["wf"] or "01-default"
+    st["wf_list"] = [l for l in st["wf_list"].split("\n") if l] or [st["wf"]]
+    st["caf"] = st["caf"] == "true"
+    try:
+        with open(os.path.join(HOME, ".config/yumi/kb-light.json")) as f:
+            st["kbd"] = json.load(f)
+    except (OSError, ValueError):
+        st["kbd"] = None
+    wall = os.path.realpath(os.path.join(HOME, ".cache/yumi/theme/wall.set"))
+    st["wall"] = wall
+    st["wall_coll"] = os.path.relpath(wall, WALLS).split(os.sep)[0] if wall.startswith(WALLS + "/") else ""
+    coll = read_text(WALL_COLL)
+    st["coll"] = coll if coll and os.path.isdir(os.path.join(WALLS, coll)) else ""
+    return st
+
+
+def collections():
+    try:
+        return sorted(d for d in os.listdir(WALLS) if os.path.isdir(os.path.join(WALLS, d)) and not d.startswith("."))
+    except OSError:
+        return []
+
+
+def coll_walls(name):
+    out = []
+    for root, dirs, files in os.walk(os.path.join(WALLS, name)):
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d != "logo"]
+        out += [os.path.join(root, f) for f in files if f.lower().endswith(EXT_IMG[:4]) and not f.startswith(".")]
+    return sorted(out)
+
+
+def nice_coll(c):
+    return c.split(" ", 1)[1] if c[:2].isdigit() and " " in c else c
+
+
+def yumi_commands(st):
+    """[dict(id, icon, title, sub, kw, act, alt, alt_label, on)] — act/alt: команда (tuple)."""
+    wf, coll = st["wf"], st["coll"]
+    kbd_on = (st["kbd"] or {}).get("on", True)
+    yw = b("yumi-wallpaper")
+    cmds = [
+        dict(id="wf-next", icon="󰕮", title="Режим работы: следующий", sub=f"сейчас {wf}",
+             kw="workflow режим next следующий работа", act=(b("yumi-workflow"), "next"),
+             alt=(b("yumi-workflow"), "prev"), alt_label="предыдущий"),
+        dict(id="vpn", icon="󰦝", title=f"VPN: {'выключить' if st['vpn'] else 'включить'}",
+             sub=st["vpn"] or "выключен", kw="vpn впн warp proton wireguard туннель",
+             act=(b("yumi-vpn"), "toggle"), alt=(b("yumi-menu-vpn"), "--center"), alt_label="меню VPN",
+             on=bool(st["vpn"])),
+        dict(id="kbd", icon="󰌌", title=f"Подсветка клавиатуры: {'выключить' if kbd_on else 'включить'}",
+             sub=(f"{st['kbd'].get('brightness', 100)}% · {'из обоев' if st['kbd'].get('source') == 'wall' else 'свой цвет'}"
+                  if st["kbd"] else "OpenRGB"),
+             kw="подсветка клавиатура keyboard light rgb openrgb", act=(b("yumi-kb-light"), "toggle"),
+             alt=(b("yumi-kb-light"), "up"), alt_label="ярче +10 %", on=kbd_on),
+        dict(id="caf", icon="󰅶", title=f"☕ Кофеин: {'выключить' if st['caf'] else 'не засыпать'}",
+             sub="включён — экран не гаснет" if st["caf"] else "выключен",
+             kw="кофеин caffeine кофе не засыпать сон idle", act=(b("yumi-caffeine"), "toggle"), on=st["caf"]),
+        dict(id="shot", icon="󰹑", title="Скриншот области", sub="выделить область или окно",
+             kw="скриншот снимок экрана screenshot print", act=(b("yumi-screenshot"), "s"),
+             alt=(b("yumi-screenshot"), "p"), alt_label="весь экран"),
+        dict(id="ocr", icon="󰈙", title="Скриншот: распознать текст", sub="OCR → буфер обмена",
+             kw="скриншот ocr текст распознать", act=(b("yumi-screenshot"), "sc")),
+        dict(id="waybar", icon="󰑓", title="Перезапустить Waybar", sub="служба waybar.service",
+             kw="waybar бар панель перезапуск restart", act=(b("yumi-waybar-restart"),)),
+        dict(id="doctor", icon="󰓙", title="Доктор — проверка системы", sub="службы, конфиг, обои, диск, снимки",
+             kw="доктор doctor проверка диагностика здоровье",
+             act=("kitty", "--title", "Доктор Yumi-Rice", "--hold", "-e", DOCTOR, "-v"), act_label="подробно",
+             alt=("kitty", "--title", "Доктор Yumi-Rice", "--hold", "-e", DOCTOR, "--fix"),
+             alt_label="безопасно починить"),
+        dict(id="mute", icon="󰝟", title="Звук: выключить / включить", sub="динамики по умолчанию",
+             kw="звук громкость volume волюм mute тишина", act=(b("yumi-volume"), "-o", "m"),
+             alt=(b("yumi-menu-sound"), "--center"), alt_label="меню звука"),
+        dict(id="wall-next", icon="󰸉", title="Обои: следующие",
+             sub=f"в коллекции «{coll}»" if coll else "по всем коллекциям",
+             kw="обои wallpaper следующие next", act=(yw, "next"), alt=(yw, "prev"), alt_label="предыдущие"),
+        dict(id="wall-rnd", icon="󰒝", title="Обои: случайные",
+             sub=f"из коллекции «{coll}»" if coll else "из всех коллекций",
+             kw="обои wallpaper случайные random", act=(yw, "random")),
+        dict(id="m-wall", icon="󰋩", title="Выбрать обои", sub="меню обоев (миниатюры)",
+             kw="обои wallpaper выбрать меню", act=(b("yumi-menu-wallpaper"), "--center")),
+        dict(id="m-control", icon="󰒓", title="Центр управления", sub="меню yumi-menu-control",
+             kw="центр управления control настройки", act=(b("yumi-menu-control"), "--center")),
+        dict(id="m-clip", icon="󰅌", title="Буфер обмена", sub="история копирования",
+             kw="буфер обмена clipboard история", act=(b("yumi-menu-clipboard"), "--center")),
+        dict(id="m-power", icon="󰐥", title="Питание", sub="блокировка, сон, перезагрузка",
+             kw="питание выключить перезагрузка сон power", act=(b("yumi-menu-power"), "--center")),
+    ]
+    if coll:
+        cmds.append(dict(id="coll-off", icon="󰉓", title="Обои: по всем коллекциям",
+                         sub=f"сейчас только «{coll}»", kw="обои коллекция все выключить off сбросить",
+                         act=(yw, "collection", "off")))
+    for name in st["wf_list"]:
+        cmds.append(dict(id="wf-" + name, icon="󰕮", title=f"Режим работы: {name}",
+                         sub="текущий" if name == wf else "переключить", kw=f"режим workflow {name}",
+                         act=(b("yumi-workflow"), "set", name), on=name == wf))
+    for c in collections():
+        cmds.append(dict(id="coll-" + c, icon="󰉏", title=f"Обои: коллекция «{nice_coll(c)}»",
+                         sub=("включена · " if c == coll else "") + "случайные обои из неё",
+                         kw=f"обои коллекция wallpaper collection {c}", coll=c,
+                         act=("sh", "-c", '"$0" collection "$1" >/dev/null && exec "$0" random', yw, c),
+                         act_label="включить", alt=("uwsm", "app", "--", "xdg-open", os.path.join(WALLS, c)),
+                         alt_label="открыть папку", on=c == coll))
+    for c in cmds:
+        c.setdefault("alt", None)
+        c.setdefault("alt_label", "")
+        c.setdefault("act_label", "выполнить")
+        c.setdefault("on", False)
+    return cmds
+
+
+# ---------- русский ввод: транслит, «не та раскладка», основа слова ----------
+_TR = dict(zip("абвгдезийклмнопрстуфхцы", "abvgdeziyklmnoprstufhcy"))
+_TR.update({"ё": "e", "ж": "zh", "ч": "ch", "ш": "sh", "щ": "sch", "ъ": "", "ь": "", "э": "e", "ю": "yu", "я": "ya"})
+_RU = "йцукенгшщзхъфывапролджэячсмитьбю"
+_EN = "qwertyuiop[]asdfghjkl;'zxcvbnm,."
+_RU_END = "аяоеёыиуюьй"
+
+
+def stem(w):
+    """Грубая основа русского слова: «обложка» → «обложк» (найдёт «Обложки»)."""
+    if len(w) >= 5 and w[-1] in _RU_END and any("а" <= c <= "я" for c in w):
+        w = w[:-1]
+        if len(w) >= 5 and w[-1] in _RU_END:
+            w = w[:-1]
+    return w
+
+
+def variants(q):
+    """Запрос + основа + транслит («вол» → «vol») + другая раскладка («ащч» → «fox», «ghbdtn» → «привет»)."""
+    out = [q, " ".join(stem(w) for w in q.split())]
+    if any(c in _TR for c in q):
+        out.append("".join(_TR.get(c, c) for c in q))
+        out.append("".join(_EN[_RU.index(c)] if c in _RU else c for c in q))
+    elif any(c in _EN for c in q):
+        out.append("".join(_RU[_EN.index(c)] if c in _EN else c for c in q))
+    return [v for i, v in enumerate(out) if v and v not in out[:i]]
+
+
+# ---------- калькулятор ----------
+_OPS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul, ast.Div: operator.truediv,
+        ast.Pow: operator.pow, ast.Mod: operator.mod, ast.FloorDiv: operator.floordiv,
+        ast.USub: operator.neg, ast.UAdd: operator.pos}
+_FN = {"sqrt": math.sqrt, "sin": math.sin, "cos": math.cos, "tan": math.tan, "log": math.log10, "ln": math.log,
+       "abs": abs, "round": round}
+_CONST = {"pi": math.pi, "e": math.e, "пи": math.pi}
+
+
+def calc(q):
+    """«2+2*3», «=2^10», «sqrt(2)». Строка результата или None (не выражение)."""
+    s = q.strip()
+    explicit = s.startswith("=")
+    s = s.lstrip("=").replace(",", ".").replace("^", "**").replace("×", "*").replace("÷", "/").replace("√", "sqrt")
+    if not s or (not explicit and not any(o in s for o in "+-*/%(")):
+        return None
+    if not explicit and not any(ch.isdigit() for ch in s):
+        return None
+
+    def ev(n):
+        if isinstance(n, ast.Expression):
+            return ev(n.body)
+        if isinstance(n, ast.Constant) and isinstance(n.value, (int, float)) and not isinstance(n.value, bool):
+            return n.value
+        if isinstance(n, ast.BinOp) and type(n.op) in _OPS:
+            a, c = ev(n.left), ev(n.right)
+            if isinstance(n.op, ast.Pow) and abs(c) > 1000:
+                raise ValueError
+            return _OPS[type(n.op)](a, c)
+        if isinstance(n, ast.UnaryOp) and type(n.op) in _OPS:
+            return _OPS[type(n.op)](ev(n.operand))
+        if isinstance(n, ast.Name) and n.id in _CONST:
+            return _CONST[n.id]
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in _FN and len(n.args) == 1:
+            return _FN[n.func.id](ev(n.args[0]))
+        raise ValueError
+    try:
+        v = ev(ast.parse(s, mode="eval"))
+    except Exception:
+        return None
+    if isinstance(v, float):
+        if v != v or v in (float("inf"), float("-inf")):
+            return None
+        v = round(v, 10)
+        if v.is_integer():
+            v = int(v)
+    return f"{v:,}".replace(",", " ") if isinstance(v, int) else f"{v:.10g}"
+
+
+# ---------- эмодзи и веб ----------
+def load_emoji():
+    out = []
+    try:
+        with open(os.path.join(DATA, "emoji.db"), encoding="utf-8") as f:
+            for line in f:
+                ch, _, rest = line.rstrip("\n").partition(" ")
+                if ch:
+                    out.append((ch, rest))
+    except OSError:
+        pass
+    return out
+
+
+RU_EMOJI = {"сердце": "heart", "кот": "cat", "кошка": "cat", "огонь": "fire", "смех": "laugh", "улыбка": "smile",
+            "звезда": "star", "солнце": "sun", "луна": "moon", "цветок": "flower", "собака": "dog", "кофе": "coffee",
+            "музыка": "music", "слёзы": "tears", "плач": "cry", "палец": "thumbs", "ок": "ok", "дом": "house"}
+
+
+def load_engines():
+    """[(icon, key, url, name, [алиасы])] — как в yumi-menu-websearch."""
+    out = []
+    for path in (os.path.join(DATA, "websearch.lst"), os.path.join(HOME, ".config/yumi/panel/websearch.lst")):
+        try:
+            lines = open(path, encoding="utf-8").read().splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            if line.startswith("#") or "|" not in line:
+                continue
+            p = [x.strip() for x in line.split("|")]
+            if len(p) >= 3:
+                out.append(dict(icon=p[0] or "󰖟", key=p[1], url=p[2], name=(p[3] if len(p) > 3 and p[3] else p[1]),
+                                alias=[a.strip().casefold() for a in (p[4] if len(p) > 4 else "").split(",") if a.strip()]
+                                + [p[1].casefold()]))
+    return out or [dict(icon="󰖟", key="google", url="https://www.google.com/search?q=%s", name="Google", alias=[])]
+
+
+# ---------- журнал запусков пульта ----------
+class History:
+    """{ключ: {n, t, title}}; ключ — «cmd:vpn», «app:kitty.desktop», «file:/путь», «emoji:🐱»."""
+
+    def __init__(self):
+        self.data = ya.load_json_dict(HISTORY)
+
+    def add(self, key, title):
+        if DRY:
+            print("[dry-run] журнал пульта:", key, "->", HISTORY, file=sys.stderr, flush=True)
+            return
+        u = ya.bump(self.data, key)
+        u["title"] = title
+        if len(self.data) > 300:                          # старые и редкие — вон
+            keep = sorted(self.data.items(), key=lambda kv: -ya.usage_boost(kv[1]))[:200]
+            self.data = dict(keep)
+        ya.save_json_dict(HISTORY, self.data)
+
+    def top(self, prefixes=None, limit=8):
+        items = [(k, u) for k, u in self.data.items() if not prefixes or k.split(":", 1)[0] in prefixes]
+        items.sort(key=lambda kv: (-ya.usage_boost(kv[1]), -kv[1].get("t", 0)))
+        return items[:limit]
+
+
+# ---------- миниатюры ----------
+def thumb_path(path):
+    """Готовая миниатюра freedesktop (~/.cache/thumbnails), если её уже сделал Dolphin/GTK."""
+    uri = Gio.File.new_for_path(path).get_uri()
+    h = hashlib.md5(uri.encode()).hexdigest()
+    for size in ("x-large", "large", "normal"):
+        p = os.path.join(HOME, ".cache/thumbnails", size, h + ".png")
+        if os.path.exists(p):
+            try:
+                if os.path.getmtime(p) >= os.path.getmtime(path) - 1:
+                    return p
+            except OSError:
+                pass
+    return None
+
+
+def load_picture_async(path, w, h, cancel, done):
+    """Картинка, уменьшенная под w×h (с сохранением пропорций), без блокировки окна → done(texture)."""
+    src = thumb_path(path) or path
+    f = Gio.File.new_for_path(src)
+
+    def on_pixbuf(_s, res):
+        try:
+            pb = GdkPixbuf.Pixbuf.new_from_stream_finish(res)
+            pb = pb.apply_embedded_orientation() or pb
+            done(Gdk.Texture.new_for_pixbuf(pb))
+        except GLib.Error:
+            pass
+
+    def on_open(_f, res):
+        try:
+            stream = f.read_finish(res)
+        except GLib.Error:
+            return
+        GdkPixbuf.Pixbuf.new_from_stream_at_scale_async(stream, w, h, True, cancel, on_pixbuf)
+    f.read_async(GLib.PRIORITY_DEFAULT, cancel, on_open)
+
+
+# ---------- CSS ----------
+CSS = """
+.yp-head-title { font-size: 14pt; }
+.yp-body { padding: 10px 14px 12px 14px; }
+.pu-entry { font-size: 13pt; padding: 10px 16px; border-radius: 18px; min-height: 26px; }
+.pu-modes .yp-seg-btn { padding: 3px 2px; border-radius: 12px; }
+.pu-modes .yp-seg-icon { font-size: 11pt; }
+.pu-modes .yp-seg-text { font-size: 7.5pt; }
+.pu-list scrollbar { background: transparent; border: none; }
+.pu-sec { font-size: 8.5pt; font-weight: 800; letter-spacing: 1px; color: alpha(@yp-fg2, 0.6); margin: 8px 8px 2px 8px; }
+.pu-row { background: transparent; border: none; box-shadow: none; border-radius: 14px; padding: 5px 10px;
+          color: @yp-fg; transition: background 120ms; }
+.pu-row:hover { background: @yp-btn; }
+.pu-row.sel { background: alpha(@yp-accent, 0.22); box-shadow: inset 0 0 0 1px alpha(@yp-accent, 0.6); }
+.pu-name { font-size: 10.5pt; }
+.pu-sub { font-size: 8.5pt; color: alpha(@yp-fg2, 0.65); }
+.pu-glyph { color: @yp-accent; font-size: 15pt; }
+.pu-emoji { font-size: 17pt; }
+.pu-badge { font-size: 8pt; color: alpha(@yp-fg2, 0.55); }
+.pu-on { font-size: 7.5pt; font-weight: 800; padding: 0 6px; border-radius: 8px; background: @yp-accent; color: @yp-on-acc; }
+.pu-key { font-size: 8pt; color: alpha(@yp-fg2, 0.6); padding: 1px 6px; border-radius: 6px; background: alpha(@yp-fg, 0.08); }
+.pu-keys { color: alpha(@yp-fg2, 0.55); font-size: 8.5pt; padding: 0 6px; }
+.pu-dry { color: @yp-accent; font-size: 8pt; font-weight: 700; letter-spacing: 1px; }
+.pu-empty { color: alpha(@yp-fg2, 0.6); font-size: 10pt; padding: 18px 8px; }
+.pu-calc { border-radius: 16px; padding: 10px 14px; background: alpha(@yp-accent, 0.14); box-shadow: inset 0 0 0 1px alpha(@yp-accent, 0.45); }
+.pu-calc.sel { background: alpha(@yp-accent, 0.26); }
+.pu-calc-expr { font-size: 10pt; color: alpha(@yp-fg2, 0.8); }
+.pu-calc-res { font-size: 22pt; font-weight: 800; color: @yp-fg; }
+.pu-prev { background: alpha(@yp-btn, 0.45); border-radius: 22px; padding: 18px; }
+.pu-prev-icon { font-size: 40pt; color: @yp-accent; }
+.pu-prev-title { font-size: 14pt; font-weight: 800; }
+.pu-prev-sub { font-size: 9.5pt; color: alpha(@yp-fg2, 0.8); }
+.pu-prev-res { font-size: 30pt; font-weight: 800; color: @yp-fg; }
+.pu-prev-k { font-size: 8.5pt; color: alpha(@yp-fg2, 0.6); }
+.pu-prev-v { font-size: 9pt; color: @yp-fg; }
+.pu-prev-img { border-radius: 14px; background: alpha(@yp-fg, 0.06); }
+.pu-prev-text { font-family: monospace; font-size: 8pt; color: alpha(@yp-fg, 0.85); padding: 8px 10px;
+                border-radius: 12px; background: alpha(black, 0.22); }
+.pu-prev-list { font-size: 8.5pt; color: alpha(@yp-fg2, 0.8); }
+.pu-doc-row { font-size: 9pt; }
+.pu-doc-ok { color: alpha(@yp-fg2, 0.7); }
+.pu-doc-warn { color: #f5c26b; }
+.pu-doc-fail { color: #ff7b7b; }
+.pu-doc-info { color: alpha(@yp-fg2, 0.9); }
+.pu-doc-big { font-size: 12pt; font-weight: 800; }
+.pu-act { font-size: 9.5pt; padding: 7px 12px; border-radius: 14px; }
+"""
+DOC_ICON = {"ok": "󰄬", "warn": "󰀪", "fail": "󰅚", "info": "󰋼", "run": "󰔟"}
+
+
+# ---------- пульт ----------
+class Pult:
+    def __init__(self, panel, body):
+        self.panel, self.k = panel, panel.k
+        panel.add_css(CSS)
+        t0 = time.monotonic()
+        with ThreadPoolExecutor(1) as ex:                 # состояния (процессы) — пока читаются .desktop
+            fut = ex.submit(read_states)
+            self.apps = ya.load_apps()
+            self.st = fut.result()
+        self.app_by_id = {a["id"]: a for a in self.apps}
+        self.usage = ya.load_usage()
+        self.hist = History()
+        self.cmds = yumi_commands(self.st)
+        self.cmd_by_id = {c["id"]: c for c in self.cmds}
+        self.recent = None                                # недавние файлы (xbel) — при первом пустом вводе
+        self.emoji = None
+        self.engines = load_engines()
+        self.load_ms = int((time.monotonic() - t0) * 1000)
+        self.theme = Gtk.IconTheme.get_for_display(Gdk.Display.get_default())
+        self.mode = "all"
+        self.items, self.sel = [], 0
+        self.moved = False                                # выбор двигали стрелками — дозагрузка его не сбивает
+        self.fd = dict(gen=0, proc=None, cancel=None, timer=0, q="", files=[], busy=False, more=False)
+        self.prev_cancel = None
+        self.doc = dict(rep=None, running=False)
+        self.typed_at = 0
+
+        if os.environ.get("YP_KEYBOARD") != "none":
+            Layer.set_keyboard_mode(panel, Layer.KeyboardMode.EXCLUSIVE)
+        panel.title_l.set_label("󰘳  Пульт")
+        self.build(body)
+        prev = getattr(panel, "on_key_hook", None)
+        panel.on_key_hook = lambda kv: self.on_key(kv) or (prev and prev(kv))
+        panel.app.connect("shutdown", lambda *_: self.stop_fd())
+        if os.environ.get("YP_SEARCH"):
+            self.search.set_text(os.environ["YP_SEARCH"])
+        self.render()
+        GLib.timeout_add(80, lambda: self.search.grab_focus() and False)
+        self.setup_debug()
+
+    def px(self, v):
+        return round(v * self.k)
+
+    # ---------- окно ----------
+    def build(self, body):
+        self.search = Gtk.SearchEntry(hexpand=True, css_classes=["yp-entry", "pu-entry"])
+        # «changed» сразу, а не «search-changed» (у SearchEntry задержка 150 мс): список строится за 2–15 мс
+        self.search.connect("changed", lambda *_: self.on_changed())
+        self.search.set_key_capture_widget(self.panel)
+
+        self.list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        self.scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, css_classes=["pu-list"],
+                                         min_content_height=self.px(LIST_H), max_content_height=self.px(LIST_H))
+        self.scroll.set_child(self.list)
+
+        left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        left.set_size_request(self.px(LEFT_W), -1)
+        left.append(self.search)
+        self.seg = yp.Segmented([(k, i, t, True) for k, i, t in MODES], self.mode, self.set_mode)
+        self.seg.add_css_class("pu-modes")
+        for btn in self.seg.btns.values():
+            btn.set_focusable(False)
+        left.append(self.seg)
+        left.append(self.scroll)
+
+        # предпросмотр: постоянный размер — содержимое в прокрутке без полос (EXTERNAL не передаёт размер
+        # наружу), кнопки снизу. Высоту задаёт левая колонка (Box растягивает обе колонки одинаково)
+        self.prev = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, css_classes=["pu-prev"])
+        self.prev.set_overflow(Gtk.Overflow.HIDDEN)
+        self.prev.set_size_request(self.px(PREV_W), self.px(200))
+        self.prev.set_hexpand(False)
+        self.prev_body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        sw = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.EXTERNAL, vscrollbar_policy=Gtk.PolicyType.EXTERNAL,
+                                vexpand=True)
+        sw.set_child(self.prev_body)
+        self.prev_scroll = sw
+        self.prev_btns = Gtk.Box(spacing=8, homogeneous=True)
+        self.prev.append(sw)
+        self.prev.append(self.prev_btns)
+
+        cols = Gtk.Box(spacing=14)
+        cols.append(left)
+        cols.append(self.prev)
+        body.append(cols)
+
+        foot = Gtk.Box(spacing=8)
+        self.keys_l = Gtk.Label(xalign=0, css_classes=["pu-keys"], ellipsize=Pango.EllipsizeMode.END,
+                                max_width_chars=1, hexpand=True)
+        foot.append(self.keys_l)
+        if DRY:
+            foot.append(Gtk.Label(label="ПРОВЕРКА", css_classes=["pu-dry"]))
+        body.append(foot)
+
+    # ---------- клавиши ----------
+    def alt_held(self):
+        try:
+            st = Gdk.Display.get_default().get_default_seat().get_keyboard().get_modifier_state()
+            return bool(st & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK))
+        except Exception:
+            return False
+
+    def on_key(self, keyval):
+        name = Gdk.keyval_name(keyval) or ""
+        if name == "Escape" and self.search.get_text():
+            self.search.set_text("")
+            return True
+        if name in ("Tab", "ISO_Left_Tab"):
+            keys = [m[0] for m in MODES]
+            i = keys.index(self.mode) + (-1 if name == "ISO_Left_Tab" else 1)
+            self.set_mode(keys[i % len(keys)])
+            return True
+        step = {"Down": 1, "Up": -1, "Page_Down": 8, "Page_Up": -8, "KP_Down": 1, "KP_Up": -1}.get(name)
+        if step:
+            if self.items:
+                self.moved = True
+                self.select(min(max(self.sel + step, 0), len(self.items) - 1))
+            return True
+        if name in ("Return", "KP_Enter", "ISO_Enter"):
+            self.activate(self.sel, self.alt_held())
+            return True
+        return False
+
+    def set_mode(self, mode):
+        self.mode = mode
+        self.seg.set_active(mode)
+        self.on_changed()
+        self.search.grab_focus()
+
+    # ---------- запрос ----------
+    def query(self):
+        """(режим, текст): префиксы «:» эмодзи, «?» веб, «=» счёт."""
+        s = self.search.get_text().strip()
+        if s.startswith(":"):
+            return "emoji", s[1:].strip()
+        if s.startswith("?"):
+            return "web", s[1:].strip()
+        return self.mode, s
+
+    def on_changed(self):
+        self.typed_at = time.monotonic()
+        self.moved = False
+        self.schedule_fd()
+        self.render()
+
+    # ---------- поиск файлов (fd в фоне) ----------
+    def fd_words(self):
+        mode, q = self.query()
+        words = [stem(w) for w in q.casefold().split()]
+        if mode not in ("all", "files") or not words or calc(q) is not None or len(q) < FD_MIN[mode]:
+            return mode, None
+        return mode, words
+
+    def schedule_fd(self):
+        f = self.fd
+        _mode, words = self.fd_words()
+        key = " ".join(words or [])
+        if key == f["q"]:                        # тот же поиск («обложк» → «обложка») — не перезапускать
+            return
+        if f["timer"]:
+            GLib.source_remove(f["timer"])
+            f["timer"] = 0
+        self.stop_fd()
+        # прошлые найденные файлы не сбрасываем: пока fd ищет, они фильтруются новым запросом (список не мигает)
+        f.update(q=key, more=False)
+        if not words:
+            f["files"] = []
+        else:
+            f["busy"] = True                     # «ищу…» сразу, сам fd — после паузы в наборе
+            f["timer"] = GLib.timeout_add(160, self.start_fd, words)
+
+    def stop_fd(self):
+        f = self.fd
+        if f["cancel"]:
+            f["cancel"].cancel()
+        if f["proc"]:
+            try:
+                f["proc"].force_exit()
+            except Exception:
+                pass
+        f.update(proc=None, cancel=None, busy=False)
+
+    def start_fd(self, words):
+        f = self.fd
+        f["timer"] = 0
+        f["gen"] += 1
+        gen = f["gen"]
+        word = max(words, key=len)                 # fd ищет по самому длинному слову, остальные — фильтр
+        cmd = [FD, "--color=never", "--ignore-case", "--fixed-strings", "--hidden", "--no-ignore-vcs",
+               "--absolute-path", "--max-results", str(FD_LIMIT)]
+        for d in FD_EXCLUDE:
+            cmd += ["--exclude", d]
+        cmd += ["--", word, HOME]
+        try:
+            proc = Gio.Subprocess.new(cmd, Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE)
+        except GLib.Error as e:
+            f["busy"] = False
+            self.panel.toast(f"fd не запустился: {e.message}", error=True, hold=4)
+            return False
+        f.update(proc=proc, cancel=Gio.Cancellable(), t=time.monotonic())
+        proc.communicate_utf8_async(None, f["cancel"], self.on_fd_done, (gen, words))
+        return False
+
+    def on_fd_done(self, proc, res, data):
+        gen, words = data
+        try:
+            _ok, out, _err = proc.communicate_utf8_finish(res)
+        except GLib.Error:
+            return                                 # отменён: новый запрос или закрытие
+        f = self.fd
+        if gen != f["gen"]:
+            return
+        paths = [p.rstrip("/") for p in (out or "").split("\n") if p and p.rstrip("/") != HOME]
+        scored = []
+        for p in paths:
+            s = ya.file_score(p, words)
+            if s is None:
+                continue
+            if "/." in p[len(HOME):]:              # скрытые папки — ниже обычных
+                s -= 40
+            scored.append((s, p))
+        scored.sort(key=lambda x: (-x[0], x[1]))
+        f.update(files=[p for _s, p in scored], more=len(paths) >= FD_LIMIT, busy=False, proc=None, cancel=None,
+                 ms=int((time.monotonic() - f["t"]) * 1000))
+        if os.environ.get("YP_TIMING"):
+            print(f"[timing] fd «{' '.join(words)}»: {len(paths)} путей за {f['ms']} мс", file=sys.stderr, flush=True)
+        self.render(keep=True)
+
+    # ---------- результаты ----------
+    def results(self):
+        """[(раздел, [item])]."""
+        mode, q = self.query()
+        ql = " ".join(q.casefold().split())
+        lim = LIMITS.get(mode, {})
+        out = []
+        res = calc(q) if mode == "all" else None
+        if res is not None:
+            out.append(("КАЛЬКУЛЯТОР", [dict(kind="calc", icon="󰃬", title=res, sub=q.lstrip("= "), key="calc",
+                                              act=("wl-copy", res.replace(" ", "")), act_label="скопировать",
+                                              alt=None, alt_label="")]))
+        if mode == "emoji":
+            return out + [("ЭМОДЗИ", self.emoji_items(ql))]
+        if mode == "web":
+            return out + [("ВЕБ-ПОИСК", self.web_items(q, all_engines=True))]
+        if not ql:
+            return out + self.recents(mode)
+        vs = variants(ql)
+        floor = 12 * len(ql.split()) if mode == "all" else 0      # в «Всё» — без букв вразброс («neon» ≠ OBS)
+        if "cmds" in lim:
+            hits = sorted(((s, c) for c in self.cmds if (s := self.cmd_score(c, vs)) > floor), key=lambda x: -x[0])
+            items = [self.cmd_item(c) for s, c in self.strong(hits, mode)][:lim["cmds"]]
+            if items:
+                out.append(("КОМАНДЫ YUMI", items))
+        if "apps" in lim:
+            sc = []
+            for a in self.apps:
+                s = max(ya.app_score(a, v) * (1 if i == 0 else 0.85) for i, v in enumerate(vs))
+                if s > floor:
+                    sc.append((s + ya.usage_boost(self.usage.get(a["id"])) * 0.5, a))
+            sc.sort(key=lambda x: (-x[0], x[1]["name"].casefold()))
+            items = [self.app_item(a) for _s, a in self.strong(sc, mode)[:lim["apps"]]]
+            if items:
+                out.append(("ПРОГРАММЫ", items))
+        if "files" in lim and res is None:
+            words = [stem(w) for w in ql.split()]
+            files = [p for p in self.fd["files"] if ya.file_score(p, words) is not None]
+            items = [self.file_item(p) for p in files[:lim["files"]]]
+            if items:
+                n = len(files)
+                out.append((f"ФАЙЛЫ · {n}{'+' if self.fd['more'] else ''}" if mode == "all" else "ФАЙЛЫ", items))
+        if mode == "all":
+            out.append(("ВЕБ", self.web_items(q)[:1]))
+        return out
+
+    @staticmethod
+    def strong(scored, mode):
+        """Без нулевых; в «Всё» ещё и без случайных совпадений букв вразброс (< 40 % лучшего в разделе)."""
+        scored = [x for x in scored if x[0] > 0]
+        if mode == "all" and scored:
+            best = scored[0][0]
+            scored = [x for x in scored if x[0] >= best * 0.4]
+        return scored
+
+    def cmd_score(self, c, vs):
+        return max(self._cmd_score(c, v) * (1 if i == 0 else 0.85) for i, v in enumerate(vs))
+
+    @staticmethod
+    def _cmd_score(c, ql):
+        total = 0
+        for w in ql.split():
+            best = max(ya.fuzzy(w, c["title"].casefold()),
+                       max((ya.fuzzy(w, k) for k in c["kw"].casefold().split()), default=0) * 0.9)
+            if best <= 0:
+                return 0
+            total += best
+        return total
+
+    def recents(self, mode):
+        out, seen = [], set()
+        kinds = {"all": ("cmd", "app", "file", "emoji"), "cmds": ("cmd",), "apps": ("app",),
+                 "files": ("file",)}.get(mode, ())
+        rec = []
+        for key, u in self.hist.top(kinds, limit=5 if mode == "all" else 10):
+            it = self.item_from_key(key)
+            if it:
+                it["badge"] = ago(u.get("t", 0)) + (f" · ×{u['n']}" if u.get("n", 0) > 1 else "")
+                rec.append(it)
+                seen.add(key)
+        if rec:
+            out.append(("НЕДАВНИЕ", rec))
+        elif mode in ("all", "cmds"):
+            out.append(("КОМАНДЫ YUMI", [self.cmd_item(self.cmd_by_id[i]) for i in
+                                         ("wall-next", "vpn", "caf", "doctor") if i in self.cmd_by_id]))
+            seen |= {"cmd:" + i for i in ("wall-next", "vpn", "caf", "doctor")}
+        if mode in ("all", "apps"):
+            used = sorted((a for a in self.apps if self.usage.get(a["id"]) and "app:" + a["id"] not in seen),
+                          key=lambda a: -ya.usage_boost(self.usage.get(a["id"])))
+            fav = used[:5 if mode == "all" else 12]
+            if fav:
+                out.append(("ЧАСТО", [self.app_item(a, badge=f"×{self.usage[a['id']]['n']}") for a in fav]))
+            if mode == "apps":
+                out.append(("ВСЕ ПРОГРАММЫ", [self.app_item(a) for a in self.apps]))
+        if mode in ("all", "files"):
+            if self.recent is None:
+                self.recent = ya.recent_files(40)
+            files = [p for p in self.recent if "file:" + p not in seen][:4 if mode == "all" else 40]
+            if files:
+                out.append(("НЕДАВНИЕ ФАЙЛЫ", [self.file_item(p) for p in files]))
+            elif mode == "files":
+                out.append(("ФАЙЛЫ", []))
+        if mode == "cmds":
+            out.append(("ВСЕ КОМАНДЫ", [self.cmd_item(c) for c in self.cmds]))
+        return [s for s in out if s[1] or s[0] == "ФАЙЛЫ"]
+
+    def item_from_key(self, key):
+        kind, _, val = key.partition(":")
+        if kind == "cmd" and val in self.cmd_by_id:
+            return self.cmd_item(self.cmd_by_id[val])
+        if kind == "app" and val in self.app_by_id:
+            return self.app_item(self.app_by_id[val])
+        if kind == "file" and os.path.exists(val):
+            return self.file_item(val)
+        if kind == "emoji" and val:
+            return self.emoji_item(val, self.hist.data.get(key, {}).get("title", ""))
+        return None
+
+    # ---------- строки ----------
+    def cmd_item(self, c, badge=""):
+        return dict(kind="cmd", key="cmd:" + c["id"], icon=c["icon"], title=c["title"], sub=c["sub"], act=c["act"],
+                    act_label=c["act_label"], alt=c["alt"], alt_label=c["alt_label"], on=c["on"], badge=badge, cmd=c)
+
+    def app_item(self, a, badge=""):
+        sub = next((t for t in (a["generic"], a["comment"]) if t and t.casefold() != a["name"].casefold()), "")
+        return dict(kind="app", key="app:" + a["id"], gicon=a["icon"], title=a["name"], sub=sub,
+                    act=("uwsm", "app", "--", a["id"]), act_label="запустить", alt=None, alt_label="",
+                    badge=badge or ("flatpak" if a["flatpak"] else ""), app=a)
+
+    def file_item(self, p):
+        return dict(kind="file", key="file:" + p, path=p, title=os.path.basename(p) + ("/" if os.path.isdir(p) else ""),
+                    sub=ya.short(os.path.dirname(p)), act=("uwsm", "app", "--", "xdg-open", p), act_label="открыть",
+                    alt=("uwsm", "app", "--", "dolphin", "--select", p), alt_label="показать в Dolphin")
+
+    def emoji_item(self, ch, name):
+        return dict(kind="emoji", key="emoji:" + ch, emoji=ch, title=name[:48] or ch, sub="",
+                    act=("wl-copy", ch), act_label="скопировать", alt=("wtype", "--", ch), alt_label="вставить")
+
+    def emoji_items(self, ql):
+        if self.emoji is None:
+            self.emoji = load_emoji()
+        words = [RU_EMOJI.get(w, w) for w in ql.split()]
+
+        def rank(name):          # слово целиком / с начала слова — выше, чем кусок внутри («cat» ≠ «intoxicated»)
+            toks = name.casefold().split()
+            sc = 0
+            for w in words:
+                if w in toks:
+                    sc += 3
+                elif any(t.startswith(w) for t in toks):
+                    sc += 2
+                elif w in name.casefold():
+                    sc += 1
+                else:
+                    return 0
+            return sc
+        if words:
+            ranked = sorted(((rank(n), -i, ch, n) for i, (ch, n) in enumerate(self.emoji)), reverse=True)
+            hits = [(ch, n) for r, _i, ch, n in ranked if r]
+        else:
+            hits = self.emoji
+        return [self.emoji_item(ch, name) for ch, name in hits[:60]]
+
+    def web_items(self, q, all_engines=False):
+        engines = self.engines if all_engines else self.engines[:1]
+        first, _, rest = q.partition(" ")
+        pick = next((e for e in self.engines if rest.strip() and first.casefold() in e["alias"]), None)
+        if pick:                                         # «?aw hyprland» — сразу Arch Wiki
+            q = rest.strip()
+            engines = [pick] + [e for e in engines if e is not pick]
+        out = []
+        for e in engines:
+            url = e["url"].replace("%s", urllib.parse.quote_plus(q))
+            out.append(dict(kind="web", key="web:" + e["key"], icon=e["icon"],
+                            title=f"Искать «{q}» — {e['name']}" if q else e["name"],
+                            sub=urllib.parse.urlsplit(e["url"]).netloc, act=("uwsm", "app", "--", "xdg-open", url),
+                            act_label="открыть в браузере", alt=None, alt_label="", url=url))
+        return out
+
+    def app_img(self, name, size):
+        img = None
+        if name and os.path.isabs(name):
+            if os.path.exists(name):
+                img = Gtk.Image.new_from_gicon(Gio.FileIcon.new(Gio.File.new_for_path(name)))
+        elif name:
+            for n in (name, name.rsplit(".", 1)[0] if name.endswith((".png", ".svg", ".xpm")) else None):
+                if n and self.theme.has_icon(n):
+                    img = Gtk.Image.new_from_icon_name(n)
+                    break
+        if img is None:
+            img = Gtk.Image.new_from_icon_name("application-x-executable")
+        img.set_pixel_size(self.px(size))
+        return img
+
+    def icon_widget(self, it, size=28):
+        if it["kind"] == "app":
+            return self.app_img(it["gicon"], size)
+        if it["kind"] == "file":
+            img = Gtk.Image.new_from_gicon(ya.file_gicon(it["path"], os.path.isdir(it["path"])))
+            img.set_pixel_size(self.px(size - 2))
+            return img
+        if it["kind"] == "emoji":
+            return Gtk.Label(label=it["emoji"], css_classes=["pu-emoji"])
+        return Gtk.Label(label=it["icon"], css_classes=["pu-glyph"])
+
+    # ---------- список ----------
+    def render(self, keep=False):
+        """keep=True — дозагрузка (найдены файлы): выбор, сдвинутый стрелками, остаётся на той же строке."""
+        t0 = time.monotonic()
+        old_key = (self.items[self.sel][1].get("key") if keep and self.moved and self.sel < len(self.items)
+                   else None)
+        while (c := self.list.get_first_child()):
+            self.list.remove(c)
+        self.items, self.sel = [], 0
+        mode, q = self.query()
+        self.search.set_placeholder_text(MODE_PH[self.mode])
+        secs = self.results()
+        for title, items in secs:
+            self.list.append(Gtk.Label(label=title, xalign=0, css_classes=["pu-sec"]))
+            for it in items:
+                self.add_row(it)
+            if title == "ФАЙЛЫ" and not items:
+                self.list.append(Gtk.Label(label="Ищу…" if self.fd["busy"] else
+                                           "Введите часть имени — поиск по домашней папке" if not q else
+                                           "Файлов не найдено", xalign=0, css_classes=["pu-empty"]))
+        if not self.items and not any(t == "ФАЙЛЫ" for t, _ in secs):
+            self.list.append(Gtk.Label(label="Ищу…" if self.fd["busy"] else "Ничего не найдено",
+                                       xalign=0, css_classes=["pu-empty"]))
+        n = len(self.items)
+        if q:
+            sub = f"Найдено: {n}" + (" · ищу файлы…" if self.fd["busy"] else
+                                     f" · файлы за {self.fd['ms']} мс" if self.fd["files"] and "ms" in self.fd else "")
+        else:
+            sub = f"{len(self.apps)} программ · {len(self.cmds)} команд · {self.load_ms} мс"
+        self.panel.set_subtitle(sub, live=True)
+        idx = next((i for i, (_b, it) in enumerate(self.items) if it.get("key") == old_key), None) if old_key else None
+        if idx is None:
+            self.scroll.get_vadjustment().set_value(0)
+        want = os.environ.get("YP_SELECT")
+        if want and not self.moved:
+            idx = next((i for i, (_b, it) in enumerate(self.items) if it["kind"] == want), idx)
+        if self.items:
+            self.select(idx or 0)
+        else:
+            self.update_keys(None)
+            self.update_preview(None)
+        self.render_ms = (time.monotonic() - t0) * 1000
+
+    def add_row(self, it):
+        idx = len(self.items)
+        if it["kind"] == "calc":
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+            line = Gtk.Box(spacing=10)
+            line.append(Gtk.Label(label="=", css_classes=["pu-calc-res"]))
+            line.append(Gtk.Label(label=it["title"], xalign=0, hexpand=True, css_classes=["pu-calc-res"],
+                                  ellipsize=Pango.EllipsizeMode.END, max_width_chars=1))
+            line.append(Gtk.Label(label="Enter — скопировать", css_classes=["pu-key"], valign=Gtk.Align.CENTER))
+            box.append(Gtk.Label(label=it["sub"], xalign=0, css_classes=["pu-calc-expr"],
+                                 ellipsize=Pango.EllipsizeMode.END, max_width_chars=1))
+            box.append(line)
+            btn = Gtk.Button(child=box, focusable=False, css_classes=["pu-row", "pu-calc"])
+        else:
+            box = Gtk.Box(spacing=12)
+            ic = Gtk.Box(halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
+            ic.set_size_request(self.px(30), -1)
+            w = self.icon_widget(it, 28)
+            w.set_halign(Gtk.Align.CENTER)
+            ic.append(w)
+            box.append(ic)
+            col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True, valign=Gtk.Align.CENTER)
+            col.append(Gtk.Label(label=it["title"], xalign=0, css_classes=["pu-name"],
+                                 ellipsize=Pango.EllipsizeMode.END, max_width_chars=1))
+            if it["sub"]:
+                col.append(Gtk.Label(label=it["sub"], xalign=0, css_classes=["pu-sub"],
+                                     ellipsize=Pango.EllipsizeMode.MIDDLE, max_width_chars=1))
+            box.append(col)
+            if it.get("on"):
+                box.append(Gtk.Label(label="вкл", css_classes=["pu-on"], valign=Gtk.Align.CENTER))
+            if it.get("badge"):
+                box.append(Gtk.Label(label=it["badge"], css_classes=["pu-badge"], valign=Gtk.Align.CENTER))
+            btn = Gtk.Button(child=box, focusable=False, css_classes=["pu-row"])
+        btn.connect("clicked", lambda *_: self.activate(idx, self.alt_held()))
+        self.items.append((btn, it))
+        self.list.append(btn)
+
+    def select(self, i):
+        if self.items and self.sel < len(self.items):
+            self.items[self.sel][0].remove_css_class("sel")
+        self.sel = i
+        btn, it = self.items[i]
+        btn.add_css_class("sel")
+        GLib.idle_add(self.scroll_to, btn)
+        self.update_keys(it)
+        self.update_preview(it)
+
+    def scroll_to(self, btn):
+        ok, bb = btn.compute_bounds(self.list)
+        if ok:
+            adj = self.scroll.get_vadjustment()
+            y, h, top, page = bb.get_y(), bb.get_height(), adj.get_value(), adj.get_page_size()
+            if y < top:
+                adj.set_value(max(0, y - self.px(24)))      # с заголовком раздела над строкой
+            elif y + h > top + page:
+                adj.set_value(y + h - page)
+        return False
+
+    def update_keys(self, it):
+        if it is None:
+            self.keys_l.set_label("Tab — режим · : эмодзи · ? веб · = счёт · Esc — закрыть")
+            return
+        s = f"↵ {it['act_label']}"
+        if it.get("alt"):
+            s += f" · Ctrl+↵ {it['alt_label']}"
+        self.keys_l.set_label(s + " · ↑↓ выбор · Tab режим · Esc закрыть")
+
+    # ---------- предпросмотр ----------
+    def lab(self, text, cls, **kw):
+        return Gtk.Label(label=text, xalign=0, css_classes=[cls], wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR,
+                         max_width_chars=1, **kw)
+
+    def update_preview(self, it):
+        if self.prev_cancel:
+            self.prev_cancel.cancel()                 # картинка прошлой строки ещё грузится — не нужна
+        self.prev_cancel = Gio.Cancellable()
+        for box in (self.prev_body, self.prev_btns):
+            while (c := box.get_first_child()):
+                box.remove(c)
+        self.prev_scroll.get_vadjustment().set_value(0)
+        P = self.prev_body
+        if it is None:
+            P.append(self.lab("Ничего не выбрано", "pu-prev-sub"))
+            return
+        kind = it["kind"]
+        if kind == "calc":
+            P.append(Gtk.Label(label="󰃬", xalign=0, css_classes=["pu-prev-icon"]))
+            P.append(self.lab(it["sub"], "pu-prev-sub"))
+            P.append(self.lab("= " + it["title"], "pu-prev-res"))
+            try:
+                v = float(it["title"].replace(" ", ""))
+                rows = [("Округлено", f"{round(v, 2):g}")]
+                if v.is_integer() and abs(v) < 1 << 53:
+                    rows += [("Шестн.", hex(int(v))), ("Двоичн.", bin(int(v)) if abs(v) < 1 << 32 else "—")]
+                self.details(rows)
+            except ValueError:
+                pass
+        elif kind == "file":
+            self.preview_file(it)
+        elif kind == "cmd" and it["cmd"].get("coll"):
+            self.preview_collection(it)
+        elif kind == "cmd" and it["cmd"]["id"] == "doctor":
+            self.preview_doctor(it)
+        else:
+            head = Gtk.Box(halign=Gtk.Align.START)
+            if kind == "app":
+                head.append(self.icon_widget(it, 64))
+            elif kind == "emoji":
+                head.append(Gtk.Label(label=it["emoji"], css_classes=["pu-prev-res"]))
+            else:
+                head.append(Gtk.Label(label=it["icon"], css_classes=["pu-prev-icon"]))
+            P.append(head)
+            P.append(self.lab(it["title"], "pu-prev-title"))
+            if it["sub"]:
+                P.append(self.lab(it["sub"], "pu-prev-sub"))
+            self.details(self.detail_rows(it))
+        self.act_btn(f"↵ {cap(it['act_label'])}", False, "primary")
+        if it.get("alt"):
+            self.act_btn(f"Ctrl+↵ {it['alt_label']}", True, "plain")
+
+    def act_btn(self, text, alt, kind):
+        bt = Gtk.Button(child=Gtk.Label(label=text, ellipsize=Pango.EllipsizeMode.END, max_width_chars=1),
+                        focusable=False, css_classes=["yp-action", kind, "pu-act"], tooltip_text=text)
+        bt.connect("clicked", lambda *_: self.activate(self.sel, alt))
+        self.prev_btns.append(bt)
+
+    def details(self, rows):
+        if not rows:
+            return
+        g = Gtk.Grid(column_spacing=12, row_spacing=5)
+        for r, (k, v) in enumerate(rows):
+            g.attach(Gtk.Label(label=k, xalign=0, valign=Gtk.Align.START, css_classes=["pu-prev-k"]), 0, r, 1, 1)
+            g.attach(Gtk.Label(label=v or "—", xalign=0, hexpand=True, wrap=True, max_width_chars=1,
+                               wrap_mode=Pango.WrapMode.WORD_CHAR, css_classes=["pu-prev-v"]), 1, r, 1, 1)
+        self.prev_body.append(g)
+
+    def detail_rows(self, it):
+        kind = it["kind"]
+        if kind == "app":
+            a = it["app"]
+            u = self.usage.get(a["id"])
+            return [("Файл", a["id"]), ("Команда", a["exec"] or "—"),
+                    ("Запусков", f"{u['n']} · последний {ago(u.get('t', 0))}" if u else "0"),
+                    ("Ключи", ", ".join(a["keywords"][:5]) or "—")]
+        if kind == "cmd":
+            c = it["cmd"]
+            rows = [("Выполнит", " ".join(os.path.basename(x) if i == 0 else x for i, x in enumerate(c["act"])))]
+            if c["id"].startswith("wf"):
+                rows.append(("Режим сейчас", self.st["wf"]))
+            if c["id"].startswith("wall"):
+                rows.append(("Коллекция", self.st["coll"] or "все"))
+                rows.append(("Обои", os.path.basename(self.st["wall"])))
+            if c["on"]:
+                rows.append(("Состояние", "включено"))
+            u = self.hist.data.get(it["key"])
+            if u:
+                rows.append(("Из пульта", f"{u['n']} раз · последний {ago(u.get('t', 0))}"))
+            return rows
+        if kind == "emoji":
+            return [("Код", " ".join(f"U+{ord(ch):04X}" for ch in it["emoji"]))]
+        if kind == "web":
+            return [("Адрес", it["url"])]
+        return []
+
+    def picture(self, path, w, h):
+        """Место под картинку постоянного размера; сама картинка подгружается в фоне."""
+        frame = Gtk.Overlay(css_classes=["pu-prev-img"], halign=Gtk.Align.START)
+        frame.set_overflow(Gtk.Overflow.HIDDEN)
+        sizer = Gtk.Box()                       # размер задаёт пустая коробка; картинка его не меняет
+        sizer.set_size_request(w, h)
+        frame.set_child(sizer)
+        pic = Gtk.Picture(can_shrink=True, content_fit=Gtk.ContentFit.COVER)
+        frame.add_overlay(pic)
+        frame.set_measure_overlay(pic, False)
+        scale = max(2, self.panel.get_scale_factor())
+        load_picture_async(path, w * scale, h * scale, self.prev_cancel, pic.set_paintable)
+        return frame
+
+    def preview_file(self, it):
+        P, p = self.prev_body, it["path"]
+        is_dir = os.path.isdir(p)
+        ctype = "inode/directory" if is_dir else Gio.content_type_guess(p, None)[0]
+        w = self.px(PREV_W - 36)
+        is_img = not is_dir and (ctype.startswith("image/") or p.lower().endswith(EXT_IMG))
+        if is_img:
+            P.append(self.picture(p, w, self.px(IMG_H)))
+        else:
+            img = Gtk.Image.new_from_gicon(ya.file_gicon(p, is_dir))
+            img.set_pixel_size(self.px(64))
+            img.set_halign(Gtk.Align.START)
+            P.append(img)
+        P.append(self.lab(it["title"], "pu-prev-title"))
+        rows = [("Папка", ya.short(os.path.dirname(p))),
+                ("Тип", "папка" if is_dir else Gio.content_type_get_description(ctype))]
+        try:
+            stt = os.stat(p)
+            when = time.strftime("%d.%m.%Y %H:%M", time.localtime(stt.st_mtime))
+        except OSError:
+            stt, when = None, "—"
+        if is_dir:
+            nf = nd = 0
+            names = []
+            try:
+                with os.scandir(p) as itr:
+                    for i, e in enumerate(itr):
+                        if i >= 5000:
+                            break
+                        if e.name.startswith("."):
+                            continue
+                        if e.is_dir(follow_symlinks=False):
+                            nd += 1
+                        else:
+                            nf += 1
+                        if len(names) < 8:
+                            names.append(e.name + ("/" if e.is_dir(follow_symlinks=False) else ""))
+            except OSError:
+                pass
+            rows.append(("Внутри", f"{nf} {plural(nf, 'файл', 'файла', 'файлов')}, "
+                                   f"{nd} {plural(nd, 'папка', 'папки', 'папок')}"))
+        elif stt:
+            sz = stt.st_size
+            rows.append(("Размер", f"{sz} Б" if sz < 1024 else f"{sz / 1024:.1f} КБ" if sz < 1 << 20
+                         else f"{sz / (1 << 20):.1f} МБ"))
+            if is_img:
+                info = GdkPixbuf.Pixbuf.get_file_info(p)
+                if info and info[0]:
+                    rows.append(("Картинка", f"{info[1]}×{info[2]}"))
+        rows.append(("Изменён", when))
+        self.details(rows)
+        if is_dir and names:
+            P.append(self.lab("\n".join(sorted(names, key=str.casefold)) + ("\n…" if nf + nd > len(names) else ""),
+                              "pu-prev-list"))
+        elif not is_dir and stt and stt.st_size < 50 << 20 and (Gio.content_type_is_a(ctype, "text/plain")
+                                                                or ctype in ("application/json", "application/x-shellscript")):
+            try:
+                with open(p, "rb") as f:
+                    raw = f.read(3000)
+                if b"\0" not in raw:
+                    lines = raw.decode("utf-8", "replace").expandtabs(4).split("\n")[:14]
+                    txt = Gtk.Label(label="\n".join(l[:200] for l in lines), xalign=0, yalign=0,
+                                    css_classes=["pu-prev-text"], wrap=True, wrap_mode=Pango.WrapMode.CHAR,
+                                    max_width_chars=1, selectable=False)
+                    P.append(txt)
+            except OSError:
+                pass
+
+    def preview_collection(self, it):
+        P, c = self.prev_body, it["cmd"]["coll"]
+        folder = os.path.join(WALLS, c)
+        walls = coll_walls(c)
+        pv = os.path.join(folder, ".preview.jpg")
+        src = pv if os.path.exists(pv) else (walls[0] if walls else "")
+        if src:
+            P.append(self.picture(src, self.px(PREV_W - 36), self.px(IMG_H)))
+        P.append(self.lab(nice_coll(c), "pu-prev-title"))
+        P.append(self.lab("Включена: следующие/случайные обои — только из неё" if c == self.st["coll"] else
+                          "Enter — включить коллекцию и поставить случайные обои из неё", "pu-prev-sub"))
+        rows = [("Обоев", str(len(walls))), ("Папка", ya.short(folder))]
+        if self.st["wall_coll"] == c:
+            rows.append(("Сейчас", os.path.basename(self.st["wall"])))
+        rows.append(("Коллекция", self.st["coll"] or "все (выключена)"))
+        self.details(rows)
+
+    # ---------- доктор ----------
+    def preview_doctor(self, it):
+        P = self.prev_body
+        P.append(Gtk.Label(label=it["icon"], xalign=0, css_classes=["pu-prev-icon"]))
+        P.append(self.lab(it["title"], "pu-prev-title"))
+        rep = self.doc["rep"]
+        if rep is None:
+            try:
+                with open(DOCTOR_CACHE) as f:
+                    rep = self.doc["rep"] = json.load(f)
+            except (OSError, ValueError):
+                rep = None
+        fresh = rep and time.time() - rep.get("time", 0) < DOCTOR_FRESH
+        if not fresh and not self.doc["running"]:
+            self.run_doctor()
+        if not rep:
+            P.append(self.lab("Проверяю… (yumi-doctor --json, несколько секунд)", "pu-prev-sub"))
+            return
+        st = rep.get("status", "fail")
+        when = time.strftime("%H:%M", time.localtime(rep.get("time", time.time())))
+        top = Gtk.Box(spacing=8)
+        top.append(Gtk.Label(label=DOC_ICON.get(st, "?"), css_classes=["pu-doc-big", "pu-doc-" + st]))
+        top.append(self.lab(rep.get("summary") or st, "pu-doc-big"))
+        P.append(top)
+        bits = [f"проверено в {when}"]
+        if self.doc["running"]:
+            bits.append("перепроверяю…")
+        if rep.get("fixable"):
+            bits.append(f"можно починить: {rep['fixable']}")
+        P.append(self.lab(" · ".join(bits), "pu-prev-sub"))
+        order = {"fail": 0, "warn": 1, "info": 2, "ok": 3}
+        g = Gtk.Grid(column_spacing=8, row_spacing=4)
+        for r, ch in enumerate(sorted(rep.get("checks") or [], key=lambda c: order.get(c.get("status"), 9))):
+            cs = ch.get("status", "info")
+            g.attach(Gtk.Label(label=DOC_ICON.get(cs, "•"), valign=Gtk.Align.START,
+                               css_classes=["pu-doc-row", "pu-doc-" + cs]), 0, r, 1, 1)
+            text = ch.get("title", ch.get("id", "?"))
+            if cs != "ok":
+                text += " — " + ch.get("summary", "")
+            g.attach(Gtk.Label(label=text, xalign=0, hexpand=True, wrap=True, max_width_chars=1,
+                               wrap_mode=Pango.WrapMode.WORD_CHAR,
+                               css_classes=["pu-doc-row", "pu-doc-" + ("ok" if cs == "ok" else "info")]), 1, r, 1, 1)
+        P.append(g)
+
+    def run_doctor(self):
+        """yumi-doctor --json в фоне (только проверка, ничего не меняет); результат — в общий кэш."""
+        self.doc["running"] = True
+
+        def work():
+            try:
+                p = subprocess.run([DOCTOR, "--json"], capture_output=True, text=True, timeout=120, env=yp.CHILD_ENV)
+                rep = json.loads(p.stdout)
+            except (OSError, ValueError, subprocess.SubprocessError) as e:
+                rep = {"status": "fail", "summary": "доктор не запустился", "checks": [], "error": str(e),
+                       "time": time.time()}
+            GLib.idle_add(done, rep)
+
+        def done(rep):
+            self.doc.update(running=False, rep=rep)
+            if rep.get("checks"):
+                try:
+                    os.makedirs(os.path.dirname(DOCTOR_CACHE), exist_ok=True)
+                    with open(DOCTOR_CACHE, "w") as f:
+                        json.dump(rep, f, ensure_ascii=False)
+                except OSError:
+                    pass
+            if self.items and self.items[self.sel][1].get("key") == "cmd:doctor":
+                self.update_preview(self.items[self.sel][1])
+            return False
+        threading.Thread(target=work, daemon=True).start()
+
+    # ---------- действия ----------
+    def activate(self, i, alt):
+        if not (0 <= i < len(self.items)):
+            return
+        it = self.items[i][1]
+        use_alt = bool(alt and it.get("alt"))
+        cmd = it["alt"] if use_alt else it["act"]
+        if it["kind"] in ("cmd", "app", "file", "emoji"):
+            self.hist.add(it["key"], it["title"])
+        if it["kind"] == "app" and not use_alt:
+            ya.save_usage(self.usage, it["app"]["id"])          # общая с лаунчером частота запусков
+        yp.do(*cmd, background=True)
+        self.panel.toast(cap(f"{it['alt_label'] if use_alt else it['act_label']}: {it['title']}"), hold=3)
+        if not DRY:
+            GLib.timeout_add(80, lambda: self.panel.app.quit() or False)
+
+    # ---------- проверка и замеры ----------
+    def setup_debug(self):
+        env = os.environ
+        if env.get("YP_TIMING"):
+            self._first = True
+            self.panel.connect("realize", lambda *_: self.panel.get_surface().get_frame_clock().connect(
+                "after-paint", self._on_paint))
+        if env.get("YP_TYPE"):
+            text, state = env["YP_TYPE"], {"i": 0}
+
+            def type_next():
+                state["i"] += 1
+                self.search.set_text(text[:state["i"]])
+                return state["i"] < len(text)
+            GLib.timeout_add(1200, lambda: GLib.timeout_add(250, type_next) and False)
+        if env.get("YP_TEST") in ("enter", "ctrl-enter"):         # «нажать» Enter / Ctrl+Enter (с YP_DRYRUN)
+            GLib.timeout_add(2500, lambda: self.activate(self.sel, env["YP_TEST"] == "ctrl-enter") or False)
+        if env.get("YP_PRINT_SHAPE"):
+            last = {"s": None}
+
+            def shape():
+                if self.panel.shape != last["s"]:
+                    last["s"] = self.panel.shape
+                    print("[shape]", *(self.panel.shape or ()), file=sys.stderr, flush=True)
+                return True
+            GLib.timeout_add(200, shape)
+
+    def _on_paint(self, *_):
+        if self._first:
+            self._first = False
+            try:                                       # от запуска процесса (pid тот же после перезапуска с LD_PRELOAD)
+                start = int(open("/proc/self/stat").read().rsplit(")", 1)[1].split()[19]) / os.sysconf("SC_CLK_TCK")
+                up = float(open("/proc/uptime").read().split()[0])
+                print(f"[timing] загрузка данных {self.load_ms} мс · первый кадр через {int((up - start) * 1000)} мс "
+                      "от запуска процесса", file=sys.stderr, flush=True)
+            except (OSError, ValueError, IndexError):
+                pass
+        if self.typed_at:
+            print(f"[timing] ввод «{self.search.get_text()}» → кадр {int((time.monotonic() - self.typed_at) * 1000)} мс"
+                  f" (список {self.render_ms:.0f} мс, строк {len(self.items)})", file=sys.stderr, flush=True)
+            self.typed_at = 0
+
+
+def main():
+    yp.WIDTH = WIDTH                     # каркас берёт ширину окна и шапки из yp.WIDTH
+    yp.HEADER_H = HEAD_H
+    app = yp.PanelApp("org.yumi.panel.pult" + "".join(c for c in os.environ.get("YUMI_PULT_ID", "") if c.isalnum()),
+                      "Пульт", "󰘳", lambda panel, body: Pult(panel, body))
+    return app.run(sys.argv)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

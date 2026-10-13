@@ -7,7 +7,7 @@
 ↓ — к списку, Esc — очистить поиск / закрыть. Клик по записи — скопировать (wl-copy) и закрыть.
 Картинки — миниатюрами. На строке: закрепить / удалить. «Очистить всё» — с подтверждением.
 Закреплённые — тот же файл избранного, что у HyDE cliphist.sh (base64 по строке):
-  ~/.cliphist_favorites, если есть, иначе ~/.cache/hyde/landing/cliphist_favorites
+  ~/.cliphist_favorites, если есть, иначе ~/.cache/yumi/theme/landing/cliphist_favorites
 
 Переменные для проверки:
   YP_DRYRUN=1      копирование, удаление, очистка, закрепление не выполняются (команда — в stderr)
@@ -23,7 +23,7 @@ import subprocess
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-panel"))
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi/panel"))
 import yumipanel as yp  # noqa: E402  (сам перезапускает процесс с layer-shell)
 from yumipanel import Gtk, Gdk, GLib, Gio, Pango, Layer  # noqa: E402
 import gi  # noqa: E402
@@ -38,8 +38,7 @@ THUMB = 46                      # высота миниатюры, px
 HOME = os.path.expanduser("~")
 FAV_FILE = os.path.join(HOME, ".cliphist_favorites")
 if not os.path.exists(FAV_FILE):
-    FAV_FILE = os.path.join(os.environ.get("HYDE_CACHE_HOME", os.path.join(HOME, ".cache/hyde")),
-                            "landing/cliphist_favorites")
+    FAV_FILE = os.path.join(HOME, ".cache/yumi/theme/landing/cliphist_favorites")
 
 CSS = """
 .yc-search { margin-bottom: 2px; }
@@ -72,7 +71,7 @@ CSS = """
 def fake_wall_png():
     """Картинка для выдуманных записей — уменьшенные обои (не личные данные)."""
     try:
-        pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(os.path.realpath(os.path.join(HOME, ".cache/hyde/wall.thmb")),
+        pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(os.path.realpath(os.path.join(HOME, ".cache/yumi/theme/wall.thmb")),
                                                      320, -1, True)
         ok, buf = pb.save_to_bufferv("png", [], [])
         return bytes(buf) if ok else b""

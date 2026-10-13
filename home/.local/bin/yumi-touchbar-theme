@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """yumi-touchbar-theme — цвета тачбара (touchbard) из живого акцента обоев (yumi-accent).
 Пишет ~/.local/state/omarchy/current/theme/colors.toml — этот файл touchbar-agent читает как «тему Omarchy»
-и применяет на лету. Запускается хуком ~/.config/yumi-accent/hooks.d/80-touchbar при смене обоев.
+и применяет на лету. Запускается хуком ~/.config/yumi/accent/hooks.d/80-touchbar при смене обоев.
 Стили со своим [theme] в ~/.config/touchbar/config.toml перекрывают эти цвета (кроме стиля «Обои»)."""
 import os, re
 HOME = os.path.expanduser("~")

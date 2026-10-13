@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Пункт Dolphin «Новый Python-проект…»: спрашивает имя и запускает ~/Projects/Python/tools/new-project.sh в kitty.
+if [[ "${1:-}" != --in-term ]]; then exec kitty --title "Новый Python-проект" "$0" --in-term; fi
+echo "Проект появится в ~/Projects/Python/projects/ (для учёбы: learning/lessons/имя)"
+read -rp "Имя проекта: " n
+[[ -n "$n" ]] && ~/Projects/Python/tools/new-project.sh "$n" && code ~/Projects/Python/projects/"$n" 2>/dev/null
+echo; read -rp "Enter — закрыть"

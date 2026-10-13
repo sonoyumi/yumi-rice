@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# yumi-sysmon — системный монитор btop в kitty (замена `hyde-shell system.monitor.sh`, CTRL+SHIFT+ESC)
+# Открыт — закрыть, нет — открыть (так задумано у HyDE; там закрытие не срабатывало: pkill -P искал
+# потомков самого btop, и каждое второе нажатие ничего не делало). Окно узнаётся по классу yumi-btop.
+# YUMI_SYSMON="btop" — другая программа. DRY=1 — только напечатать команду.
+# Откат: вернуть `hyde-shell system.monitor.sh` в binds.lua
+
+run() { if [[ -n $DRY ]]; then printf 'DO:'; printf ' %q' "$@"; echo; else "$@"; fi; }
+cls=yumi-btop
+# закрываем по PID окна (kitty с этим классом), а не диспетчером: селектор окна в hl.dsp.window.close
+# не проверен, а без него закрылось бы активное окно
+wpid=$(hyprctl -j clients | jq -r --arg c "$cls" '.[] | select(.class == $c) | .pid' | head -1)
+if [[ -n $wpid && $wpid -gt 1 ]]; then
+    run kill -TERM "$wpid"
+    exit
+fi
+run uwsm app -- kitty --class "$cls" --title btop -e ${YUMI_SYSMON:-btop}

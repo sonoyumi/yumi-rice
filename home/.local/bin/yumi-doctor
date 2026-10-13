@@ -1,0 +1,697 @@
+#!/usr/bin/env -S python3 -I
+"""yumi-doctor — «врач» Yumi-Rice: одной командой проверяет рабочий стол и человеческим языком говорит,
+что сломано и как починить.
+
+  yumi-doctor            проверить, цветной отчёт в терминал, итог «всё хорошо / N проблем»
+  yumi-doctor --json     то же в JSON (для меню «Система» → «Доктор»)
+  yumi-doctor --fix      безопасные починки, потом проверка заново:
+                           • упавшая/остановленная служба пользователя → reset-failed + start
+                             (разовые oneshot — только reset-failed: их снова запустит таймер/вход);
+                           • остановленный таймер пользователя → start;
+                           • нет копий обоев под экраны → yumi-wallpaper scan.
+                         Больше ничего сам не меняет: битые ссылки, ошибки конфига, место на диске,
+                         цвета — только подсказка, что сделать.
+  -v, --verbose          показывать подробности и у проверок «в порядке»
+
+Что проверяется:
+  службы    ключевые службы systemd --user (Waybar, swaync, hypridle, hyprsunset, yumi-*) и всё, что включено
+            в graphical-session/default.target; таймеры из timers.target; `systemctl --user --failed`
+  hyprland  `hyprctl configerrors` (только чтение; Hyprland --verify-config НЕ запускается — он выполняет
+            exec-команды конфига)
+  ссылки    битые символические ссылки в ~/.config, ~/.local/bin, ~/.local/lib/yumi
+            (lock-ссылки браузеров — норма, пропускаются)
+  цвета     журнал последней смены ~/.cache/yumi/colors/apply.log: хуки с ошибкой (qtct «код 1» — норма);
+            цвета от текущих обоев (applied = sha1 обоев); готовые комплекты цветов (как yumi-colors is-cached)
+  обои      копии под экраны ~/.cache/yumi/theme/scaled/<sha1>-ШxВ.jpg для всех обоев `yumi-wallpaper list`
+  waybar    память (RSS всех процессов waybar; норма ~70–150 МБ)
+  диск      свободное место на / и /home
+  обновления `yumi-update check` (берёт кеш, если ему < 30 мин), сбой последней проверки
+  снимки    snapper: последний снимок / и /home, snap-pac (снимок до/после pacman), таймер timeline
+  pacman    забытая блокировка /var/lib/pacman/db.lck
+НИКОГДА не запускает: Hyprland --verify-config, hyprlock, sudo.
+
+Отладка:
+  YUMI_DOCTOR_DRY=1      --fix только печатает команды починки
+  YUMI_DOCTOR_SKIP=a,b   пропустить проверки (id: services timers failed hyprland links colors bundles
+                         scaled waybar disk updates snapshots pacman)
+Код выхода: 0 — всё хорошо, 1 — есть предупреждения, 2 — есть проблемы.
+Откат: rm ~/.local/bin/yumi-doctor"""
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+HOME = os.path.expanduser("~")
+CACHE = os.environ.get("XDG_CACHE_HOME") or os.path.join(HOME, ".cache")
+CONFIG = os.environ.get("XDG_CONFIG_HOME") or os.path.join(HOME, ".config")
+RUNTIME = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
+BIN = os.path.join(HOME, ".local/bin")
+DRY = bool(os.environ.get("YUMI_DOCTOR_DRY"))
+SKIP = set(filter(None, os.environ.get("YUMI_DOCTOR_SKIP", "").split(",")))
+
+UNIT_DIR = os.path.join(CONFIG, "systemd/user")
+KEY_UNITS = ["waybar.service", "swaync.service", "hypridle.service", "hyprsunset.service",
+             "yumi-awww.service", "yumi-hyprlock-bg.service", "yumi-tray.service", "yumi-notify-log.service",
+             "yumi-airpods.service", "yumi-mouse-notify.service", "yumi-battery-notify.service"]
+UNIT_NAMES = {"waybar.service": "панель Waybar", "swaync.service": "уведомления (swaync)",
+              "hypridle.service": "засыпание экрана (hypridle)", "hyprsunset.service": "ночной свет (hyprsunset)",
+              "yumi-awww.service": "демон обоев awww", "yumi-hyprlock-bg.service": "фон экрана блокировки",
+              "yumi-tray.service": "трей", "yumi-notify-log.service": "журнал уведомлений",
+              "yumi-airpods.service": "AirPods (нажатия, пауза, заряд)",
+              "yumi-mouse-notify.service": "заряд мыши", "yumi-battery-notify.service": "заряд батареи",
+              "yumi-wallpaper.service": "обои при входе", "yumi-bar-events.service": "события бара",
+              "yumi-hz-guard.service": "частота экрана", "yumi-udiskie.service": "флешки (udiskie)",
+              "yumi-clip-text.service": "буфер обмена (текст)", "yumi-clip-image.service": "буфер обмена (картинки)",
+              "yumi-clip-persist.service": "буфер обмена (сохранение)", "yumi-music-proxy.service": "музыка (прокси)",
+              "yumi-wallpaper-scan.path": "слежение за папкой обоев", "hyprpolkitagent.service": "окно пароля polkit"}
+
+COLORS_DIR = os.path.join(CACHE, "yumi/colors")
+APPLY_LOG = os.path.join(COLORS_DIR, "apply.log")
+THEME = os.path.join(CACHE, "yumi/theme")
+BUNDLES = os.path.join(CACHE, "yumi/bundles")
+SCALED = os.path.join(THEME, "scaled")
+UPDATE_INFO = os.path.join(RUNTIME, "yumi/update_info.json")
+NORMAL_HOOK_FAIL = {("qtct", 1)}           # qtct выходит с 1, когда Qt-программ нет — это норма
+LINK_OK = {"lock", ".parentlock", "SingletonLock", "SingletonCookie", "SingletonSocket"}
+WAYBAR_WARN_MB, WAYBAR_FAIL_MB = 220, 400
+HOME_SNAP_MAX_H = 3                        # /home снимается каждый час — старше 3 ч значит таймер стоит
+
+OK, INFO, WARN, FAIL = "ok", "info", "warn", "fail"
+RANK = {OK: 0, INFO: 0, WARN: 1, FAIL: 2}
+CHILD_ENV = {k: v for k, v in os.environ.items() if k != "LD_PRELOAD"}   # меню запускает нас с layer-shell
+
+
+def sh(*cmd, timeout=10):
+    """(код, stdout) — без исключений; нет программы → (127, '')."""
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=CHILD_ENV)
+        return p.returncode, p.stdout
+    except FileNotFoundError:
+        return 127, ""
+    except (OSError, subprocess.SubprocessError):
+        return 124, ""
+
+
+def plural(n, one, few, many):
+    n = abs(n)
+    if n % 10 == 1 and n % 100 != 11:
+        return one
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return few
+    return many
+
+
+def ago(ts):
+    s = max(0, time.time() - ts)
+    if s < 90:
+        return "только что"
+    if s < 3600:
+        return f"{int(s // 60)} мин назад"
+    if s < 86400 * 2:
+        return f"{int(s // 3600)} ч назад"
+    return f"{int(s // 86400)} {plural(int(s // 86400), 'день', 'дня', 'дней')} назад"
+
+
+def check(cid, title):
+    def deco(fn):
+        fn.cid, fn.title = cid, title
+        CHECKS.append(fn)
+        return fn
+    return deco
+
+
+CHECKS = []
+
+
+def res(status, summary, details=(), hint="", fix=None):
+    """fix — список команд (каждая — список аргументов) для --fix; только безопасные."""
+    return {"status": status, "summary": summary, "details": list(details), "hint": hint, "fix": fix or []}
+
+
+# ---------------- службы ----------------
+def unit_props(units):
+    if not units:
+        return {}
+    _, out = sh("systemctl", "--user", "show", "-p", "Id,Type,ActiveState,SubState,Result,LoadState,UnitFileState,FragmentPath",
+                *units, timeout=10)
+    props, cur = {}, {}
+    for line in out.splitlines() + [""]:
+        if not line.strip():
+            if cur.get("Id"):
+                props[cur["Id"]] = cur
+            cur = {}
+            continue
+        k, _, v = line.partition("=")
+        cur[k] = v
+    return props
+
+
+def restartable(p):
+    """Поднимать только службы с файлом юнита (временные systemd-run из /run после падения не запускаются)."""
+    f = p.get("FragmentPath", "")
+    return bool(f) and not f.startswith("/run/")
+
+
+def wanted(target, kinds):
+    d = os.path.join(UNIT_DIR, target + ".wants")
+    try:
+        return sorted(f for f in os.listdir(d) if f.endswith(kinds))
+    except OSError:
+        return []
+
+
+def uname(u):
+    return UNIT_NAMES.get(u, u.rsplit(".", 1)[0])
+
+
+@check("services", "Службы рабочего стола")
+def c_services():
+    units = list(dict.fromkeys(KEY_UNITS + wanted("graphical-session.target", (".service", ".path"))
+                               + wanted("default.target", (".service", ".path"))))
+    props = unit_props(units)
+    if not props:
+        return res(WARN, "systemd --user не отвечает — службы не проверены",
+                   hint="Доктор запущен вне сеанса? Попробуйте: systemctl --user status")
+    bad, fix, details = [], [], []
+    for u in units:
+        p = props.get(u, {})
+        if p.get("LoadState") == "not-found":
+            if u in KEY_UNITS:
+                bad.append(u)
+                details.append(f"{u} ({uname(u)}): службы нет на системе")
+            continue
+        if p.get("ActiveState") == "active":
+            continue
+        bad.append(u)
+        st = p.get("ActiveState", "?")
+        why = {"failed": "упала", "inactive": "остановлена", "activating": "запускается",
+               "deactivating": "останавливается"}.get(st, st)
+        details.append(f"{u} ({uname(u)}): {why}" + (f", причина {p['Result']}" if p.get("Result") not in ("", "success", None) else ""))
+        if st in ("failed", "inactive") and p.get("Type") != "oneshot" and restartable(p):
+            fix += [["systemctl", "--user", "reset-failed", u], ["systemctl", "--user", "start", u]]
+    if not bad:
+        return res(OK, f"все {len(units)} работают")
+    first = bad[0]
+    return res(FAIL, f"не работает: {', '.join(uname(u) for u in bad)}", details,
+               f"Журнал: journalctl --user -u {first} -n 30. Запустить: systemctl --user restart {first}", fix)
+
+
+@check("timers", "Таймеры")
+def c_timers():
+    timers = wanted("timers.target", (".timer",))
+    if not timers:
+        return res(INFO, "своих таймеров нет")
+    props = unit_props(timers)
+    if not props:
+        return res(WARN, "systemd --user не отвечает — таймеры не проверены")
+    gone = [t for t in timers if props.get(t, {}).get("LoadState") == "not-found"]
+    bad = [t for t in timers if t not in gone and props.get(t, {}).get("ActiveState") != "active"]
+    if gone and not bad:
+        return res(WARN, f"включён, но файла нет: {', '.join(gone)}", [f"~/.config/systemd/user/timers.target.wants/{t}" for t in gone],
+                   "Убрать хвост: systemctl --user disable " + " ".join(gone))
+    if not bad:
+        return res(OK, f"все {len(timers)} идут")
+    return res(WARN, f"остановлены: {', '.join(t[:-6] for t in bad)}", [f"{t}: {props.get(t, {}).get('ActiveState', '?')}" for t in bad],
+               "Запустить: systemctl --user start " + " ".join(bad),
+               [["systemctl", "--user", "start", t] for t in bad])
+
+
+@check("failed", "Упавшие службы")
+def c_failed():
+    rc, out = sh("systemctl", "--user", "--failed", "--plain", "--no-legend", "--no-pager")
+    if rc == 127:
+        return res(INFO, "systemctl не найден")
+    if rc != 0:
+        return res(WARN, "systemd --user не отвечает — не проверено")
+    units = [ln.split()[0] for ln in out.splitlines() if ln.strip()]
+    if not units:
+        return res(OK, "нет")
+    props = unit_props(units)
+    fix, details = [], []
+    for u in units:
+        p = props.get(u, {})
+        details.append(f"{u}: {p.get('SubState', 'failed')}, причина {p.get('Result', '?')}")
+        fix.append(["systemctl", "--user", "reset-failed", u])
+        if u.endswith(".service") and p.get("Type") != "oneshot" and restartable(p):
+            fix.append(["systemctl", "--user", "start", u])
+    return res(FAIL, f"{len(units)} {plural(len(units), 'служба', 'службы', 'служб')}: "
+               + ", ".join(f"{uname(u)}" for u in units), details,
+               f"Почему упала: journalctl --user -u {units[0]} -n 30", fix)
+
+
+# ---------------- Hyprland ----------------
+@check("hyprland", "Конфиг Hyprland")
+def c_hyprland():
+    if not os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
+        return res(INFO, "Hyprland не запущен (или нет переменной сеанса) — пропущено")
+    rc, out = sh("hyprctl", "-j", "configerrors", timeout=5)
+    if rc != 0:
+        return res(WARN, "hyprctl не ответил", hint="Hyprland жив? Попробуйте hyprctl version")
+    try:
+        errs = [e for e in json.loads(out) if str(e).strip()]
+    except ValueError:
+        errs = [ln for ln in out.splitlines() if ln.strip()]
+    if not errs:
+        return res(OK, "ошибок нет")
+    return res(FAIL, f"{len(errs)} {plural(len(errs), 'ошибка', 'ошибки', 'ошибок')} в конфиге", errs[:10],
+               "Откройте файл и строку из сообщения (~/.config/hypr/hyprland.lua или ~/.config/hypr/yumi/*.lua), "
+               "сохраните — Hyprland перечитает сам. Проверка --verify-config НЕ нужна (она выполняет exec-команды).")
+
+
+# ---------------- ссылки ----------------
+@check("links", "Битые ссылки")
+def c_links():
+    broken = []
+    for base in (CONFIG, BIN, os.path.join(HOME, ".local/lib/yumi")):
+        for root, dirs, files in os.walk(base):
+            for n in dirs + files:
+                p = os.path.join(root, n)
+                if n in LINK_OK or not os.path.islink(p):
+                    continue
+                if not os.path.exists(p):
+                    broken.append(p)
+    if not broken:
+        return res(OK, "нет")
+    short = [p.replace(HOME, "~", 1) + " → " + os.readlink(p) for p in broken]
+    return res(WARN, f"{len(broken)} {plural(len(broken), 'ссылка ведёт', 'ссылки ведут', 'ссылок ведут')} в никуда",
+               short[:15], "Проверьте, куда она должна вести, и пересоздайте (ln -sfn ЦЕЛЬ ССЫЛКА) или удалите (rm ССЫЛКА). "
+               "Сам доктор ссылки не трогает.")
+
+
+# ---------------- обои и цвета ----------------
+_WALLS = None
+
+
+def walls():
+    """[(путь, sha1)] всех обоев из `yumi-wallpaper list`."""
+    global _WALLS
+    if _WALLS is None:
+        rc, out = sh(os.path.join(BIN, "yumi-wallpaper"), "list", timeout=20)
+        _WALLS = []
+        for p in out.splitlines():
+            try:
+                h = hashlib.sha1()
+                with open(p, "rb") as f:
+                    for chunk in iter(lambda: f.read(1 << 20), b""):
+                        h.update(chunk)
+                _WALLS.append((p, h.hexdigest()))
+            except OSError:
+                pass
+    return _WALLS
+
+
+def current_wall():
+    try:
+        return os.path.realpath(os.path.join(THEME, "wall.set"))
+    except OSError:
+        return None
+
+
+def sha_of(path):
+    for p, s in walls():
+        if p == path:
+            return s
+    try:
+        with open(path, "rb") as f:
+            return hashlib.sha1(f.read()).hexdigest()
+    except OSError:
+        return None
+
+
+@check("colors", "Цвета из обоев")
+def c_colors():
+    try:
+        st = os.stat(APPLY_LOG)
+        lines = open(APPLY_LOG, encoding="utf-8", errors="replace").read().splitlines()
+    except OSError:
+        return res(WARN, "журнала смены цветов нет", hint="Смените обои (SUPER+ALT+→) или выполните yumi-colors apply")
+    wall = next((ln.split("обои: ", 1)[1] for ln in lines if "обои: " in ln), "")
+    bad, details = [], []
+    for ln in lines:
+        m = re.search(r"хук (\S+)\s.*?(код (\d+)|ТАЙМАУТ.*)$", ln)
+        if not m:
+            continue
+        name = m.group(1)
+        if m.group(3) is not None:
+            code = int(m.group(3))
+            if code == 0 or (name, code) in NORMAL_HOOK_FAIL:
+                continue
+            what = f"код {code}"
+        else:
+            what = "не уложился во время (таймаут)"
+        bad.append(name)
+        tail = ""
+        try:
+            with open(os.path.join(COLORS_DIR, f"hook-{name}.log"), encoding="utf-8", errors="replace") as f:
+                tail = " | ".join(x.strip() for x in f.read().strip().splitlines()[-2:])
+        except OSError:
+            pass
+        details.append(f"хук {name}: {what}" + (f" — {tail[:160]}" if tail else ""))
+    cur = current_wall()
+    applied = ""
+    try:
+        applied = open(os.path.join(COLORS_DIR, "applied")).read().strip()
+    except OSError:
+        pass
+    when = ago(st.st_mtime)
+    wname = os.path.basename(wall) if wall else "?"
+    if cur and applied and os.path.isfile(cur) and sha_of(cur) != applied:
+        details.insert(0, f"цвета посчитаны не от текущих обоев ({os.path.basename(cur)})")
+        return res(WARN, "цвета не от текущих обоев", details,
+                   "Пересчитать: yumi-colors apply (или сменить обои ещё раз)")
+    if bad:
+        return res(WARN, f"последняя смена ({when}, {wname}): ошибка в {', '.join(bad)}", details,
+                   f"Подробности: ~/.cache/yumi/colors/hook-{bad[0]}.log; повторить: yumi-colors apply")
+    return res(OK, f"последняя смена {when}: {wname}, хуки без ошибок")
+
+
+@check("bundles", "Готовые цвета для обоев")
+def c_bundles():
+    ws = walls()
+    if not ws:
+        return res(INFO, "обоев не найдено (yumi-wallpaper list пуст)")
+    missing = [p for p, s in ws if not os.path.isfile(os.path.join(BUNDLES, s, "complete"))]
+    cur = current_wall()
+    n, total = len(missing), len(ws)
+    hint = ("Без комплекта смена обоев идёт полным пересчётом (~0,5 с вместо мгновенной) — это не поломка, "
+            "комплект соберётся сам при первой смене. Собрать все сразу: yumi-wallpaper warm (цвета программ "
+            "при этом мигают, обои остаются).")
+    if cur in missing:
+        return res(WARN, f"у текущих обоев комплекта нет · всего без комплекта {n} из {total}",
+                   [os.path.basename(cur)], hint)
+    if not missing:
+        return res(OK, f"у всех {total} обоев")
+    return res(INFO, f"готовы у {total - n} из {total}; остальные соберутся при первой смене",
+               [os.path.basename(p) for p in missing[:8]] + (["…"] if n > 8 else []), hint)
+
+
+def screens():
+    rc, out = sh("hyprctl", "-j", "monitors", timeout=5)
+    try:
+        return [(m["name"], m["width"], m["height"]) for m in json.loads(out)]
+    except (ValueError, KeyError, TypeError):
+        return []
+
+
+@check("scaled", "Обои под размер экранов")
+def c_scaled():
+    mons = screens()
+    if not mons:
+        return res(INFO, "экраны не определены (Hyprland не отвечает) — пропущено")
+    ws = [(p, s) for p, s in walls() if not p.lower().endswith(".gif")]
+    miss = []
+    for p, s in ws:
+        for name, w, h in mons:
+            f = os.path.join(SCALED, f"{s}-{w}x{h}.jpg")
+            if not (os.path.isfile(f) and os.path.getsize(f) > 0):
+                miss.append(f"{os.path.basename(p)} — {name} {w}×{h}")
+    scr = ", ".join(f"{n} {w}×{h}" for n, w, h in mons)
+    if not miss:
+        return res(OK, f"копии готовы для {len(ws)} обоев ({scr})")
+    return res(WARN, f"нет {len(miss)} {plural(len(miss), 'копии', 'копий', 'копий')} под экраны", miss[:8] + (["…"] if len(miss) > 8 else []),
+               "Без копии смена обоев медленнее (~200 мс вместо ~45). Починить: yumi-wallpaper scan",
+               [[os.path.join(BIN, "yumi-wallpaper"), "scan"]])
+
+
+# ---------------- Waybar ----------------
+@check("waybar", "Память Waybar")
+def c_waybar():
+    rss, n = 0, 0
+    for pid in filter(str.isdigit, os.listdir("/proc")):
+        try:
+            with open(f"/proc/{pid}/comm") as f:
+                if f.read().strip() != "waybar":
+                    continue
+            with open(f"/proc/{pid}/status") as f:
+                for ln in f:
+                    if ln.startswith("VmRSS:"):
+                        rss += int(ln.split()[1]) * 1024
+                        n += 1
+        except (OSError, ValueError):
+            pass
+    if not n:
+        return res(FAIL, "Waybar не запущен", hint="systemctl --user restart waybar.service")
+    mb = rss / 1024 ** 2
+    text = f"{mb:.0f} МБ" + (f" ({n} процесса)" if n > 1 else "")
+    if mb >= WAYBAR_FAIL_MB:
+        return res(FAIL, f"{text} — сильно больше нормы (70–150 МБ)", hint="Похоже на утечку памяти. Перезапуск: yumi-waybar-restart")
+    if mb >= WAYBAR_WARN_MB:
+        return res(WARN, f"{text} — больше нормы (70–150 МБ)", hint="Если растёт и дальше — yumi-waybar-restart")
+    return res(OK, f"{text} — в норме (обычно 70–150 МБ)")
+
+
+# ---------------- диск ----------------
+def mount_source(mp):
+    """Устройство, на котором смонтирован mp (из /proc/self/mounts; подтом btrfs — без [/@…])."""
+    try:
+        with open("/proc/self/mounts") as f:
+            for ln in f:
+                p = ln.split()
+                if len(p) > 1 and p[1] == mp:
+                    return p[0]
+    except OSError:
+        pass
+    return None
+
+
+@check("disk", "Место на диске")
+def c_disk():
+    seen, parts, worst, details = set(), [], OK, []
+    for mp in ("/", "/home"):
+        try:
+            st = os.stat(mp)
+            u = shutil.disk_usage(mp)
+        except OSError:
+            continue
+        key = mount_source(mp) or (st.st_dev, u.total)   # btrfs: / и /home — подтома одного раздела, считать раз
+        if key in seen:
+            continue
+        seen.add(key)
+        free_gb, pct = u.free / 1024 ** 3, u.free / u.total * 100 if u.total else 0
+        lvl = FAIL if free_gb < 5 or pct < 5 else WARN if free_gb < 15 or pct < 10 else OK
+        worst = max(worst, lvl, key=RANK.get)
+        parts.append(f"{mp}: свободно {free_gb:.0f} из {u.total / 1024 ** 3:.0f} ГБ ({pct:.0f} %)")
+    if len(seen) == 1 and len(parts) == 1 and os.path.ismount("/home"):
+        parts[0] = parts[0].replace("/:", "/ и /home (один раздел):", 1)
+    hint = ""
+    if worst != OK:
+        hint = ("Освободить: sudo paccache -rk1 (старые пакеты), paru -Sc, очистить ~/.cache, "
+                "посмотреть крупное: du -xh ~ | sort -h | tail; старые снимки snapper тоже занимают место.")
+    return res(worst, "; ".join(parts) or "не удалось узнать", hint=hint)
+
+
+# ---------------- обновления ----------------
+@check("updates", "Обновления")
+def c_updates():
+    up = os.path.join(BIN, "yumi-update")
+    if not os.access(up, os.X_OK):
+        return res(INFO, "yumi-update не найден — пропущено")
+    rc, _ = sh(up, "check", timeout=90)      # свежий (< 30 мин) кеш берётся без сети
+    try:
+        with open(UPDATE_INFO) as f:
+            data = json.load(f)
+        age = ago(os.path.getmtime(UPDATE_INFO))
+        recs = [(m["name"], int(m["count"])) for m in data.get("managers", [])]
+    except (OSError, ValueError, KeyError, TypeError):
+        return res(WARN, "проверка не удалась", hint="Попробуйте вручную: yumi-update check (нужна сеть)")
+    total = sum(c for _, c in recs)
+    names = {"pacman": "pacman", "paru": "AUR", "yay": "AUR", "flatpak": "flatpak"}
+    det = [f"{names.get(n, n)}: {c}" for n, c in recs]
+    if data.get("failed"):
+        return res(WARN, f"последняя проверка не удалась ({age}) — показано прежнее число: {total}", det,
+                   "Обычно нет сети или база pacman занята. Повтор: YUMI_UPDATE_FORCE=1 yumi-update check")
+    if total == 0:
+        return res(OK, f"система обновлена (проверено {age})")
+    return res(INFO, f"{total} {plural(total, 'обновление', 'обновления', 'обновлений')} доступно (проверено {age})", det,
+               "Обновить: меню «Система» → «Обновить систему» (yumi-update run)")
+
+
+# ---------------- снимки ----------------
+def human_date(date):
+    try:
+        t = time.strptime(date, "%Y-%m-%d %H:%M:%S")
+    except (ValueError, TypeError):
+        return date or "?"
+    days = (time.mktime(time.localtime()[:3] + (0, 0, 0, 0, 0, -1)) - time.mktime(t[:3] + (0, 0, 0, 0, 0, -1))) // 86400
+    hm = time.strftime("%H:%M", t)
+    return f"сегодня {hm}" if days == 0 else f"вчера {hm}" if days == 1 else time.strftime("%d.%m %H:%M", t)
+
+
+def snap_age(date):
+    try:
+        return time.time() - time.mktime(time.strptime(date, "%Y-%m-%d %H:%M:%S"))
+    except (ValueError, TypeError):
+        return None
+
+
+@check("snapshots", "Снимки btrfs (snapper)")
+def c_snapshots():
+    if not shutil.which("snapper"):
+        return res(WARN, "snapper не установлен", hint="Настроить снимки: yumi-setup-snapshots")
+    rc, out = sh("snapper", "--jsonout", "list", "--all-configs", timeout=10)
+    try:
+        data = json.loads(out) if out.strip() else {}
+    except ValueError:
+        data = {}
+    if not data:
+        return res(WARN, "снимков нет или нет доступа к snapper", hint="Настроить: yumi-setup-snapshots")
+    status, parts, details, hint = OK, [], [], ""
+    for cfg, label in (("root", "/"), ("home", "/home")):
+        snaps = [s for s in data.get(cfg, []) if s.get("number")]
+        if not snaps:
+            details.append(f"{label}: снимков нет")
+            status = max(status, WARN, key=RANK.get)
+            continue
+        last = max(snaps, key=lambda s: s.get("date", ""))
+        a = snap_age(last.get("date"))
+        desc = (last.get("description") or "").replace("timeline", "по расписанию")
+        parts.append(f"{label} {human_date(last.get('date'))}")
+        details.append(f"{label}: №{last['number']} {human_date(last.get('date'))} · {desc[:60]} · всего {len(snaps)}")
+        if cfg == "home" and a is not None and a > HOME_SNAP_MAX_H * 3600:
+            status = max(status, WARN, key=RANK.get)
+            details.append(f"/home снимается каждый час, а последний снимок — {ago(time.time() - a)}")
+            hint = "Проверьте таймер: systemctl status snapper-timeline.timer (системный, чинит sudo systemctl enable --now snapper-timeline.timer)"
+    hooks = [h for h in ("05-snap-pac-pre.hook", "zz-snap-pac-post.hook")
+             if os.path.isfile(os.path.join("/usr/share/libalpm/hooks", h))]
+    if len(hooks) == 2:
+        details.append("snap-pac на месте: снимок / до и после каждого pacman/paru делается сам")
+    else:
+        status = max(status, WARN, key=RANK.get)
+        details.append("snap-pac не найден: обновления идут без снимков")
+        hint = hint or "Вернуть: sudo pacman -S snap-pac (или yumi-setup-snapshots)"
+    rc, out = sh("systemctl", "is-active", "snapper-timeline.timer")
+    if out.strip() != "active" and data.get("home"):
+        status = max(status, WARN, key=RANK.get)
+        details.append(f"snapper-timeline.timer: {out.strip() or '?'}")
+        hint = hint or "sudo systemctl enable --now snapper-timeline.timer"
+    return res(status, "последний: " + ", ".join(parts), details, hint)
+
+
+@check("pacman", "Блокировка pacman")
+def c_pacman():
+    lck = "/var/lib/pacman/db.lck"
+    if not os.path.exists(lck):
+        return res(OK, "нет")
+    rc, _ = sh("pgrep", "-x", "pacman|paru|yay|checkupdates|pamac")
+    if rc == 0:
+        return res(INFO, "идёт установка/проверка пакетов — это нормально")
+    return res(WARN, f"забытая блокировка ({ago(os.path.getmtime(lck))}) — pacman не запустится",
+               hint="Если pacman точно не работает: sudo rm /var/lib/pacman/db.lck")
+
+
+# ---------------- запуск ----------------
+def run_checks():
+    out = []
+    for fn in CHECKS:
+        if fn.cid in SKIP:
+            continue
+        t0 = time.monotonic()
+        try:
+            r = fn()
+        except Exception as e:                       # доктор не должен падать из-за одной проверки
+            r = res(WARN, f"проверка сломалась: {e.__class__.__name__}: {e}")
+        r.update(id=fn.cid, title=fn.title, ms=round((time.monotonic() - t0) * 1000))
+        out.append(r)
+    return out
+
+
+def report(checks):
+    fails = sum(c["status"] == FAIL for c in checks)
+    warns = sum(c["status"] == WARN for c in checks)
+    overall = FAIL if fails else WARN if warns else OK
+    if overall == OK:
+        text = "Всё хорошо"
+    else:
+        bits = []
+        if fails:
+            bits.append(f"{fails} {plural(fails, 'проблема', 'проблемы', 'проблем')}")
+        if warns:
+            bits.append(f"{warns} {plural(warns, 'предупреждение', 'предупреждения', 'предупреждений')}")
+        text = ", ".join(bits)
+    return {"version": 1, "time": int(time.time()), "status": overall, "summary": text,
+            "problems": fails, "warnings": warns, "fixable": sum(bool(c["fix"]) for c in checks),
+            "checks": checks}
+
+
+def print_human(rep, verbose=False):
+    tty = sys.stdout.isatty() or os.environ.get("FORCE_COLOR")
+    col = (lambda c, s: f"\033[{c}m{s}\033[0m") if tty else (lambda c, s: s)
+    mark = {OK: col("1;32", "✔"), INFO: col("1;34", "•"), WARN: col("1;33", "!"), FAIL: col("1;31", "✘")}
+    print(col("1", "Доктор Yumi-Rice") + col("2", f"  ·  {time.strftime('%d.%m %H:%M')}"))
+    for c in rep["checks"]:
+        print(f" {mark[c['status']]} {col('1', c['title'])}: {c['summary']}")
+        if c["status"] in (WARN, FAIL) or verbose:
+            for d in c["details"]:
+                print(col("2", f"     {d}"))
+            if c["hint"] and c["status"] in (WARN, FAIL, INFO):
+                print(f"     {col('36', '→')} {c['hint']}")
+    print()
+    color = {OK: "1;32", WARN: "1;33", FAIL: "1;31"}[rep["status"]]
+    print(col(color, rep["summary"] + ("." if rep["status"] == OK else "")))
+    if rep["fixable"]:
+        print(f"Безопасно починить сам: {col('1', 'yumi-doctor --fix')} ({rep['fixable']} {plural(rep['fixable'], 'пункт', 'пункта', 'пунктов')})")
+
+
+def do_fix(checks, quiet=False):
+    done, seen = [], set()
+    for c in checks:
+        for cmd in c["fix"]:
+            if tuple(cmd) in seen:              # одна и та же служба бывает и «не работает», и «упала»
+                continue
+            seen.add(tuple(cmd))
+            line = " ".join(cmd).replace(HOME, "~")
+            if DRY:
+                print(f"[пробный режим] {line}", file=sys.stderr)
+                done.append((line, True))
+                continue
+            timeout = 900 if cmd[-1] == "scan" else 30
+            rc, _ = sh(*cmd, timeout=timeout)
+            done.append((line, rc == 0))
+            if not quiet:
+                print(("  ✔ " if rc == 0 else "  ✘ ") + line + ("" if rc == 0 else f" (код {rc})"))
+    return done
+
+
+def main(argv):
+    as_json = "--json" in argv
+    fix = "--fix" in argv
+    verbose = "-v" in argv or "--verbose" in argv
+    if "-h" in argv or "--help" in argv:
+        print(__doc__)
+        return 0
+    checks = run_checks()
+    fixed = []
+    if fix:
+        if any(c["fix"] for c in checks):
+            if not as_json:
+                print("Чиню:", flush=True)
+            fixed = do_fix(checks, quiet=as_json)
+            if not DRY:
+                global _WALLS
+                _WALLS = None
+                time.sleep(1.5)                     # дать службам подняться
+                checks = run_checks()
+            if not as_json:
+                print()
+        elif not as_json:
+            print("Чинить автоматически нечего.\n")
+    rep = report(checks)
+    if fix:
+        rep["fixed"] = [{"cmd": c, "ok": ok} for c, ok in fixed]
+    if as_json:
+        json.dump(rep, sys.stdout, ensure_ascii=False)
+        print()
+    else:
+        print_human(rep, verbose)
+    return RANK[rep["status"]]
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        sys.exit(130)

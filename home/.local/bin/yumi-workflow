@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# Рабочие режимы (workflow) без HyDE.
+#   yumi-workflow list         — имена режимов по алфавиту (файлы ~/.config/hypr/yumi/workflows/*.lua)
+#   yumi-workflow get          — текущий режим (нет файла состояния — 01-default)
+#   yumi-workflow set ИМЯ      — записать режим, перечитать конфиг Hyprland, обновить пилюлю Waybar
+#   yumi-workflow next|prev    — следующий/предыдущий по кругу с уведомлением (бинды SUPER+ALT+Up/Down;
+#                                печатает новое имя; раньше это делал menu-workflows --next|--prev)
+#   yumi-workflow info ИМЯ     — «значок<TAB>название» из файла режима
+# Текущий режим — одна строка в ~/.local/state/yumi/workflow; Hyprland читает её при загрузке конфига.
+# Выход: 0 — успех, 1 — неверный вызов, 2 — нет такого режима, 3 — Hyprland не перечитал конфиг.
+set -u
+
+WF_DIR="$HOME/.config/hypr/yumi/workflows"
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/yumi/workflow"
+DEFAULT="01-default"
+
+die() { echo "yumi-workflow: $2" >&2; exit "$1"; }
+
+names() {
+    local f
+    for f in "$WF_DIR"/*.lua; do
+        [ -f "$f" ] && basename "$f" .lua
+    done | LC_ALL=C sort
+}
+
+exists() {
+    case "$1" in "" | .* | */*) return 1 ;; esac
+    [ -f "$WF_DIR/$1.lua" ]
+}
+
+current() {
+    local w=""
+    [ -r "$STATE" ] && IFS= read -r w <"$STATE"
+    w="${w//[[:space:]]/}"
+    exists "$w" && echo "$w" || echo "$DEFAULT"
+}
+
+set_wf() {
+    exists "$1" || die 2 "нет режима «$1» (смотри: yumi-workflow list)"
+    local dir tmp
+    dir="$(dirname "$STATE")"
+    mkdir -p "$dir" || die 1 "не удалось создать $dir"
+    # атомарно: временный файл рядом и переименование — Hyprland и меню не увидят пустой файл
+    tmp="$(mktemp "$dir/.workflow.XXXXXX")" || die 1 "не удалось записать $STATE"
+    printf '%s\n' "$1" >"$tmp" && mv -f "$tmp" "$STATE" || { rm -f "$tmp"; die 1 "не удалось записать $STATE"; }
+    pkill -RTMIN+9 waybar 2>/dev/null
+    if [ -z "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then
+        echo "yumi-workflow: Hyprland не запущен — режим «$1» применится при следующем входе" >&2
+        return 0
+    fi
+    hyprctl reload config-only >/dev/null 2>&1 || die 3 "режим «$1» записан, но Hyprland не перечитал конфиг"
+}
+
+# подпись режима в уведомлении next/prev
+label() {
+    case "$1" in
+        *default)   echo "󰍹   Main — прозрачность, анимации" ;;
+        editing)    echo "󰏫   Editing — без прозрачности, для текста" ;;
+        gaming)     echo "󰊗   Gaming — максимум производительности" ;;
+        powersaver) echo "󰌪   Powersaver — экономия батареи" ;;
+        snappy)     echo "󱐋   Snappy — без анимаций и эффектов" ;;
+        *)          echo "$1" ;;
+    esac
+}
+
+step() {
+    local -a all
+    mapfile -t all < <(names)
+    local n=${#all[@]} cur idx=0 i rc
+    [ "$n" -gt 0 ] || die 2 "нет файлов режимов в $WF_DIR"
+    cur="$(current)"
+    for i in "${!all[@]}"; do [ "${all[$i]}" = "$cur" ] && idx=$i; done
+    idx=$(( (idx + $1 + n) % n ))
+    ( set_wf "${all[$idx]}" ); rc=$?   # в подоболочке: die не прерывает — уведомление будет и при сбое (как было)
+    notify-send -t 1500 -h string:x-canonical-private-synchronous:workflow "Режим" "$(label "${all[$idx]}")"
+    echo "${all[$idx]}"
+    return "$rc"
+}
+
+info() {
+    exists "$1" || die 2 "нет режима «$1»"
+    # строка вида: return { name = "…", icon = "…", description = "…" } (или local wf = { … })
+    local line icon name
+    line="$(grep -m1 -E '\bname[[:space:]]*=' "$WF_DIR/$1.lua")"
+    name="$(sed -nE 's/.*\bname[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/p' <<<"$line")"
+    icon="$(sed -nE 's/.*\bicon[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/p' <<<"$line")"
+    printf '%s\t%s\n' "$icon" "${name:-$1}"
+}
+
+case "${1:-}" in
+    list) names ;;
+    get) current ;;
+    set) [ $# -eq 2 ] || die 1 "использование: yumi-workflow set ИМЯ"; set_wf "$2" ;;
+    next) step 1 ;;
+    prev) step -1 ;;
+    info) [ $# -eq 2 ] || die 1 "использование: yumi-workflow info ИМЯ"; info "$2" ;;
+    *) die 1 "использование: yumi-workflow list|get|set ИМЯ|next|prev|info ИМЯ" ;;
+esac

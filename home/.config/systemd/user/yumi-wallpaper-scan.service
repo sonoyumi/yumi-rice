@@ -1,0 +1,9 @@
+[Unit]
+Description=yumi: подготовить новые обои (миниатюры, палитра, акцент) — без изменений на экране
+
+[Service]
+Type=oneshot
+# дать дописаться файлу, если копируют большой
+ExecStartPre=/bin/sleep 2
+ExecStart=%h/.local/bin/yumi-wallpaper scan
+Nice=10

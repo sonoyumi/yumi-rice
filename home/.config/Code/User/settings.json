@@ -1,7 +1,6 @@
 {
     "workbench.startupEditor": "none",
     "python.analysis.typeCheckingMode": "off",
-    "workbench.colorTheme": "Wallbash",
     "python.analysis.languageServerMode": "light",
     "python.analysis.diagnosticMode": "openFilesOnly",
     "python.analysis.indexing": false,
@@ -23,7 +22,6 @@
         "**/.pytest_cache/**": true,
         "**/.ruff_cache/**": true
     },
-    "wallBash.autoUpdate": false,
     "editor.fontSize": 12,
     "github.copilot.enable": {
         "*": true,
@@ -32,5 +30,6 @@
         "scminput": false
     },
     "explorer.confirmDelete": false,
-    "python.createEnvironment.trigger": "off"
+    "python.createEnvironment.trigger": "off",
+    "workbench.colorTheme": "Wallbash"
 }

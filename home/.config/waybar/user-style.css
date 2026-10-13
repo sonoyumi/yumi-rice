@@ -54,10 +54,8 @@ window#waybar.top #pill label.module {
 window#waybar.top #pill label#custom-archlogo { padding: 0 0.6em; margin: 0; }
 window#waybar.top #pill label#clock           { padding: 0 0.5em; }
 window#waybar.top #pill label#custom-player-text { padding: 0 0.9em 0 0.5em; margin: 0; }
-/* Мышь (и личные пилюли) бывают пустыми (мышь выключена / нет данных): отступы у модуля,
-   а не у группы — тогда пустая пилюля нулевой ширины и «пузыря» не видно, как у плеера */
-window#waybar.top #pill.mouse { padding: 0; }
-window#waybar.top #pill label#custom-mouse { padding: 0 1.2em; margin: 0; }
+/* Личные пилюли бывают пустыми (нет данных): отступы у модуля, а не у группы —
+   тогда пустая пилюля нулевой ширины и «пузыря» не видно, как у плеера */
 /* значок под курсором чуть ярче, со свечением */
 window#waybar.top #pill label.module:hover {
   color: @wb-hvr-fg;
@@ -155,11 +153,6 @@ window#waybar.top #pill.player { padding: 0; }
 #custom-player-text.playing { text-shadow: 0 0 3px alpha(@yb-acc, 0.45); }
 #custom-player-text.paused  { opacity: 0.6; }
 #custom-player-text.paused:hover { opacity: 1; }
-
-/* ───────── Мышь Logitech: оранжевая при 30%, красная при 15%, зелёная при зарядке ───────── */
-#custom-mouse.warning  { color: @yb-warn; }
-#custom-mouse.critical { color: @yb-crit; }
-#custom-mouse.charging { color: @yb-ok; text-shadow: 0 0 6px alpha(@yb-ok, 0.45); }
 
 /* ───────── Уведомления, обновления, буфер ───────── */
 #custom-swaync.notification,

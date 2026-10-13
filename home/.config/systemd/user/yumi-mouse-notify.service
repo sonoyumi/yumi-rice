@@ -1,0 +1,16 @@
+# Напоминания о заряде мыши PRO X 2 (25 % и 10 %) — вместо пилюли мыши в Waybar.
+# Включить:  systemctl --user enable --now yumi-mouse-notify.service
+# Отключить: systemctl --user disable --now yumi-mouse-notify.service
+[Unit]
+Description=yumi-mouse-notify — уведомления о низком заряде мыши
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/yumi-mouse-notify
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=graphical-session.target

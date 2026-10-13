@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# ┌──────────────────────────────────────────────────────────────┐
+# │ yumi-sddm-sync — переносит обои, цвета и аватар в тему SDDM   │
+# │ «yumi». Запускается от обычного пользователя, БЕЗ sudo.        │
+# │                                                                │
+# │ Greeter работает от пользователя sddm и не видит ~, поэтому    │
+# │ всё копируется в общий каталог (по умолчанию /var/lib/yumi-sddm│
+# │ — его один раз создаёт install.sh: владелец вы, режим 0755,    │
+# │ sddm может только читать). Тема читает theme.conf.user через   │
+# │ симлинк /usr/share/sddm/themes/yumi/theme.conf.user.           │
+# │                                                                │
+# │ Только данные (картинки + ключ=значение), никакого кода —      │
+# │ поэтому запись пользователем в этот каталог безопасна.         │
+# │                                                                │
+# │ Использование: yumi-sddm-sync [-q] [КАТАЛОГ]   (-q — тихо)     │
+# │ Вызывается хуком ~/.config/yumi/accent/hooks.d/95-sddm при     │
+# │ смене обоев. Установка/откат темы: ~/.local/share/yumi-sddm/   │
+# │ install.sh / uninstall.sh (через sudo).                        │
+# └──────────────────────────────────────────────────────────────┘
+set -euo pipefail
+
+quiet=0
+if [[ "${1:-}" == "-q" ]]; then quiet=1; shift; fi
+dest="${1:-${YUMI_SDDM_DIR:-/var/lib/yumi-sddm}}"
+
+me="$(id -un)"
+
+say() { (( quiet )) || printf '%s\n' "$*"; }
+die() { printf 'yumi-sddm-sync: %s\n' "$*" >&2; exit 1; }
+
+# ── источники (можно переопределить переменными окружения) ──
+wall="${YUMI_SDDM_WALL:-$HOME/.cache/yumi/theme/wall.set}"
+# тот же аватар, что на экране блокировки hyprlock (layout: path = …/hyprlock/avatar.jpg)
+avatar="${YUMI_SDDM_AVATAR:-$HOME/.config/hypr/hyprlock/avatar.jpg}"
+accent_conf="${YUMI_SDDM_ACCENT:-$HOME/.cache/yumi-accent/accent.conf}"
+colors_lua="${YUMI_SDDM_COLORS:-$HOME/.local/state/yumi/colors.lua}"
+
+[[ -d "$dest" ]] || die "нет каталога $dest (сначала: sudo ~/.local/share/yumi-sddm/install.sh)"
+[[ -w "$dest" ]] || die "нет прав на запись в $dest"
+
+# один запуск за раз: при быстрой смене обоев запуски ждут друг друга, и каждый читает wall.set
+# заново — последним всегда пишется текущий фон (а не тот, чья конвертация закончилась позже)
+lock="${XDG_RUNTIME_DIR:-/tmp}/yumi-sddm-sync.lock"
+exec 9>"$lock"
+flock -w 120 9 || die "занято другим запуском ($lock)"
+
+magick_bin="$(command -v magick || true)"
+tmp="$(mktemp -d "$dest/.sync.XXXXXX")"
+trap 'rm -rf "$tmp"' EXIT
+
+# ── обои: резкие и размытые, под 2560×1600 (cover) ──
+wall_real="$(readlink -f "$wall" 2>/dev/null || true)"
+have_bg=0
+if [[ -n "$wall_real" && -f "$wall_real" ]]; then
+    if [[ -n "$magick_bin" ]]; then
+        # [0] — первый кадр (на случай gif); -strip убирает метаданные
+        "$magick_bin" "${wall_real}[0]" -auto-orient -resize '2560x1600^' \
+            -gravity center -extent 2560x1600 -strip -quality 92 "$tmp/background.jpg"
+        # размытие как в hyprlock (blur_passes=2): уменьшить → размыть → увеличить, быстро
+        "$magick_bin" "$tmp/background.jpg" -resize 25% -blur 0x10 -resize 2560x1600! \
+            -quality 90 "$tmp/background-blur.jpg"
+    else
+        cp -f -- "$wall_real" "$tmp/background.jpg"
+        cp -f -- "$wall_real" "$tmp/background-blur.jpg"
+    fi
+    have_bg=1
+else
+    say "обои не найдены ($wall) — оставляю прежние"
+fi
+
+# ── аватар: квадрат 512×512 ──
+have_av=0
+if [[ -f "$avatar" ]]; then
+    if [[ -n "$magick_bin" ]]; then
+        # скругление «как в hyprlock» (rounding 24 на 104 px ≈ 118 на 512) — сразу в альфу PNG
+        "$magick_bin" "${avatar}[0]" -auto-orient -resize '512x512^' -gravity center \
+            -extent 512x512 -strip \
+            \( -size 512x512 xc:none -fill white -draw 'roundrectangle 0,0 511,511 118,118' \) \
+            -alpha set -compose DstIn -composite "PNG32:$tmp/avatar.png"
+    else
+        cp -f -- "$avatar" "$tmp/avatar.png"
+    fi
+    have_av=1
+fi
+
+# ── цвета ──
+# rgba(r,g,b,a) → #AARRGGBB (формат цвета QML)
+rgba_to_hex() {
+    local s="${1//[[:space:]]/}"
+    s="${s#rgba(}"; s="${s%)}"
+    local r g b a
+    IFS=, read -r r g b a <<<"$s"
+    [[ -n "$r" && -n "$g" && -n "$b" ]] || return 1
+    a="${a:-1}"
+    printf '#%02x%02x%02x%02x' "$(awk -v a="$a" 'BEGIN{printf "%d", a*255+0.5}')" "$r" "$g" "$b"
+}
+# значение переменной из accent.conf ($yumi_acc = rgba(...))
+acc_get() { [[ -f "$accent_conf" ]] && sed -n "s/^\\\$$1[[:space:]]*=[[:space:]]*\\(rgba([^)]*)\\).*/\\1/p" "$accent_conf" | head -n1; }
+# значение из colors.lua (_pry1 = "040404")
+lua_get() { [[ -f "$colors_lua" ]] && sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\"\\([0-9A-Fa-f]\\{6\\}\\)\".*/#\\1/p" "$colors_lua" | head -n1; }
+
+accent=""; card=""; deep=""; text=""; muted=""
+if v="$(acc_get yumi_acc)" && [[ -n "$v" ]]; then accent="$(rgba_to_hex "$v" || true)"; fi
+if v="$(acc_get yumi_card)" && [[ -n "$v" ]]; then card="$(rgba_to_hex "$v" || true)"; fi
+if v="$(acc_get yumi_deep)" && [[ -n "$v" ]]; then deep="$(rgba_to_hex "$v" || true)"; fi
+text="$(lua_get _txt1 || true)"
+muted="$(lua_get _1xa7 || true)"
+[[ -n "$accent" ]] || accent="$(lua_get _1xa8 || true)"
+[[ -n "$deep" ]]   || deep="$(lua_get _1xa1 || true)"
+[[ -n "$card" && -n "$deep" ]] || card="#6b${deep: -6}"
+
+# ── theme.conf.user (перекрывает theme.conf темы) ──
+{
+    echo "# создано yumi-sddm-sync $(date '+%F %T') — не править вручную"
+    echo "[General]"
+    if (( have_bg )); then
+        echo "Background=\"file://$dest/background.jpg\""
+        echo "BackgroundBlur=\"file://$dest/background-blur.jpg\""
+    elif [[ -f "$dest/background.jpg" ]]; then
+        echo "Background=\"file://$dest/background.jpg\""
+        echo "BackgroundBlur=\"file://$dest/background-blur.jpg\""
+    fi
+    if (( have_av )) || [[ -f "$dest/avatar.png" ]]; then
+        echo "Avatar=\"file://$dest/avatar.png\""
+        # аватар показывается только для этого пользователя
+        echo "AvatarUser=$me"
+    fi
+    # пользователь по умолчанию, если SDDM ещё не запомнил последнего
+    echo "DefaultUser=$me"
+    [[ -n "$accent" ]] && echo "AccentColor=\"$accent\""
+    [[ -n "$card" ]]   && echo "CardColor=\"$card\""
+    [[ -n "$deep" ]]   && echo "DeepColor=\"$deep\""
+    [[ -n "$text" ]]   && echo "TextColor=\"$text\""
+    [[ -n "$muted" ]]  && echo "MutedColor=\"$muted\""
+    echo "Stamp=$(date +%s)"
+} >"$tmp/theme.conf.user"
+
+# ── атомарная замена: mv в пределах одного каталога ──
+for f in background.jpg background-blur.jpg avatar.png theme.conf.user; do
+    [[ -f "$tmp/$f" ]] || continue
+    chmod 0644 "$tmp/$f"
+    mv -f -- "$tmp/$f" "$dest/$f"
+done
+
+say "SDDM: обновлено в $dest (акцент $accent, карточка $card)"

@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# yumi-colors: «отложить видимое». Эти подменные команды стоят первыми в PATH только у хуков смены обоев
+# (yumi-colors prepare). Команды, от которых меняется картинка на экране (сигнал kitty/cava, перезапуск
+# Waybar, swaync -rs, рамки Hyprland, Pywalfox), не выполняются сразу, а пишутся в очередь
+# $YUMI_COMMIT_QUEUE — `yumi-colors commit` выпускает их все одновременно. Всё остальное — как обычно.
+name="$(basename "$0")"
+real="/usr/bin/$name"
+if [ -n "${YUMI_COMMIT_QUEUE:-}" ]; then
+    defer=0
+    case "$name" in
+    hyprctl) case " $* " in *" eval "*|*" reload "*) defer=1 ;; esac ;;
+    systemctl) case " $* " in *" restart "*waybar*|*" reload "*waybar*) defer=1 ;; esac ;;
+    pkill|killall) for a in "$@"; do case "$a" in -SIG*|-USR*|-RTMIN*|-HUP|-s) defer=1 ;; esac; done ;;
+    swaync-client|pywalfox) defer=1 ;;
+    esac
+    if [ "$defer" = 1 ]; then
+        { printf '%q ' "$real" "$@"; echo; } >> "$YUMI_COMMIT_QUEUE"
+        exit 0
+    fi
+fi
+exec "$real" "$@"

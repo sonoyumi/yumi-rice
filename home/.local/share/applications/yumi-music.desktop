@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Музыка
+Comment=YouTube Music без браузера (mpv + yumi-music)
+Exec=@HOME@/.local/bin/yumi-menu-music --center
+Icon=multimedia-audio-player
+Categories=AudioVideo;Audio;Player;
+Terminal=false

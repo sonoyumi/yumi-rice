@@ -1,0 +1,273 @@
+#!/usr/bin/env bash
+# yumi-update — обновления системы (замена HyDE system.update.py).
+#   yumi-update check         посчитать обновления pacman / AUR / flatpak, записать кеш и вывести JSON для Waybar
+#                             (пилюля custom/updates: exec раз в сутки и по сигналу RTMIN+20)
+#   yumi-update run           открыть kitty с обновлением (пункт «Обновить систему» в yumi-menu-system)
+#   yumi-update interactive   само обновление — то, что выполняется внутри kitty
+# Порядок как у HyDE: сводка → список пакетов → «Обновить сейчас?» → pacman -Syu, AUR, flatpak (только где есть
+# обновления; при ошибке дальше не идём) → пересчёт, сигнал Waybar → «Нажми Enter, чтобы закрыть».
+# Снимки: отдельный снимок перед pacman -Syu НЕ делается — snap-pac (pacman-хуки 05-snap-pac-pre / zz-snap-pac-post,
+# конфиг root, см. yumi-setup-snapshots) сам снимает / до и после каждой транзакции pacman, в т.ч. из paru.
+# Перед вопросом «Обновить сейчас?» выводится строка о снимках и дата последнего снимка /; если snap-pac нет —
+# предупреждение и команда ручного снимка. Flatpak снимками не покрывается (он не в pacman).
+# Кеш: $XDG_RUNTIME_DIR/yumi/update_info.json — {"managers": [{"name": "pacman", "count": 3}, …]}
+# Отладка:
+#   YUMI_UPDATE_DRY=1        ничего не устанавливать и не запускать: команды печатаются
+#   YUMI_UPDATE_INFO=путь    куда писать кеш
+# Откат: rm ~/.local/bin/yumi-update (и вернуть exec у custom/updates и пункт меню)
+set -u
+
+RUNTIME=${XDG_RUNTIME_DIR:-/tmp}
+INFO=${YUMI_UPDATE_INFO:-$RUNTIME/yumi/update_info.json}
+DRY=${YUMI_UPDATE_DRY:-}
+SELF=$(readlink -f "$0")
+
+B=$'\e[1m' G=$'\e[1;32m' Y=$'\e[1;33m' R=$'\e[1;31m' N=$'\e[0m'
+
+aur_helper() {
+    if command -v paru >/dev/null; then echo paru
+    elif command -v yay >/dev/null; then echo yay; fi
+}
+
+# менеджеры в порядке обновления (имена — как у HyDE, их понимает yumi-menu-system)
+managers() {
+    command -v pacman >/dev/null && command -v checkupdates >/dev/null && echo pacman
+    aur_helper
+    command -v flatpak >/dev/null && echo flatpak
+}
+
+title() {
+    case $1 in pacman) echo "pacman (репозитории)" ;; paru|yay) echo "AUR ($1)" ;; *) echo "$1" ;; esac
+}
+
+list_cmd() {     # список ожидающих обновлений (только чтение)
+    case $1 in
+        pacman)   LANG=C LC_ALL=C checkupdates ;;
+        paru|yay) LANG=C LC_ALL=C "$1" -Qua ;;
+        flatpak)  LANG=C LC_ALL=C flatpak remote-ls --updates ;;
+    esac 2>/dev/null
+}
+
+upgrade_cmd() {  # команда обновления
+    case $1 in
+        pacman)   echo "sudo pacman -Syu" ;;
+        paru|yay) echo "$1 -Sua" ;;
+        flatpak)  echo "flatpak update" ;;
+    esac
+}
+
+count() {        # как count_updates у HyDE: непустые строки (у flatpak — без заголовка Application)
+    list_cmd "$1" | grep -v -e '^[[:space:]]*$' -e '^Application' -e '^:: ' | wc -l
+}
+
+# checkupdates: 0 — есть обновления, 2 — нет, 1 — сбой (нет сети при загрузке, занята база pacman).
+# При сбое — прежнее число из кеша и пометка «!» для collect (иначе пилюля прячется до следующей проверки, до суток)
+count_pacman() {
+    local out rc
+    out=$(LANG=C LC_ALL=C checkupdates 2>/dev/null); rc=$?
+    if [[ $rc -eq 0 || $rc -eq 2 ]]; then
+        printf '%s\n' "$out" | grep -c -v -e '^[[:space:]]*$'
+    else
+        echo "!$(sed -n 's/.*"name": "pacman", "count": \([0-9]*\).*/\1/p' "$INFO" 2>/dev/null | head -1)"
+    fi
+}
+
+RETRY_SEC=${YUMI_UPDATE_RETRY:-600}
+schedule_retry() {   # одна повторная проверка через RETRY_SEC (Waybar сам проверяет лишь раз в сутки)
+    [[ -n $DRY ]] && { echo "[пробный режим] повтор через ${RETRY_SEC} с"; return; }
+    setsid -f bash -c 'exec 9>"$1"; flock -n 9 || exit 0; sleep "$2"; pkill -RTMIN+20 waybar' \
+        _ "$RUNTIME/yumi/update-retry.lock" "$RETRY_SEC" </dev/null >/dev/null 2>&1
+}
+
+# --- кеш ---
+NAMES=() COUNTS=()
+collect() {
+    NAMES=() COUNTS=()
+    local m
+    FAILED=""
+    for m in $(managers); do
+        NAMES+=("$m")
+        if [[ $m == pacman ]]; then
+            c=$(count_pacman)
+            [[ $c == !* ]] && { FAILED=1; c=${c#!}; c=${c:-0}; }
+            COUNTS+=("$c")
+        else
+            COUNTS+=("$(count "$m")")
+        fi
+    done
+}
+
+total() { local t=0 c; for c in "${COUNTS[@]}"; do t=$((t + c)); done; echo $t; }
+
+store() {
+    local json='{"managers": [' i sep="" tmp
+    for i in "${!NAMES[@]}"; do
+        json+="$sep{\"name\": \"${NAMES[i]}\", \"count\": ${COUNTS[i]}}"
+        sep=", "
+    done
+    json+="]"
+    [[ -n ${FAILED:-} ]] && json+=', "failed": true'      # сбой проверки — кешу не верить (см. from_cache)
+    json+="}"
+    mkdir -p "$(dirname "$INFO")" && tmp=$(mktemp "$INFO.XXXXXX") || return
+    printf '%s\n' "$json" >"$tmp" && mv -f "$tmp" "$INFO"
+}
+
+waybar_json() {
+    local t i tip
+    t=$(total)
+    if [[ ${#NAMES[@]} -eq 0 ]]; then
+        tip="Нет менеджеров пакетов"
+    elif [[ $t -eq 0 ]]; then
+        tip="Система обновлена"
+    else
+        tip="Обновлений: $t"
+        for i in "${!NAMES[@]}"; do tip+="\\n$(title "${NAMES[i]}"): ${COUNTS[i]}"; done
+    fi
+    if [[ $t -eq 0 ]]; then
+        printf '{"text": "", "tooltip": "%s", "class": "up-to-date"}\n' "$tip"
+    else
+        printf '{"text": "󰮯 %s", "tooltip": "%s", "class": "updates"}\n' "$t" "$tip"
+    fi
+}
+
+CACHE_MIN=${YUMI_UPDATE_CACHE_MIN:-30}
+from_cache() {   # NAMES/COUNTS из свежего удачного кеша; 1 — нет такого кеша
+    [[ -z ${YUMI_UPDATE_FORCE:-} && -s $INFO ]] || return 1
+    [[ -n $(find "$INFO" -mmin "-$CACHE_MIN" 2>/dev/null) ]] || return 1
+    jq -e '.failed // false | not' "$INFO" >/dev/null 2>&1 || return 1
+    mapfile -t NAMES < <(jq -r '.managers[].name' "$INFO" 2>/dev/null)
+    mapfile -t COUNTS < <(jq -r '.managers[].count' "$INFO" 2>/dev/null)
+    [[ ${#NAMES[@]} -gt 0 && ${#NAMES[@]} -eq ${#COUNTS[@]} ]]
+}
+
+refresh_waybar() {
+    if [[ -n $DRY ]]; then echo "[пробный режим] pkill -RTMIN+20 waybar"; return; fi
+    pkill -RTMIN+20 waybar 2>/dev/null
+}
+
+# --- интерактивное обновление (внутри kitty) ---
+[[ $(locale charmap 2>/dev/null) == UTF-8 ]] || export LC_CTYPE=C.UTF-8   # ширина столбцов в символах, а не байтах
+
+row() {          # строка таблицы: printf %-24s считает байты, а не буквы
+    local p1 p2
+    printf -v p1 '%*s' $((24 - ${#1})) ''
+    printf -v p2 '%*s' $((8 - ${#2})) ''
+    printf '%s%s%s%s  %s\n' "$1" "$p1" "$p2" "$2" "$3"
+}
+
+summary() {
+    local i t
+    printf '%s\n' "${B}Обновление системы${N}"
+    printf '%.0s=' {1..60}; echo
+    row "Менеджер" "Ждёт" "Состояние"
+    printf '%.0s-' {1..60}; echo
+    for i in "${!NAMES[@]}"; do
+        if [[ ${COUNTS[i]} -gt 0 ]]; then state="${Y}есть обновления${N}"; else state="${G}обновлено${N}"; fi
+        row "$(title "${NAMES[i]}")" "${COUNTS[i]}" "$state"
+    done
+    printf '%.0s-' {1..60}; echo
+    t=$(total)
+    if [[ $t -gt 0 ]]; then state="${Y}ждут обновления${N}"; else state="${G}всё обновлено${N}"; fi
+    row "Всего" "$t" "$state"
+}
+
+previews() {
+    local i
+    if [[ $(total) -eq 0 ]]; then printf '\n%s\n' "${G}Система уже обновлена.${N}"; return; fi
+    printf '\n%s\n' "${B}Что обновится${N}"
+    for i in "${!NAMES[@]}"; do
+        [[ ${COUNTS[i]} -gt 0 ]] || continue
+        printf '\n%s\n' "$(title "${NAMES[i]}")"
+        printf '%.0s~' {1..60}; echo
+        list_cmd "${NAMES[i]}" | grep -v -e '^[[:space:]]*$' || echo "${R}Не удалось получить список${N}"
+    done
+}
+
+SNAP_HOOKS=${YUMI_UPDATE_HOOKS:-/usr/share/libalpm/hooks}
+snap_note() {    # строка о снимках перед обновлением (только чтение: snapper list)
+    local last=""
+    command -v snapper >/dev/null && last=$(snapper -c root --jsonout list 2>/dev/null \
+        | jq -r '[.root[]? | select(.number != 0) | .date] | max // empty' 2>/dev/null)
+    last=${last:0:16}
+    if [[ -f $SNAP_HOOKS/05-snap-pac-pre.hook && -f $SNAP_HOOKS/zz-snap-pac-post.hook ]]; then
+        printf '\n%s\n' "${G}Снимок:${N} snap-pac сам снимет / до и после обновления (откат: меню «Система» → «Снимки btrfs»)."
+        [[ -n $last ]] && printf '%s\n' "Последний снимок /: $last"
+    else
+        printf '\n%s\n' "${Y}snap-pac не найден — обновление пройдёт без снимка.${N}"
+        printf '%s\n' "Снимок вручную: snapper -c root create --cleanup-algorithm number --description \"Перед обновлением\""
+        [[ -n $last ]] && printf '%s\n' "Последний снимок /: $last"
+    fi
+}
+
+ask() {          # [Д/н], по умолчанию «да»
+    local a
+    read -r -p $'\n'"$1 [Д/н] " a || return 1
+    a=${a,,}
+    [[ -z $a || $a == y || $a == yes || $a == д || $a == да ]]
+}
+
+upgrades() {
+    local i cmd rc
+    for i in "${!NAMES[@]}"; do
+        [[ ${COUNTS[i]} -gt 0 ]] || continue
+        cmd=$(upgrade_cmd "${NAMES[i]}")
+        printf '\n%s\n' "${B}Обновляю: $(title "${NAMES[i]}")${N}"
+        printf '%.0s~' {1..60}; echo
+        if [[ -n $DRY ]]; then echo "[пробный режим] $cmd"; continue; fi
+        $cmd; rc=$?
+        if [[ $rc -ne 0 ]]; then
+            printf '\n%s\n' "${R}Ошибка ($cmd, код $rc) — остальное не обновляю.${N}"
+            return $rc
+        fi
+    done
+    return 0
+}
+
+interactive() {
+    local rc=0 tried=""
+    collect
+    command -v fastfetch >/dev/null && fastfetch
+    echo
+    summary
+    previews
+    if [[ $(total) -gt 0 ]]; then
+        snap_note
+        if ask "Обновить сейчас?"; then
+            tried=1
+            upgrades; rc=$?
+        else
+            printf '\n%s\n' "${Y}Обновление пропущено.${N}"
+        fi
+    fi
+    collect
+    store
+    refresh_waybar
+    if [[ -n $tried ]]; then echo; summary; fi
+    read -r -p $'\n'"Нажми Enter, чтобы закрыть…" _ || true
+    return $rc
+}
+
+run() {
+    local cmd=(kitty --class yumi-update --title "Обновление системы" -e "$SELF" interactive)
+    command -v uwsm >/dev/null && cmd=(uwsm app -- "${cmd[@]}")
+    if [[ -n $DRY ]]; then
+        echo "[пробный режим] ${cmd[*]@Q}"
+        echo "[пробный режим] внутри kitty по очереди (только где есть обновления):"
+        local m
+        for m in $(managers); do echo "  $(upgrade_cmd "$m")"; done
+        return 0
+    fi
+    exec "${cmd[@]}"
+}
+
+case ${1:-check} in
+    check|status)
+        # Waybar перезапускается при каждой смене обоев и сразу зовёт check — свежий (до CACHE_MIN мин) удачный
+        # результат берём из кеша: иначе каждая смена обоев гоняла checkupdates (сеть, сотни МБ базы, нагрузка
+        # во время анимации). После обновления (run) кеш удаляется, после сбоя помечен failed — тогда проверка заново
+        if from_cache; then waybar_json; exit 0; fi
+        collect; store; waybar_json; if [[ -n $FAILED ]]; then schedule_retry; fi ;;
+    run|up)       run ;;
+    interactive)  interactive ;;
+    *)            echo "yumi-update check|run|interactive" >&2; exit 1 ;;
+esac

@@ -1,0 +1,572 @@
+#!/usr/bin/env python3
+"""yumi-menu-picker — выбор эмодзи и символов Nerd Font на GTK (каркас yumi-panel;
+замена rofi `hyde-shell emoji-picker` и `hyde-shell glyph-picker`).
+  yumi-menu-picker --emoji [--center|--bar]   эмодзи (бинд SUPER+,)
+  yumi-menu-picker --glyph [--center|--bar]   символы Nerd Font (бинд SUPER+.)
+  yumi-menu-picker --close                    закрыть открытое меню
+Повторный вызов закрывает меню. Вкладки «Эмодзи / Символы» — переключение без перезапуска (Ctrl+Tab).
+
+Клавиши: печать — поиск (рус/англ: русские слова переводятся по небольшому словарю), ↓ — к сетке,
+стрелки — выбор, Enter — вставить, Shift+Enter — только скопировать, Esc — очистить поиск / закрыть.
+Мышь: щелчок — вставить, Shift+щелчок — только скопировать; наведение — название в подсказке и в шапке.
+
+Вставка: символ копируется в буфер (wl-copy), меню закрывается, через ~120 мс `wtype -- СИМВОЛ`
+печатает его в окно, где был фокус (строка целиком: эмодзи из нескольких кодовых точек с ZWJ тоже).
+  YUMI_PICKER_PASTE=0    только копировать, без wtype
+
+Данные (копии баз HyDE, остаются после его удаления) ищутся по порядку:
+  $YUMI_PICKER_DATA, ~/.local/share/yumi-panel/data, <папка скрипта>/data
+  emoji.db: «СИМВОЛ название ключевые слова»;  glyph.db: «СИМВОЛ<TAB>набор-имя_глифа»
+Недавние: $YUMI_PICKER_CACHE (по умолчанию ~/.cache/yumi-panel)/picker-recent-{emoji,glyph}.json;
+при первом запуске подхватываются недавние HyDE (перенесены в ~/.cache/yumi/theme/landing/show_*.recent).
+
+Отладка:
+  YP_DRYRUN=1           ничего не копируется и не вставляется: действие печатается в stderr
+                        (недавние пишутся только если задан YUMI_PICKER_CACHE)
+  YP_PICK_SEARCH=текст  сразу ввести текст в поиск;  YP_PICK_HOVER=N — подсветить N-ю ячейку
+  YP_PICK_ACT=pick:N | copy:N | recent:N   через 1 с «выбрать» ячейку (только с YP_DRYRUN=1)
+  YP_PICK_KEYS="Down,Right,Ctrl+Tab,Shift+Return"   прогнать клавиши через обработчик (только с YP_DRYRUN=1)
+  YP_PICK_SHAPE=1       через 0,9 с напечатать положение рамки в слое (для снимков grim)
+Откат: удалить этот файл, ~/.local/share/yumi-panel/data/{emoji,glyph}.db и picker-recent-*.json"""
+import json
+import os
+import sys
+import unicodedata
+
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi/panel"))
+import yumipanel as yp  # noqa: E402  (сам перезапускает процесс с layer-shell)
+from yumipanel import Gtk, Gdk, GLib, Pango  # noqa: E402
+
+DRY = yp.DRY
+HOME = os.path.expanduser("~")
+HERE = os.path.dirname(os.path.realpath(__file__))
+DATA_DIR = os.path.join(HOME, ".local/share/yumi-panel/data")       # постоянное место баз (после установки)
+DATA_DIRS = [d for d in (os.environ.get("YUMI_PICKER_DATA"), DATA_DIR, os.path.join(HERE, "data")) if d]
+CACHE_DIR = os.environ.get("YUMI_PICKER_CACHE") or os.path.join(HOME, ".cache/yumi-panel")
+LEGACY_RECENT = os.path.join(HOME, ".cache/yumi/theme/landing/show_{}.recent")   # недавние HyDE (перенесены)
+PASTE = os.environ.get("YUMI_PICKER_PASTE", "1") != "0"
+PASTE_DELAY = 0.12            # с: меню успевает закрыться, фокус возвращается окну
+
+WIDTH = 468                   # логические px (на DP-1 каркас ×0.8)
+COLS = 9
+CELL = 48                     # сторона ячейки сетки (≈ ширина колонки: квадратные ячейки)
+ROWS = 6                      # видимых рядов (окно постоянного размера)
+RECENT_MAX = 27               # хранится; в ряду показывается COLS
+EMPTY_PAD = 14                # px под полосу прокрутки справа
+
+KINDS = {
+    #  ключ:  (заголовок, значок, файл, подсказка в поиске)
+    "emoji": ("Эмодзи", "󰇵", "emoji.db", "Поиск: smile, сердце, огонь…"),
+    "glyph": ("Символы", "󰬴", "glyph.db", "Поиск: arrow, git, папка, linux…"),
+}
+
+# Русские слова → английские ключи баз (базы HyDE только на английском). Ищется и по началу слова.
+RU = {
+    "улыбка": "smile", "смех": "laugh joy", "лицо": "face", "грусть": "sad", "грустный": "sad",
+    "плач": "cry", "слёзы": "tear cry", "слезы": "tear cry", "злой": "angry", "злость": "angry",
+    "сердце": "heart", "любовь": "love heart", "поцелуй": "kiss", "огонь": "fire", "звезда": "star",
+    "солнце": "sun", "луна": "moon", "облако": "cloud", "дождь": "rain", "снег": "snow", "погода": "weather",
+    "молния": "lightning zap", "кот": "cat", "кошка": "cat", "собака": "dog", "пёс": "dog", "мышь": "mouse",
+    "птица": "bird", "рыба": "fish", "цветок": "flower", "дерево": "tree", "лист": "leaf",
+    "еда": "food", "кофе": "coffee", "чай": "tea", "пицца": "pizza", "торт": "cake", "фрукт": "fruit",
+    "яблоко": "apple", "пиво": "beer", "вино": "wine", "рука": "hand", "палец": "finger", "класс": "thumbs up",
+    "ок": "ok", "хлопать": "clap", "праздник": "party celebration", "подарок": "gift", "деньги": "money",
+    "машина": "car", "дом": "home house", "музыка": "music", "нота": "note music", "игра": "game",
+    "спорт": "sport ball", "мяч": "ball", "флаг": "flag", "часы": "clock", "время": "clock time",
+    "телефон": "phone", "компьютер": "computer laptop", "ноутбук": "laptop", "клавиатура": "keyboard",
+    "папка": "folder", "файл": "file", "документ": "document file", "стрелка": "arrow", "вверх": "up",
+    "вниз": "down", "влево": "left", "вправо": "right", "назад": "back", "вперёд": "forward",
+    "поиск": "search magnify", "лупа": "magnify search", "настройки": "settings cog gear", "шестерёнка": "cog gear",
+    "замок": "lock", "ключ": "key", "пользователь": "account user", "человек": "person account",
+    "почта": "mail email", "письмо": "mail letter", "календарь": "calendar", "звонок": "bell",
+    "уведомление": "bell notification", "звук": "volume sound", "громкость": "volume", "микрофон": "microphone",
+    "камера": "camera", "фото": "camera image", "картинка": "image", "видео": "video", "плей": "play",
+    "пауза": "pause", "стоп": "stop", "батарея": "battery", "заряд": "battery charging", "сеть": "network",
+    "вайфай": "wifi", "блютуз": "bluetooth", "питание": "power", "выключить": "power", "корзина": "trash delete",
+    "удалить": "delete trash", "плюс": "plus add", "минус": "minus", "галочка": "check", "крестик": "close",
+    "предупреждение": "alert warning", "ошибка": "alert error", "инфо": "information", "вопрос": "question help",
+    "код": "code", "терминал": "terminal console", "гит": "git", "ветка": "branch", "линукс": "linux",
+    "арч": "arch", "питон": "python", "облачко": "cloud", "глаз": "eye", "книга": "book", "ручка": "pen pencil",
+    "карандаш": "pencil", "ножницы": "scissors", "копировать": "copy", "буфер": "clipboard", "закладка": "bookmark",
+    "дом.": "home", "карта": "map", "место": "map marker", "земля": "earth globe", "мир": "earth globe",
+    "ракета": "rocket", "самолёт": "airplane", "поезд": "train", "велосипед": "bike bicycle",
+    "привет": "wave hand", "сон": "sleep", "спать": "sleep", "череп": "skull", "призрак": "ghost",
+    "робот": "robot", "инопланетянин": "alien", "обезьяна": "monkey", "медведь": "bear", "лиса": "fox",
+    "единорог": "unicorn", "дракон": "dragon", "змея": "snake", "паук": "spider", "бабочка": "butterfly",
+}
+
+
+# ---------- данные ----------
+def find_db(name):
+    for d in DATA_DIRS:
+        p = os.path.join(d, name)
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def emoji_name(ch, desc):
+    """Название для подсказки: имя Unicode, если описание с него начинается; иначе всё описание."""
+    try:
+        nm = unicodedata.name(ch.replace("️", "")).lower()
+        if desc.lower().startswith(nm):
+            rest = desc[len(nm):].strip()
+            return desc[:len(nm)], rest
+    except (ValueError, TypeError):
+        pass
+    return desc, ""
+
+
+def load(kind):
+    """[(символ, название, подпись, строка поиска)]."""
+    path = find_db(KINDS[kind][2])
+    out = []
+    if not path:
+        return out, None
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.rstrip("\n")
+            if kind == "emoji":
+                ch, _, desc = line.partition(" ")
+                if not ch:
+                    continue
+                name, rest = emoji_name(ch, desc)
+                out.append((ch, name, rest, desc.casefold()))
+            else:
+                ch, _, gname = line.partition("\t")
+                if not ch or not gname:
+                    continue
+                ch = ch.strip()
+                fam, _, base = gname.partition("-")
+                words = base.replace("_", " ").replace("-", " ")
+                out.append((ch, words, f"{fam} · {gname}", f"{gname} {words} {fam}".casefold()))
+    return out, path
+
+
+def recent_path(kind):
+    return os.path.join(CACHE_DIR, f"picker-recent-{kind}.json")
+
+
+def load_recent(kind, items):
+    """Недавние — список символов. Нет своего файла — взять из HyDE (кроме служебной строки «Arch linux»)."""
+    try:
+        with open(recent_path(kind)) as f:
+            data = json.load(f)
+            return [c for c in data if isinstance(c, str)][:RECENT_MAX]
+    except (OSError, ValueError):
+        pass
+    known = {it[0] for it in items}
+    out = []
+    try:
+        with open(LEGACY_RECENT.format(kind), encoding="utf-8", errors="replace") as f:
+            for line in f:
+                ch = line.split("\t" if kind == "glyph" else " ", 1)[0].strip()
+                if ch in known and ch not in out:
+                    out.append(ch)
+    except OSError:
+        pass
+    return out[:RECENT_MAX]
+
+
+def save_recent(kind, recent):
+    if DRY and not os.environ.get("YUMI_PICKER_CACHE"):
+        print(f"[dry-run] недавние ({kind}):", "".join(recent[:COLS]), "->", recent_path(kind), file=sys.stderr, flush=True)
+        return
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        tmp = recent_path(kind) + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(recent[:RECENT_MAX], f, ensure_ascii=False)
+        os.replace(tmp, recent_path(kind))
+    except OSError:
+        pass
+
+
+def expand_query(q):
+    """Слова запроса → список вариантов для каждого слова (русские — с переводом)."""
+    groups = []
+    for w in q.casefold().split():
+        alts = {w}
+        if any("а" <= c <= "я" or c == "ё" for c in w):
+            for ru, en in RU.items():
+                if ru.startswith(w) or (len(w) >= 4 and w.startswith(ru[:max(len(ru) - 2, 3)])):
+                    alts.update(en.split())
+        groups.append(alts)
+    return groups
+
+
+def score(item, groups):
+    """0 — не подходит; больше — выше в выдаче (совпадение в названии и с начала слова)."""
+    hay = item[3]
+    name = item[1].casefold()
+    total = 0
+    for alts in groups:
+        best = 0
+        for a in alts:
+            if a == item[0] or a == name:
+                best = max(best, 100)
+            elif a in name:
+                words = name.split()
+                best = max(best, 8 if a in words else 6 if (" " + name).find(" " + a) >= 0 else 4)
+            elif (" " + hay + " ").find(" " + a + " ") >= 0:
+                best = max(best, 3)
+            elif (" " + hay).find(" " + a) >= 0:
+                best = max(best, 2)
+            elif a in hay:
+                best = max(best, 1)
+        if not best:
+            return 0
+        total += best
+    return total
+
+
+# ---------- меню ----------
+CSS = f"""
+.yk-seg .yp-seg-btn {{ padding: 5px 4px; }}
+.yk-seg .yp-seg-icon {{ font-size: 12pt; }}
+.yk-seg .yp-seg-text {{ font-size: 8.5pt; }}
+.yk-search {{ min-height: 22px; }}
+.yk-recent-box {{ min-height: {CELL - 6}px; padding: 0 2px; }}
+.yk-recent {{
+  min-width: {CELL - 6}px; min-height: {CELL - 6}px; padding: 0; border-radius: 12px;
+  background: @yp-btn; border: none; box-shadow: none; color: @yp-fg; transition: background 150ms;
+}}
+.yk-recent:hover {{ background: @yp-hover; }}
+.yk-recent:focus-visible {{ outline: none; box-shadow: inset 0 0 0 2px @yp-accent; }}
+.yk-recent-none {{ color: alpha(@yp-fg2, 0.55); font-size: 9.5pt; margin-left: 4px; }}
+.yk-scroll {{ background: none; border-radius: 14px; }}
+.yk-scroll scrollbar {{ background: transparent; border: none; }}
+gridview.yk-grid {{ background: none; }}
+gridview.yk-grid > child {{
+  padding: 0; margin: 1px; border-radius: 12px; background: none; outline: none;
+  transition: background 120ms, box-shadow 120ms;
+}}
+gridview.yk-grid > child:hover, gridview.yk-grid > child.hover {{ background: @yp-hover; }}
+gridview.yk-grid > child:selected {{ background: alpha(@yp-accent, 0.22); box-shadow: inset 0 0 0 1px alpha(@yp-accent, 0.6); }}
+gridview.yk-grid:focus-within > child:selected {{ box-shadow: inset 0 0 0 2px @yp-accent; }}
+.yk-cell {{ min-width: {CELL - 2}px; min-height: {CELL - 2}px; color: @yp-fg; }}
+.yk-emoji {{ font-family: "Apple Color Emoji"; font-size: 19pt; }}
+.yk-glyph {{ font-family: "JetBrainsMono Nerd Font"; font-size: 17pt; }}
+.yk-recent.yk-emoji {{ font-size: 16pt; }}
+.yk-recent.yk-glyph {{ font-size: 14pt; }}
+.yk-empty {{ color: alpha(@yp-fg2, 0.7); font-size: 10.5pt; margin: 30px; }}
+.yk-foot {{ color: alpha(@yp-fg2, 0.6); font-size: 8.5pt; margin: 0 4px; }}
+.yk-foot-key {{ color: @yp-accent; font-weight: 700; }}
+.yk-dry {{ color: @yp-accent; font-size: 8.5pt; font-weight: 700; letter-spacing: 1px; }}
+"""
+
+
+class Picker:
+    def __init__(self, panel, body, kind):
+        self.panel, self.k = panel, panel.k
+        self.kind = kind
+        self.cache = {}                    # kind → (items, путь базы)
+        self.recent = {}
+        self.shown = []                    # текущая выдача (индексы items)
+        self.hover_text = None
+        panel.add_css(CSS)
+
+        self.seg = yp.Segmented([("emoji", KINDS["emoji"][1], "Эмодзи", True),
+                                 ("glyph", KINDS["glyph"][1], "Символы Nerd Font", True)],
+                                kind, self.set_kind)
+        self.seg.add_css_class("yk-seg")
+        body.append(self.seg)
+
+        self.search = Gtk.SearchEntry(hexpand=True, css_classes=["yp-entry", "yk-search"])
+        self.search.connect("search-changed", lambda *_: self.refilter())
+        self.search.set_key_capture_widget(panel)
+        body.append(self.search)
+
+        # недавние: один ряд постоянной высоты
+        body.append(yp.section("НЕДАВНИЕ"))
+        self.recent_box = Gtk.Box(spacing=round(6 * self.k), css_classes=["yk-recent-box"])
+        body.append(self.recent_box)
+
+        # сетка — Gtk.GridView (виртуальная: 10 тыс. глифов без задержки)
+        self.section_l = yp.section("ВСЕ")
+        body.append(self.section_l)
+        self.model = Gtk.StringList()
+        self.sel = Gtk.SingleSelection(model=self.model, autoselect=True, can_unselect=False)
+        factory = Gtk.SignalListItemFactory()
+        factory.connect("setup", self.cell_setup)
+        factory.connect("bind", self.cell_bind)
+        self.grid = Gtk.GridView(model=self.sel, factory=factory, min_columns=COLS, max_columns=COLS,
+                                 css_classes=["yk-grid"], single_click_activate=False)
+        self.grid.connect("activate", lambda _g, pos: self.choose_pos(pos, paste=True))
+        self.sel.connect("selection-changed", self.on_selected)
+        self.scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, child=self.grid,
+                                         css_classes=["yk-scroll"])
+        self.scroll.set_size_request(-1, round((CELL + 2) * ROWS * self.k))
+        self.empty = Gtk.Label(label="Ничего не найдено", css_classes=["yk-empty"], visible=False,
+                               halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER, wrap=True, justify=Gtk.Justification.CENTER)
+        over = Gtk.Overlay(child=self.scroll)
+        over.add_overlay(self.empty)
+        body.append(over)
+
+        foot = Gtk.Label(xalign=0, use_markup=True, css_classes=["yk-foot"], ellipsize=Pango.EllipsizeMode.END,
+                         max_width_chars=1, hexpand=True)
+        mode = "вставить" if PASTE else "скопировать"
+        foot.set_markup(f"<b>Enter</b> {mode}  ·  <b>Shift+Enter</b> копия  ·  <b>Ctrl+Tab</b> вкладка")
+        body.append(foot)
+        if DRY:
+            body.append(Gtk.Label(label="ПРОВЕРКА: БЕЗ КОПИРОВАНИЯ И ВСТАВКИ", xalign=0, max_width_chars=1,
+                                  ellipsize=Pango.EllipsizeMode.END, css_classes=["yk-dry"]))
+
+        # клавиши — раньше каркаса (его контроллер добавляется после build): Enter/Shift+Enter, ↓, Esc, Ctrl+Tab
+        keys = Gtk.EventControllerKey(propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        keys.connect("key-pressed", self.on_key)
+        panel.add_controller(keys)
+
+        self.set_kind(kind, first=True)
+        if os.environ.get("YP_PICK_SEARCH"):
+            self.search.set_text(os.environ["YP_PICK_SEARCH"])
+            self.refilter()
+        if os.environ.get("YP_PICK_SHAPE"):            # для снимков: где рамка внутри слоя (логич. px)
+            GLib.timeout_add(900, lambda: print("[shape]", *(panel.shape or ()), file=sys.stderr, flush=True) and False)
+        if any(os.environ.get(v) for v in ("YP_PICK_HOVER", "YP_PICK_ACT", "YP_PICK_KEYS")):
+            GLib.timeout_add(1000, self.debug_act)
+        GLib.timeout_add(80, lambda: self.search.grab_focus() and False)
+
+    # ---------- данные ----------
+    def data(self, kind=None):
+        kind = kind or self.kind
+        if kind not in self.cache:
+            self.cache[kind] = load(kind)
+            self.recent[kind] = load_recent(kind, self.cache[kind][0])
+        return self.cache[kind][0]
+
+    def set_kind(self, kind, first=False):
+        self.kind = kind
+        items = self.data()
+        self.by_char = {it[0]: it for it in items}
+        title, icon, _f, placeholder = KINDS[kind]
+        self.panel.title_l.set_label(f"{icon}  {title}")
+        self.search.set_placeholder_text(placeholder)
+        for c in ("yk-emoji", "yk-glyph"):
+            (self.grid.add_css_class if c == f"yk-{kind}" else self.grid.remove_css_class)(c)
+        if not first:
+            self.seg.set_active(kind)
+        self.render_recent()
+        self.refilter()
+
+    # ---------- сетка ----------
+    def cell_setup(self, _f, li):
+        lbl = Gtk.Label(css_classes=["yk-cell"], halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
+        lbl.set_size_request(round((CELL - 2) * self.k), round((CELL - 2) * self.k))
+        lbl.item = None
+        motion = Gtk.EventControllerMotion()
+        motion.connect("enter", lambda *_: self.on_hover(lbl.item))
+        motion.connect("leave", lambda *_: self.on_hover(None))
+        lbl.add_controller(motion)
+        click = Gtk.GestureClick(button=1)
+        click.connect("released", lambda g, *_: self.choose_item(
+            lbl.item, paste=not (g.get_current_event_state() & Gdk.ModifierType.SHIFT_MASK)))
+        lbl.add_controller(click)
+        li.set_child(lbl)
+
+    def cell_bind(self, _f, li):
+        lbl = li.get_child()
+        idx = int(li.get_item().get_string())
+        item = self.data()[idx]
+        lbl.item = item
+        lbl.set_label(item[0])
+        lbl.set_tooltip_text(self.tip(item))
+        for c in ("yk-emoji", "yk-glyph"):
+            (lbl.add_css_class if c == f"yk-{self.kind}" else lbl.remove_css_class)(c)
+
+    def tip(self, item):
+        return item[1] + (f"\n{item[2]}" if item[2] else "")
+
+    def refilter(self):
+        items = self.data()
+        q = self.search.get_text().strip()
+        if q:
+            groups = expand_query(q)
+            scored = [(s, i) for i, it in enumerate(items) if (s := score(it, groups))]
+            scored.sort(key=lambda x: (-x[0], len(items[x[1]][3]), x[1]))      # при равенстве — короче описание
+            self.shown = [i for _s, i in scored]
+        else:
+            self.shown = list(range(len(items)))
+        self.model.splice(0, self.model.get_n_items(), [str(i) for i in self.shown])
+        self.empty.set_visible(not self.shown)
+        if not items:
+            self.empty.set_label(f"Нет базы {KINDS[self.kind][2]}\n(ищется в {DATA_DIRS[0] if os.environ.get('YUMI_PICKER_DATA') else DATA_DIR})")
+        else:
+            self.empty.set_label("Ничего не найдено")
+        if self.shown:
+            self.sel.set_selected(0)
+        self.scroll.get_vadjustment().set_value(0)
+        self.section_l.set_label(f"НАЙДЕНО: {len(self.shown)}" if q else "ВСЕ")
+        self.subtitle()
+
+    def subtitle(self):
+        n = len(self.data())
+        self.base_sub = (f"найдено {len(self.shown)} из {n}" if self.search.get_text().strip()
+                         else f"{n} {'эмодзи' if self.kind == 'emoji' else 'символов'}")
+        self.panel.set_subtitle(self.hover_text or self.base_sub, live=True)
+
+    def on_hover(self, item):
+        self.hover_text = f"{item[0]}  {item[1]}" if item else None
+        self.panel.set_subtitle(self.hover_text or self.base_sub, live=True)
+
+    def on_selected(self, *_):
+        """Выбор стрелками — название в шапке (мышью — через on_hover)."""
+        focus = self.panel.get_focus()
+        pos = self.sel.get_selected()
+        if focus is not None and (focus is self.grid or focus.is_ancestor(self.grid)) and pos < len(self.shown):
+            item = self.data()[self.shown[pos]]
+            self.panel.set_subtitle(f"{item[0]}  {item[1]}", live=True)
+
+    # ---------- недавние ----------
+    def render_recent(self):
+        while (c := self.recent_box.get_first_child()):
+            self.recent_box.remove(c)
+        rec = [c for c in self.recent.get(self.kind, []) if c in self.by_char][:COLS]
+        if not rec:
+            self.recent_box.append(Gtk.Label(label="Здесь появятся выбранные символы", xalign=0,
+                                             valign=Gtk.Align.CENTER, css_classes=["yk-recent-none"]))
+            return
+        for ch in rec:
+            item = self.by_char[ch]
+            b = Gtk.Button(label=ch, tooltip_text=self.tip(item), css_classes=["yk-recent", f"yk-{self.kind}"])
+            b.set_size_request(round((CELL - 6) * self.k), round((CELL - 6) * self.k))
+            b.connect("clicked", lambda *_, it=item: self.choose_item(it, paste=True))
+            click = Gtk.GestureClick(button=1, propagation_phase=Gtk.PropagationPhase.CAPTURE)
+            click.connect("pressed", lambda g, *_, it=item: self._shift_click(g, it))
+            b.add_controller(click)
+            motion = Gtk.EventControllerMotion()
+            motion.connect("enter", lambda *_, it=item: self.on_hover(it))
+            motion.connect("leave", lambda *_: self.on_hover(None))
+            b.add_controller(motion)
+            self.recent_box.append(b)
+
+    def _shift_click(self, g, item):
+        if g.get_current_event_state() & Gdk.ModifierType.SHIFT_MASK:
+            g.set_state(Gtk.EventSequenceState.CLAIMED)        # кнопка не сработает — только копия
+            self.choose_item(item, paste=False)
+
+    # ---------- клавиши ----------
+    def on_key(self, _c, keyval, _code, state):
+        name = Gdk.keyval_name(keyval) or ""
+        ctrl = state & Gdk.ModifierType.CONTROL_MASK
+        shift = state & Gdk.ModifierType.SHIFT_MASK
+        focus = self.panel.get_focus()
+        in_search = focus is not None and (focus is self.search or focus.is_ancestor(self.search))
+        in_grid = focus is not None and (focus is self.grid or focus.is_ancestor(self.grid))
+        if ctrl and name in ("Tab", "ISO_Left_Tab", "Page_Down", "Page_Up"):
+            self.set_kind("glyph" if self.kind == "emoji" else "emoji")
+            return True
+        if name in ("Return", "KP_Enter") and (in_search or in_grid or focus is None):
+            self.choose_pos(self.sel.get_selected(), paste=not shift)
+            return True
+        if name == "Escape" and self.search.get_text():
+            self.search.set_text("")
+            self.search.grab_focus()
+            return True
+        if name in ("Down", "Page_Down") and (in_search or focus is None) and self.shown:
+            self.focus_grid()
+            return True
+        if in_grid and name in ("Up", "Down", "Left", "Right", "Page_Up", "Page_Down", "Home", "End"):
+            # своя навигация по сетке (как в меню обоев: штатная в layer-shell окне ненадёжна)
+            pos, n = self.sel.get_selected(), len(self.shown)
+            if name == "Up" and pos < COLS:
+                self.search.grab_focus()
+                return True
+            step = {"Right": 1, "Left": -1, "Down": COLS, "Up": -COLS,
+                    "Page_Down": COLS * ROWS, "Page_Up": -COLS * ROWS, "Home": -n, "End": n}[name]
+            new = min(max(pos + step, 0), n - 1) if n else 0
+            if n:
+                self.grid.scroll_to(new, Gtk.ListScrollFlags.FOCUS | Gtk.ListScrollFlags.SELECT, None)
+            return True
+        return False
+
+    def focus_grid(self):
+        pos = self.sel.get_selected()
+        pos = pos if pos != Gtk.INVALID_LIST_POSITION else 0
+        self.grid.scroll_to(pos, Gtk.ListScrollFlags.FOCUS | Gtk.ListScrollFlags.SELECT, None)
+        focus = self.panel.get_focus()
+        if focus is None or not (focus is self.grid or focus.is_ancestor(self.grid)):
+            self.grid.grab_focus()          # окно без клавиатуры (тесты) или ячейка ещё не создана
+
+    # ---------- выбор ----------
+    def choose_pos(self, pos, paste):
+        if pos == Gtk.INVALID_LIST_POSITION or pos >= len(self.shown):
+            return
+        self.choose_item(self.data()[self.shown[pos]], paste)
+
+    def choose_item(self, item, paste):
+        if not item:
+            return
+        ch = item[0]
+        rec = [ch] + [c for c in self.recent.get(self.kind, []) if c != ch]
+        self.recent[self.kind] = rec[:RECENT_MAX]
+        save_recent(self.kind, self.recent[self.kind])
+        paste = paste and PASTE
+        if DRY:
+            cps = " ".join(f"U+{ord(c):04X}" for c in ch)
+            print(f"[dry-run] wl-copy -- {ch}   ({cps})", file=sys.stderr, flush=True)
+            if paste:
+                print(f"[dry-run] закрыть меню; через {int(PASTE_DELAY * 1000)} мс: wtype -- {ch}",
+                      file=sys.stderr, flush=True)
+            else:
+                print("[dry-run] закрыть меню (только копия)", file=sys.stderr, flush=True)
+            self.panel.app.quit()
+            return
+        import subprocess
+        try:
+            p = subprocess.Popen(["wl-copy"], stdin=subprocess.PIPE, start_new_session=True, env=yp.CHILD_ENV,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            p.stdin.write(ch.encode())
+            p.stdin.close()
+        except OSError:
+            pass
+        if paste:
+            # отдельный процесс: меню закрывается сразу, фокус возвращается окну, потом печатаем строку целиком
+            yp.spawn("sh", "-c", f'sleep {PASTE_DELAY}; exec wtype -- "$1"', "yumi-picker-paste", ch)
+        self.panel.set_visible(False)
+        self.panel.app.quit()
+
+    # ---------- отладка ----------
+    def debug_act(self):
+        hov = os.environ.get("YP_PICK_HOVER", "")
+        if hov.isdigit() and int(hov) < len(self.shown):
+            self.sel.set_selected(int(hov))
+            self.on_hover(self.data()[self.shown[int(hov)]])
+        keys = os.environ.get("YP_PICK_KEYS", "") if DRY else ""
+        for i, k in enumerate(filter(None, keys.split(","))):
+            GLib.timeout_add(250 * i, lambda k=k: self.fake_key(k) or False)
+        act = os.environ.get("YP_PICK_ACT", "") if DRY else ""
+        what, _, n = act.partition(":")
+        if n.isdigit():
+            n = int(n)
+            if what in ("pick", "copy"):
+                self.choose_pos(n, paste=(what == "pick"))
+            elif what == "recent":
+                rec = [c for c in self.recent.get(self.kind, []) if c in self.by_char]
+                if n < len(rec):
+                    self.choose_item(self.by_char[rec[n]], paste=True)
+        return False
+
+
+    def fake_key(self, spec):
+        """«Ctrl+Tab», «Shift+Return», «Down» — через тот же обработчик, что и настоящие клавиши."""
+        *mods, name = spec.split("+")
+        state = Gdk.ModifierType(0)
+        for m in mods:
+            state |= {"Ctrl": Gdk.ModifierType.CONTROL_MASK, "Shift": Gdk.ModifierType.SHIFT_MASK}[m]
+        kv = Gdk.keyval_from_name(name)
+        if not self.on_key(None, kv, 0, state) and not self.panel.on_key(None, kv):
+            print(f"[keys] {spec}: не обработано", file=sys.stderr, flush=True)
+        focus = self.panel.get_focus()
+        print(f"[keys] {spec}: вкладка={self.kind} выбрано={self.sel.get_selected()} "
+              f"фокус={type(focus).__name__ if focus else None}", file=sys.stderr, flush=True)
+
+
+if __name__ == "__main__":
+    kind = "glyph" if "--glyph" in sys.argv else "emoji"
+    yp.WIDTH = WIDTH                      # каркас берёт ширину окна и шапки из yp.WIDTH
+    yp.HEADER_H = 104
+    # один id на оба вида: SUPER+, при открытых «Символах» закрывает меню (как повторный вызов)
+    app = yp.PanelApp("org.yumi.panel.picker", KINDS[kind][0], KINDS[kind][1],
+                      lambda panel, body: Picker(panel, body, kind))
+    sys.exit(app.run(sys.argv))

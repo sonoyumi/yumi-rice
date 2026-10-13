@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """yumi-tray — одноцветный трей для Waybar (значки фоновых программ глифами Nerd Font).
   yumi-tray daemon            Watcher+Host StatusNotifier (запускает сервис yumi-tray.service)
-  yumi-tray bar               бесконечный JSON для custom/tray (через waybar-iconwrap)
+  yumi-tray bar               бесконечный JSON для custom/tray (через bar/iconwrap)
   yumi-tray activate [N|ИМЯ]  показать окно программы (по умолчанию — требующую внимания или первую)
   yumi-tray list [--all]      список элементов (проверка)
 Меню со списком — yumi-menu-tray. Проверка без действий: YP_DRYRUN=1. Откат: yumi-uninstall tray"""
@@ -9,7 +9,7 @@ import json
 import os
 import sys
 
-sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-tray"))
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi/tray"))
 import yumitray as yt  # noqa: E402
 
 

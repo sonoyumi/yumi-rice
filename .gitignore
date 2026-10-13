@@ -11,3 +11,8 @@ home/.config/swaync/config.json
 home/.config/swaync/kitty-colors.css
 home/.config/rofi/themes/
 home/.config/waybar/config.jsonc
+**/apple-media-user-token
+**/yumi-vpn/*.conf
+**/warp-account.json
+**/wireproxy.conf
+**/phone/unlock.json

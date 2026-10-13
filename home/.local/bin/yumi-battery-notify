@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# yumi-battery-notify — предупреждения о низком заряде (замена HyDE batterynotify.lua: та не видит macsmc-battery).
+#   раз в 60 с читает /sys/class/power_supply/macsmc-battery/{capacity,status};
+#   при разряде: ≤ 15 % — «Низкий заряд», ≤ 5 % — критическое (не исчезает, заменяет первое);
+#   каждое — один раз за разряд; при подключении зарядки сброс, критическое закрывается.
+#   «Зарядка подключена/отключена» не показывает. Предел зарядки — yumi-battery-limit,
+#   выключение ☕ при < 20 % — yumi-caffeine guard; сюда не дублируются.
+# Служба: yumi-battery-notify.service (graphical-session.target).
+# Отладка:
+#   YUMI_BAT=каталог      вместо /sys/class/power_supply/macsmc-battery (файлы capacity, status)
+#   YUMI_BAT_INTERVAL=с   период опроса (60)
+#   YUMI_BAT_DRY=1        не слать уведомления, а печатать их
+#   YUMI_BAT_ONCE=1       одна проверка и выход
+# Откат: systemctl --user disable --now yumi-battery-notify; rm ~/.local/bin/yumi-battery-notify
+set -u
+
+BAT=${YUMI_BAT:-/sys/class/power_supply/macsmc-battery}
+INTERVAL=${YUMI_BAT_INTERVAL:-60}
+LOW=15
+CRIT=5
+APP="Батарея"
+
+level=0      # 0 — не предупреждали, 1 — «низкий» показан, 2 — критическое показано
+nid=""       # id последнего уведомления (для замены и закрытия)
+
+send() {     # send urgency icon summary body
+    if [[ -n ${YUMI_BAT_DRY:-} ]]; then
+        echo "[пробный режим] notify-send -a $APP -u $1 -i $2${nid:+ -r $nid} «$3» «$4»"
+        nid=${nid:-1}
+        return
+    fi
+    local args=(-a "$APP" -u "$1" -i "$2" -p)
+    [[ $1 == critical ]] && args+=(-t 0)
+    [[ -n $nid ]] && args+=(-r "$nid")
+    nid=$(notify-send "${args[@]}" "$3" "$4" 2>/dev/null) || nid=""
+}
+
+close_last() {
+    [[ -n $nid ]] || return
+    if [[ -n ${YUMI_BAT_DRY:-} ]]; then
+        echo "[пробный режим] закрыть уведомление $nid"
+    else
+        gdbus call --session --dest org.freedesktop.Notifications --object-path /org/freedesktop/Notifications \
+            --method org.freedesktop.Notifications.CloseNotification "$nid" >/dev/null 2>&1
+    fi
+    nid=""
+}
+
+check() {
+    local cap st
+    cap=$(<"$BAT/capacity") 2>/dev/null || return
+    st=$(<"$BAT/status") 2>/dev/null || return
+    [[ $cap =~ ^[0-9]+$ ]] || return
+    if [[ $st != Discharging ]]; then          # зарядка / заряжена / упёрлась в предел — сброс
+        [[ $level -eq 2 ]] && close_last
+        level=0 nid=""
+        return
+    fi
+    if (( cap <= CRIT && level < 2 )); then
+        send critical battery-empty "Критический заряд: $cap %" "Подключите зарядку — скоро ноутбук выключится"
+        level=2
+    elif (( cap <= LOW && level < 1 )); then
+        send normal battery-caution "Низкий заряд: $cap %" "Пора подключить зарядку"
+        level=1
+    fi
+}
+
+if [[ ! -r $BAT/capacity ]]; then
+    echo "yumi-battery-notify: нет $BAT/capacity — следить не за чем" >&2
+    exit 0       # без батареи не перезапускаться по кругу
+fi
+
+while :; do
+    check
+    [[ -n ${YUMI_BAT_ONCE:-} ]] && exit 0
+    sleep "$INTERVAL"
+done

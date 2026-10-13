@@ -1,0 +1,20 @@
+{
+  "name": "wallbash-theme",
+  "displayName": "Yumi Wallbash",
+  "description": "Тема VS Code в цветах обоев (Yumi-Rice). Файл themes/wallbash.json пишет yumi-colors, VS Code перечитывает его сам.",
+  "version": "1.0.0",
+  "publisher": "yumi",
+  "license": "MIT",
+  "engines": { "vscode": "^1.80.0" },
+  "categories": [ "Themes" ],
+  "contributes": {
+    "themes": [
+      {
+        "label": "Wallbash",
+        "uiTheme": "vs-dark",
+        "path": "./themes/wallbash.json",
+        "_watch": true
+      }
+    ]
+  }
+}

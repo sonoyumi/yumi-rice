@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# yumi fetch-info — значения для fastfetch (~/.config/fastfetch/config.jsonc): `info КЛЮЧ` печатает одно значение.
+# Всё собирается одним проходом в $XDG_RUNTIME_DIR/yumi/fetch.tsv и живёт 20 с — fastfetch зовёт info на каждую
+# строку, но тяжёлое считается один раз. Сеть не трогается: обновления, снимок и доктор — из кэшей
+# yumi-update и yumi-doctor.
+set -u
+RT="${XDG_RUNTIME_DIR:-/tmp}/yumi"; F="$RT/fetch.tsv"
+mkdir -p "$RT"
+
+collect() {
+    local o="" s v
+    put() { o+="$1"$'\t'"$2"$'\n'; }
+    # 系 система
+    if [ -s "$RT/update_info.json" ]; then
+        v=$(jq -r '[.managers[]|select(.count>0)|"\(.name) \(.count)"]|join(" · ")' "$RT/update_info.json" 2>/dev/null)
+        s=$(jq '[.managers[].count]|add' "$RT/update_info.json" 2>/dev/null)
+        [ "${s:-0}" -gt 0 ] && put upd "$s · $v" || put upd "нет, система свежая"
+    else put upd "ещё не проверялись"; fi
+    if [ -s "$RT/doctor.json" ]; then
+        put snap "$(jq -r '.checks[]|select(.id=="snapshots")|.summary' "$RT/doctor.json" 2>/dev/null | sed 's/^последний: //')"
+        s=$(jq -r '.status' "$RT/doctor.json"); v=$(jq -r '.problems' "$RT/doctor.json"); w=$(jq -r '.warnings' "$RT/doctor.json")
+        case $s in ok) put doc "✔ всё хорошо";; *) put doc "⚠ проблем: $v, предупреждений: $w";; esac
+    else put snap "—"; put doc "не проверялся (yumi-doctor)"; fi
+    if [ ! -s "$RT/doctor.json" ] || [ -n "$(find "$RT/doctor.json" -mmin +10 2>/dev/null)" ]; then   # кэш пишет меню «Система»
+        ( "$HOME/.local/bin/yumi-doctor" --json > "$RT/doctor.json.tmp" 2>/dev/null && mv "$RT/doctor.json.tmp" "$RT/doctor.json" ) </dev/null >/dev/null 2>&1 &
+    fi
+    s=$(stat -c %W / 2>/dev/null); [ "${s:-0}" -gt 0 ] && put age "$(( ($(date +%s) - s) / 86400 )) дн. назад" || put age "—"
+    # 機 машина
+    # нагрузка: ЦП — по /proc/stat за 0,2 с, ОЗУ — занято без кэша и буферов
+    local c1 c2 i1 i2 mt ma
+    read -r _ a1 b1 c1 i1 w1 x1 y1 z1 _ < /proc/stat; sleep 0.2
+    read -r _ a2 b2 c2 i2 w2 x2 y2 z2 _ < /proc/stat
+    local busy=$(( (a2+b2+c2+x2+y2+z2) - (a1+b1+c1+x1+y1+z1) )) idle=$(( (i2+w2) - (i1+w1) ))
+    mt=$(awk '/^MemTotal:/{print $2}' /proc/meminfo); ma=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)
+    put load "ЦП $(( busy * 100 / (busy + idle > 0 ? busy + idle : 1) )) % · ОЗУ $(( (mt - ma) * 100 / mt )) %"
+    local ssid sig vpn ts
+    ssid=$(nmcli -t -f NAME,TYPE con show --active 2>/dev/null | awk -F: '$2=="802-11-wireless"{print $1; exit}')
+    sig=$(awk 'NR==3{printf "%d", $3*100/70}' /proc/net/wireless 2>/dev/null)
+    vpn=$(nmcli -t -f NAME,TYPE con show --active 2>/dev/null | awk -F: '$2=="wireguard"{print $1; exit}')
+    ts=$(tailscale status --peers=false --json 2>/dev/null | jq -r .BackendState 2>/dev/null)
+    v="${ssid:-нет Wi-Fi}"; [ -n "$sig" ] && [ -n "$ssid" ] && v+=" ${sig} %"
+    v+=" · VPN ${vpn:-выкл}"; [ "$ts" = Running ] && v+=" · Tailscale"
+    put net "$v"
+    # 時 сейчас
+    v=$(playerctl -a metadata --format '{{status}}|{{artist}} — {{title}}' 2>/dev/null | awk -F'|' '$1=="Playing"{print $2; exit}')
+    put play "${v:-тишина}"
+    printf '%s' "$o" > "$F.tmp" && mv "$F.tmp" "$F"
+}
+
+quote() {   # японская мудрость дня — иероглифы и перевод
+    local -a q=(
+        "一期一会|Одна встреча — одна жизнь: цени каждый момент"
+        "七転び八起き|Упади семь раз — поднимись восемь"
+        "猿も木から落ちる|Даже обезьяна падает с дерева"
+        "継続は力なり|Постоянство — это сила"
+        "石の上にも三年|И на камне за три года посидишь — согреешь"
+        "花より団子|Клёцки лучше цветов: польза важнее красоты"
+        "急がば回れ|Спешишь — иди в обход"
+        "雨降って地固まる|После дождя земля твердеет"
+        "塵も積もれば山となる|И пыль, собираясь, становится горой"
+        "千里の道も一歩から|Путь в тысячу ри начинается с шага"
+        "出る杭は打たれる|Торчащий гвоздь забивают"
+        "十人十色|Десять человек — десять цветов"
+        "以心伝心|От сердца к сердцу, без слов"
+        "知らぬが仏|Не знаешь — спокоен, как Будда"
+        "井の中の蛙大海を知らず|Лягушка в колодце не знает о море"
+        "案ずるより産むが易し|Сделать легче, чем бояться"
+        "門前の小僧習わぬ経を読む|Мальчик у ворот храма читает сутры, которых не учил"
+        "月とすっぽん|Луна и черепаха: как небо и земля"
+        "初心忘るべからず|Не забывай дух новичка"
+        "笑う門には福来る|В дом, где смеются, приходит счастье"
+        "能ある鷹は爪を隠す|Умный сокол прячет когти"
+        "弘法も筆の誤り|И мастер каллиграфии ошибается кистью"
+        "明日は明日の風が吹く|Завтра подует завтрашний ветер"
+        "花鳥風月|Цветы, птицы, ветер и луна — красота природы"
+        "木を見て森を見ず|За деревьями не видеть леса"
+        "郷に入っては郷に従え|В чужой деревне живи по её обычаям"
+        "時は金なり|Время — деньги"
+        "灯台下暗し|Под маяком темнее всего"
+        "百聞は一見に如かず|Лучше один раз увидеть, чем сто раз услышать"
+        "諦めなければ道は開ける|Не сдашься — путь откроется"
+    )
+    local i=$(( 10#$(date +%j) % ${#q[@]} ))
+    printf '%s  —  %s' "${q[$i]%%|*}" "${q[$i]#*|}"
+}
+tip() {
+    local -a t=(
+        "z проект — сразу в папку из любого места; zi — выбрать из списка"
+        "Ctrl+R — поиск по истории команд (atuin), фильтр по папке — Ctrl+R ещё раз"
+        "SUPER+Space — пульт: программы, файлы, команды, счёт, «:эмодзи», «?веб»"
+        "yumi-doctor — проверка всей системы; --fix — безопасная починка"
+        "ll — подробный список с git-статусом, lt — дерево папки"
+        "yumi-wallpaper collection неон — листать только одну коллекцию"
+        "SUPER+ALT+← / → — обои; в пульте — коллекции по настроению"
+        "pl / pa — поиск пакета среди установленных / во всех; in — установить"
+    )
+    printf 'совет: %s' "${t[$(( 10#$(date +%j) % ${#t[@]} ))]}"
+}
+
+case "${1:-}" in
+quote) quote; exit ;;
+tip) tip; exit ;;
+"") collect; exit ;;
+esac
+fresh() { [ -s "$F" ] && [ -n "$(find "$F" -newermt '-20 seconds' 2>/dev/null)" ]; }
+if ! fresh; then
+    exec 7>"$RT/fetch.lock"; flock 7
+    fresh || collect
+fi
+awk -F'\t' -v k="$1" '$1==k{print $2; exit}' "$F"

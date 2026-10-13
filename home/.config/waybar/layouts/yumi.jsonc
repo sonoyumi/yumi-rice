@@ -3,12 +3,12 @@
     "layer": "top",
     "output": ["*"],
     "height": 10,
-    "exclusive": true,
+    "exclusive": false,   // место под бар резервирует монитор (reserved в hyprland.lua) — окна не прыгают при перезапуске
+    "margin-top": -38,    // неэксклюзивный бар Hyprland ставит под зарезервированной полосой — поднимаем в неё
     "passthrough": false,
     "reload_style_on_change": false,   // стиль применяется перезапуском после смены обоев (утечка памяти при перечитывании)
     "include": [
-        "$XDG_CONFIG_HOME/waybar/modules/*json*",
-        "$XDG_CONFIG_HOME/waybar/includes/includes.json"
+        "$XDG_CONFIG_HOME/waybar/modules/*json*"   // modules/yumi-modules.jsonc — ключи, перенесённые из HyDE
     ],
 
     // ===== Слева =====
@@ -41,17 +41,13 @@
         "modules": ["custom/tray"]
     },
     "custom/tray": {
-        "exec": "@HOME@/.local/bin/waybar-iconwrap @HOME@/.local/bin/yumi-tray bar",
+        "exec": "@HOME@/.local/lib/yumi/bar/iconwrap @HOME@/.local/bin/yumi-tray bar",
         "return-type": "json",
         "restart-interval": 3,
         "format": "{}",
         "on-click": "@HOME@/.local/bin/yumi-menu-tray",
         "on-click-middle": "@HOME@/.local/bin/yumi-tray activate",
         "on-click-right": "@HOME@/.local/bin/yumi-tray activate"
-    },
-    "group/pill#mouse": {
-        "orientation": "inherit",
-        "modules": ["custom/mouse"]
     },
     "group/pill#right1": {
         "orientation": "inherit",
@@ -90,7 +86,7 @@
         "on-click": "@HOME@/.local/bin/yumi-menu-top"
     },
     "custom/top": {
-        "exec": "@HOME@/.local/bin/waybar-iconwrap @HOME@/.local/bin/waybar-pillfmt mem",
+        "exec": "@HOME@/.local/lib/yumi/bar/iconwrap @HOME@/.local/lib/yumi/bar/pillfmt mem",
         "return-type": "json",
         "interval": 20,
         "signal": 12,
@@ -103,13 +99,19 @@
         "on-click": "@HOME@/.local/bin/yumi-menu-calendar",
         "tooltip-format": "{:%A, %d %B %Y}"
     },
-    "custom/updates": {                               // yumi: модуль HyDE, но клик — наше системное меню (там «Обновить систему»)
+    "custom/updates": {                               // yumi: счёт — yumi-update check (вместо hyde-shell system.update), клик — системное меню
+        "exec": "@HOME@/.local/bin/yumi-update check",
+        "return-type": "json",
+        "format": "{0}",
+        "interval": 86400,
+        "signal": 20,                                 // yumi-update после обновления шлёт RTMIN+20
+        "tooltip": true,
         "on-click": "@HOME@/.local/bin/yumi-menu-system",
         "menu": ""
     },
     "custom/swaync": {
         "menu": "",                                    // yumi: без встроенного меню Waybar по правому клику
-        "exec": "@HOME@/.local/bin/cc-bar",
+        "exec": "@HOME@/.local/lib/yumi/bar/cc-bar",
         "exec-if": "pgrep -x swaync",
         "return-type": "json",
         "format": "{}",
@@ -121,27 +123,27 @@
         "on-click": "@HOME@/.local/bin/yumi-menu-clipboard"
     },
     "custom/lang": {
-        "exec": "@HOME@/.local/bin/waybar-iconwrap @HOME@/.local/bin/waybar-lang",
+        "exec": "@HOME@/.local/lib/yumi/bar/iconwrap @HOME@/.local/lib/yumi/bar/lang",
         "return-type": "json",
         "format": "{}",
-        "on-click": "@HOME@/.local/bin/kb-switch"
+        "on-click": "@HOME@/.local/bin/yumi-kb-switch"
     },
     "custom/caffeine": {
-        "exec": "@HOME@/.local/bin/waybar-iconwrap @HOME@/.local/bin/waybar-caffeine",
+        "exec": "@HOME@/.local/lib/yumi/bar/iconwrap @HOME@/.local/lib/yumi/bar/caffeine",
         "return-type": "json",
         "interval": 120,
         "signal": 15,
-        "on-click": "@HOME@/.local/bin/cc caffeine toggle"
+        "on-click": "@HOME@/.local/bin/yumi-cc caffeine toggle"
     },
     "custom/wifi": {
-        "exec": "@HOME@/.local/bin/waybar-iconwrap @HOME@/.local/bin/waybar-wifi",
+        "exec": "@HOME@/.local/lib/yumi/bar/iconwrap @HOME@/.local/lib/yumi/bar/wifi",
         "return-type": "json",
         "interval": 60,
         "signal": 16,
         "on-click": "@HOME@/.local/bin/yumi-menu-wifi"
     },
     "custom/bt": {
-        "exec": "@HOME@/.local/bin/waybar-iconwrap @HOME@/.local/bin/waybar-bt",
+        "exec": "@HOME@/.local/lib/yumi/bar/iconwrap @HOME@/.local/lib/yumi/bar/bt",
         "return-type": "json",
         "interval": 60,
         "signal": 17,
@@ -188,7 +190,7 @@
         "format-alt-click": "click-middle"
     },
     "custom/powerprofile": {
-        "exec": "@HOME@/.local/bin/waybar-iconwrap @HOME@/.local/bin/waybar-ppd",
+        "exec": "@HOME@/.local/lib/yumi/bar/iconwrap @HOME@/.local/lib/yumi/bar/ppd",
         "return-type": "json",
         "interval": 120,
         "signal": 8,
@@ -196,7 +198,7 @@
         "on-click": "@HOME@/.local/bin/yumi-menu-power"
     },
     "custom/workflow": {
-        "exec": "@HOME@/.local/bin/waybar-iconwrap @HOME@/.local/bin/waybar-workflow",
+        "exec": "@HOME@/.local/lib/yumi/bar/iconwrap @HOME@/.local/lib/yumi/bar/workflow",
         "return-type": "json",
         "interval": 120,
         "signal": 9,
@@ -204,7 +206,7 @@
         "on-click": "@HOME@/.local/bin/yumi-menu-power"
     },
     "custom/vpn": {
-        "exec": "@HOME@/.local/bin/waybar-iconwrap @HOME@/.local/bin/waybar-vpn",
+        "exec": "@HOME@/.local/lib/yumi/bar/iconwrap @HOME@/.local/lib/yumi/bar/vpn",
         "return-type": "json",
         "interval": 60,
         "signal": 10,
@@ -212,12 +214,12 @@
         "on-click": "@HOME@/.local/bin/yumi-menu-vpn"
     },
     // Плеер: одна пилюля из двух модулей — круглая обложка + «Название — Артист  1:23/3:39».
-    // Обложку рисует waybar-player-cover (PNG с кругом, кольцо акцента пока играет), её будит сигнал 14
-    // от waybar-player-pill. Ничего не играет — скрыты оба модуля, а у #pill.player нет своих отступов,
+    // Обложку рисует bar/player-cover (PNG с кругом, кольцо акцента пока играет), её будит сигнал 14
+    // от bar/player-pill. Ничего не играет — скрыты оба модуля, а у #pill.player нет своих отступов,
     // поэтому пустая группа нулевой ширины и пузыря не видно.
     // Клик — окно yumi-player под пилюлей, средняя — пауза, правая — следующий трек, колесо — перемотка
     "image#player-cover": {
-        "exec": "@HOME@/.local/bin/waybar-player-cover",
+        "exec": "@HOME@/.local/lib/yumi/bar/player-cover",
         "signal": 14,
         "interval": 30,
         "size": 22,
@@ -225,19 +227,19 @@
         "on-click": "@HOME@/.local/bin/yumi-player toggle --bar",
         "on-click-middle": "playerctl play-pause",
         "on-click-right": "playerctl next",
-        "on-scroll-up": "@HOME@/.local/bin/player-seek 5",
-        "on-scroll-down": "@HOME@/.local/bin/player-seek -5"
+        "on-scroll-up": "@HOME@/.local/bin/yumi-player-seek 5",
+        "on-scroll-down": "@HOME@/.local/bin/yumi-player-seek -5"
     },
     "custom/player-text": {
-        "exec": "@HOME@/.local/bin/waybar-iconwrap @HOME@/.local/bin/waybar-player-pill",
+        "exec": "@HOME@/.local/lib/yumi/bar/iconwrap @HOME@/.local/lib/yumi/bar/player-pill",
         "return-type": "json",
         "restart-interval": 3,
         "format": "{}",
         "on-click": "@HOME@/.local/bin/yumi-player toggle --bar",
         "on-click-middle": "playerctl play-pause",
         "on-click-right": "playerctl next",
-        "on-scroll-up": "@HOME@/.local/bin/player-seek 5",
-        "on-scroll-down": "@HOME@/.local/bin/player-seek -5"
+        "on-scroll-up": "@HOME@/.local/bin/yumi-player-seek 5",
+        "on-scroll-down": "@HOME@/.local/bin/yumi-player-seek -5"
     },
     // Эквалайзер yumi-eq (CFFI-модуль на C, ~/.local/src/yumi-eq): рисует прямо в пилюле, одна cava на оба
     // монитора, только пока играет; цвета @yb-acc/@yb-acc5 из обоев. Клики — как у всей пилюли.
@@ -251,16 +253,8 @@
         "on-click": "@HOME@/.local/bin/yumi-player toggle --bar",
         "on-click-middle": "playerctl play-pause",
         "on-click-right": "playerctl next",
-        "on-scroll-up": "@HOME@/.local/bin/player-seek 5",
-        "on-scroll-down": "@HOME@/.local/bin/player-seek -5"
-    },
-    "custom/mouse": {
-        "exec": "@HOME@/.local/bin/waybar-iconwrap @HOME@/.local/bin/waybar-mouse",
-        "return-type": "json",
-        "interval": 60,
-        "signal": 13,
-        "format": "{}",
-        "on-click": "@HOME@/.local/bin/yumi-menu-mouse"
+        "on-scroll-up": "@HOME@/.local/bin/yumi-player-seek 5",
+        "on-scroll-down": "@HOME@/.local/bin/yumi-player-seek -5"
     },
     "custom/power": {
         "menu": "",                                    // yumi: у HyDE тут меню-заглушка без файла

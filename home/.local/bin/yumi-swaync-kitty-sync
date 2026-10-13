@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Цвет фона kitty (тема из обоев) → центр управления (swaync): kitty-colors.css и перечитывание стиля.
+# Вызывает yumi-hyprlock-bg-sync через 4 с после смены обоев. Часть для меню rofi снята вместе с rofi (13.10).
+conf="$HOME/.config/kitty/theme.conf"
+bg="$(awk '/^background /{print $2; exit}' "$conf")"
+[ -z "$bg" ] && exit 0
+
+# swaync
+printf '@define-color kitty_bg %s;\n' "$bg" > "$HOME/.config/swaync/kitty-colors.css"
+swaync-client -rs >/dev/null 2>&1

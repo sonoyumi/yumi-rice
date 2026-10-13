@@ -20,10 +20,11 @@ HOME_DIR = REPO / "home"
 USER = os.environ.get("USER", "")
 GENERATED = {".config/hypr/hyprlock/yumi-google.conf", ".config/swaync/config.json", ".config/swaync/theme.css",
              ".config/waybar/theme.css", ".config/waybar/yumi-accent.css", ".config/kitty/yumi-colors.conf",
-             ".config/rofi/yumi/colors.rasi", ".config/yumi-player/accent.css", ".config/yumi-player/colors.css",
-             ".config/waybar/config.jsonc", ".config/waybar/style.css", ".config/hypr/hyprlock/avatar.jpg"}
+             ".config/kitty/theme.conf", ".config/hypr/themes/colors.conf", ".config/hypr/hyprtoolkit.conf",
+             ".config/yumi/player/accent.css", ".config/yumi/player/colors.css",
+             ".config/hypr/hyprlock/avatar.jpg", ".local/share/yumi-sddm/yumi/background.jpg"}
 SECRET = re.compile(r"(api[_-]?key|secret|passw(or)?d|token)\s*[:=]\s*['\"][^'\"\s$/]{8,}['\"]", re.I)
-EXTERNAL = {"hyde-shell"}  # команды HyDE и системы, не наши скрипты
+EXTERNAL = {"claude", "xdg-terminal-exec"}  # сторонние программы, не наши скрипты
 ALLOW_PRIVATE_WORDS = ('"claude": "',)  # иконка процесса в списке приложений меню процессов
 
 errors, warnings = [], []
@@ -103,6 +104,9 @@ def main():
         for name in bins - names - EXTERNAL:
             if re.search(r"(?:~|@HOME@|\$HOME)/\.local/bin/" + re.escape(name) + r"(?![\w.-])", text):
                 warnings.append(f"{rel} вызывает ~/.local/bin/{name}, которого нет в публичном манифесте")
+    for f in sorted((REPO / "system").rglob("*")):  # /etc: только личное (синтаксис там свой у каждого файла)
+        if f.is_file():
+            private(str(f.relative_to(REPO)), f.read_text(errors="ignore"))
     readme = (REPO / "README.md").read_text()
     for i, line in enumerate(readme.splitlines(), 1):
         if "claude" in line.lower() or str(Path.home()) in line:

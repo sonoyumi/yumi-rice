@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# yumi-lock — блокировка экрана без HyDE (замена `hyde-shell lock-session` и `hyde-shell lockscreen.sh`)
+#   yumi-lock            = SUPER+N: есть hypridle (org.freedesktop.ScreenSaver) → `loginctl lock-session`
+#                          (дальше hypridle вызывает свою lock_cmd); нет hypridle → сразу `yumi-lock --now`
+#   yumi-lock --now      = lock_cmd для hypridle: английская раскладка на всех клавиатурах (иначе пароль
+#                          уходит кириллицей → faillock) и hyprlock в отдельной области systemd (scope),
+#                          чтобы перезапуск hypridle не убил открытый экран блокировки.
+#                          Уже открыт hyprlock — второй не запускается.
+#   yumi-lock --print    напечатать, что было бы сделано (без запуска)
+#
+# Не проверять запуском: hyprlock, закрытый без ввода пароля, считается неверной попыткой (faillock).
+# Проверка без запуска: yumi-lock --print
+#
+# Отличие от HyDE (lockscreen.sh → app2unit hyde-lockscreen.service → hyprlock.sh → app2unit scope → hyprlock):
+#  · HyDE при повторном вызове ОСТАНАВЛИВАЛ уже открытый hyprlock своей области и запускал новый;
+#    здесь второй вызов ничего не делает (pidof hyprlock) — экран остаётся заблокированным тем же hyprlock.
+#  · ensure_lockscreen_bg_exist (hyprlock.png в кэше HyDE) не нужен: макет yumi-google берёт
+#    фон из ~/.cache/yumi/theme/hyprlock-bg.png, его готовит служба hyprlock-bg (это шаг «обои»).
+
+live() { [[ $1 != print ]]; }
+run() { if live "$MODE"; then "$@"; else printf 'DO:'; printf ' %q' "$@"; echo; fi; }
+
+lock_now() {
+    if pidof -q hyprlock; then
+        echo "hyprlock уже открыт — ничего не делаю"
+        return 0
+    fi
+    run hyprctl switchxkblayout all 0
+    # uwsm app: своя область в session-graphical.slice (как app2unit -t scope у HyDE)
+    run uwsm app -s s -a yumi-lockscreen -- hyprlock
+}
+
+MODE=""
+case $1 in
+    "" | session)
+        if busctl --user list 2>/dev/null | grep -q 'org.freedesktop.ScreenSaver'; then
+            run loginctl lock-session
+        else
+            lock_now
+        fi ;;
+    --now | now) lock_now ;;
+    --print | print) MODE=print; lock_now ;;
+    *) echo "использование: yumi-lock [--now|--print]" >&2; exit 2 ;;
+esac

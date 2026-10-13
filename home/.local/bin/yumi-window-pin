@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# yumi-window-pin — закрепить окно поверх всех столов (замена `hyde-shell window.pin`, SUPER+SHIFT+F)
+# Как window.pin.lua HyDE: закреплённое окно → снять с плавающих (это снимает и закрепление);
+# незакреплённое → сделать плавающим (если ещё нет) и закрепить.
+# DRY=1 — только напечатать команды. Откат: вернуть `hyde-shell window.pin` в binds.lua
+
+run() { if [[ -n $DRY ]]; then printf 'DO:'; printf ' %q' "$@"; echo; else "$@"; fi; }
+
+read -r pinned floating < <(hyprctl -j activewindow | jq -r '"\(.pinned // false) \(.floating // false)"')
+[[ -z $pinned || $pinned == null ]] && exit 1
+
+if [[ $pinned == true ]]; then
+    run hyprctl -q dispatch 'hl.dsp.window.float({action="toggle"})'
+    exit
+fi
+[[ $floating == true ]] || run hyprctl -q dispatch 'hl.dsp.window.float({action="toggle"})'
+run hyprctl -q dispatch 'hl.dsp.window.pin()'

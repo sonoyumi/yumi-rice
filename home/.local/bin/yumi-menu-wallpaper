@@ -2,10 +2,11 @@
 """yumi-menu-wallpaper — выбор обоев на GTK (каркас yumi-panel, замена rofi `hyde-shell wallpaper -GS`).
   yumi-menu-wallpaper [--center|--bar]   открыть / закрыть (--center — по центру, для бинда SUPER+SHIFT+W)
   yumi-menu-wallpaper --close            закрыть открытое меню
-Обои — из папки темы HyDE (~/.config/hyde/themes/<тема>/wallpapers, ~/Pictures/Wallpapers — ссылка на неё).
-Миниатюры — готовые HyDE (~/.cache/hyde/thumbs/<sha1>.thmb); нет миниатюры — уменьшенная копия файла (в памяти).
+Обои — из ~/Pictures/Wallpapers (одна папка, без тем).
+Миниатюры — готовые yumi-wallpaper (~/.cache/yumi/theme/thumbs/<sha1>.thmb); нет миниатюры — уменьшенная копия
+файла (в памяти).
 Хэши sha1 запоминаются в ~/.cache/yumi-panel/wall-hashes.json (путь+размер+время изменения).
-Применение — та же команда, что у меню HyDE: `hyde-shell wallpaper -G -s ФАЙЛ`
+Применение — `yumi-wallpaper set ФАЙЛ` (обои + цвета yumi-colors; раньше `hyde-shell wallpaper -G -s`)
 (ссылки wall.set/thmb/sqre…, кэш, wallbash-цвета, фон hyprlock). «Случайные» — случайный файл тем же путём.
 Клавиши: печать — поиск, стрелки — выбор, Enter — применить, Esc — закрыть.
 
@@ -22,13 +23,12 @@ import hashlib
 import json
 import os
 import random
-import shutil
 import subprocess
 import sys
 import threading
 import warnings
 
-sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-panel"))
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi/panel"))
 import yumipanel as yp  # noqa: E402  (сам перезапускает процесс с layer-shell)
 from yumipanel import Gtk, Gdk, GLib, Pango  # noqa: E402
 import gi  # noqa: E402
@@ -37,11 +37,11 @@ from gi.repository import GdkPixbuf  # noqa: E402
 
 DRY = yp.DRY
 HOME = os.path.expanduser("~")
-CACHE = os.path.join(HOME, ".cache/hyde")
+CACHE = os.path.join(HOME, ".cache/yumi/theme")
 THUMBS = os.path.join(CACHE, "thumbs")
 WALL_SET = os.path.join(CACHE, "wall.set")
 HASH_DB = os.path.join(HOME, ".cache/yumi-panel/wall-hashes.json")
-HYDE_SHELL = shutil.which("hyde-shell") or os.path.join(HOME, ".local/bin/hyde-shell")
+YUMI_WALLPAPER = os.path.join(HOME, ".local/bin/yumi-wallpaper")
 EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp")   # как у HyDE (+webp, если задан в WALLPAPER_FILETYPES)
 
 WIDTH = 720           # шире обычного меню: сетка 4 в ряд (логические px; на DP-1 каркас ×0.8)
@@ -54,6 +54,12 @@ GRID_H = 3 * (TILE_H + GAP) + TILE_H // 2                    # видно 3,5 р
 CSS = """
 .yp-wp-tools { margin: 0 0 2px 0; }
 .yp-wp-search { min-height: 22px; }
+.yp-wp-colls { background: none; }
+.yp-wp-colls flowboxchild { padding: 0; margin: 0; background: none; outline: none; }
+.yp-wp-coll { padding: 4px 11px; min-height: 0; border-radius: 12px; background: @yp-btn; color: @yp-fg;
+              border: none; box-shadow: none; font-size: 9.5pt; }
+.yp-wp-coll:hover { background: @yp-hover; }
+.yp-wp-coll.active { background: alpha(@yp-accent, 0.25); box-shadow: inset 0 0 0 1px alpha(@yp-accent, 0.7); }
 .yp-wp-scroll { background: none; }
 .yp-wp-grid { background: none; padding: 2px; }
 .yp-wp-grid flowboxchild { padding: 0; margin: 0; background: none; border-radius: 14px; outline: none; }
@@ -91,33 +97,17 @@ CSS = """
 
 
 def theme_dir():
-    """Папка обоев текущей темы HyDE: из ссылки ~/.config/hyde/themes/<тема>/wall.set или по wall.set."""
-    if os.environ.get("YP_WP_DIR"):
-        return os.environ["YP_WP_DIR"]
-    cur = os.path.realpath(WALL_SET)
-    d = os.path.dirname(cur)
-    if os.path.basename(d) == "wallpapers" and os.path.isdir(d):
-        return d
-    try:
-        theme = ""
-        with open(os.path.join(HOME, ".local/state/hyde/staterc")) as f:
-            for line in f:
-                if line.startswith("HYDE_THEME="):
-                    theme = line.split("=", 1)[1].strip().strip('"')
-        d = os.path.join(HOME, ".config/hyde/themes", theme, "wallpapers")
-        if theme and os.path.isdir(d):
-            return d
-    except OSError:
-        pass
-    return os.path.join(HOME, "Pictures/Wallpapers")
+    """Папка обоев: всегда ~/Pictures/Wallpapers (YP_WP_DIR — для проверки)."""
+    return os.environ.get("YP_WP_DIR") or os.path.join(HOME, "Pictures/Wallpapers")
 
 
 def list_walls(d):
     """Как find -H … | sort -k2 у HyDE: все картинки в папке (с подпапками, кроме */logo/*), по пути."""
     out = []
     for root, dirs, files in os.walk(os.path.realpath(d)):
-        dirs[:] = [x for x in dirs if x != "logo"]
-        out += [os.path.join(root, f) for f in files if f.lower().endswith(EXTS)]
+        dirs[:] = [x for x in dirs if x != "logo" and not x.startswith(".")]
+        # .preview.jpg коллекций (значок папки в Dolphin) и прочие скрытые файлы — не обои
+        out += [os.path.join(root, f) for f in files if f.lower().endswith(EXTS) and not f.startswith(".")]
     return sorted(out)
 
 
@@ -126,7 +116,7 @@ def nice_name(path):
 
 
 class Hashes:
-    """sha1 файлов обоев (имя миниатюр HyDE), с кэшем по размеру и времени изменения."""
+    """sha1 файлов обоев (имя миниатюр в thumbs/), с кэшем по размеру и времени изменения."""
 
     def __init__(self):
         self.lock = threading.Lock()
@@ -179,7 +169,10 @@ class Tile(Gtk.FlowBoxChild):
         super().__init__()
         self.path = path
         self.name = nice_name(path)
-        self.key = os.path.basename(path).casefold()
+        # поиск и по имени файла, и по коллекции (папке): «неон», «монохром»…
+        self.key = os.path.relpath(path, theme_dir()).casefold()
+        rel = os.path.relpath(os.path.dirname(path), theme_dir())
+        self.coll = "" if rel == "." else rel.split(os.sep)[0]          # папка-коллекция («01 Неон и ночной город»)
         w, h = round(TILE_W * k), round(TILE_H * k)
         box = Gtk.Overlay(css_classes=["yp-wp-tile"])
         box.set_overflow(Gtk.Overflow.HIDDEN)
@@ -227,6 +220,8 @@ class Wallpapers:
         self.applying = None
         self.tiles = []
         self.query = ""
+        self.coll = None                         # выбранная коллекция (None — все)
+        self.coll_btns = {}
         self.stop = threading.Event()
         panel.add_css(CSS)
         panel.on_key_hook = self.on_key
@@ -238,6 +233,11 @@ class Wallpapers:
         self.search.connect("activate", lambda *_: self.activate_selected())
         self.search.set_key_capture_widget(panel)
         body.append(self.search)
+
+        # коллекции — папки внутри папки обоев (по настроению, как в Dolphin); без подпапок ряд не показывается
+        self.colls_box = Gtk.FlowBox(css_classes=["yp-wp-colls"], selection_mode=Gtk.SelectionMode.NONE,
+                                     column_spacing=6, row_spacing=6, max_children_per_line=8, homogeneous=False)
+        body.append(self.colls_box)
 
         # сетка миниатюр
         self.grid = Gtk.FlowBox(css_classes=["yp-wp-grid"], homogeneous=True, valign=Gtk.Align.START,
@@ -282,6 +282,7 @@ class Wallpapers:
                 cur_i = i
             self.grid.append(t)
             self.tiles.append(t)
+        self.build_colls()
         self.subtitle()
         if not self.tiles:
             self.empty.set_label(f"В папке нет обоев\n{self.dir}")
@@ -350,7 +351,31 @@ class Wallpapers:
 
     # ---------- поиск ----------
     def filter(self, tile):
-        return not self.query or self.query in tile.key
+        return (self.coll is None or tile.coll == self.coll) and (not self.query or self.query in tile.key)
+
+    def build_colls(self):
+        """Кнопки «Все» + по коллекции; подпись — имя папки без номера («Неон и ночной город»)."""
+        colls = sorted({t.coll for t in self.tiles if t.coll})
+        self.colls_box.set_visible(bool(colls))
+        if not colls:
+            return
+        for key, label in [(None, "Все")] + [(c, c.split(" ", 1)[1] if c[:2].isdigit() and " " in c else c)
+                                            for c in colls]:
+            n = len(self.tiles) if key is None else sum(1 for t in self.tiles if t.coll == key)
+            b = Gtk.Button(label=f"{label}  {n}", css_classes=["yp-wp-coll"], focus_on_click=False)
+            b.connect("clicked", lambda *_, k=key: self.pick_coll(k))
+            self.colls_box.append(b)
+            self.coll_btns[key] = b
+        self.mark_coll()
+
+    def mark_coll(self):
+        for k, b in self.coll_btns.items():
+            (b.add_css_class if k == self.coll else b.remove_css_class)("active")
+
+    def pick_coll(self, key):
+        self.coll = key
+        self.mark_coll()
+        self.on_search(self.search)              # тот же путь, что у поиска: фильтр, выделение, счётчик
 
     def on_search(self, entry):
         self.query = entry.get_text().strip().casefold()
@@ -431,7 +456,7 @@ class Wallpapers:
         self.panel.busy += 1
         tile.set_applying(True)
         self.panel.toast(f"Применяю: {tile.name}…", hold=60)
-        cmd = (HYDE_SHELL, "wallpaper", "-G", "-s", tile.path)
+        cmd = (YUMI_WALLPAPER, "set", tile.path)
         if DRY:
             yp.do(*cmd)
             GLib.timeout_add(900, lambda: self.applied(tile, True, "") or False)

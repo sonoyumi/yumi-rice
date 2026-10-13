@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""yumi-menu-power — меню «Питание» на GTK (каркас yumi-panel): батарея, профиль питания, workflow HyDE.
+"""yumi-menu-power — меню «Питание» на GTK (каркас yumi-panel): батарея, профиль питания, рабочий режим (workflow).
   yumi-menu-power [--bar|--center]   открыть / закрыть
   yumi-menu-power --close            закрыть открытое меню
 Батарея — UPower (D-Bus, живые сигналы) + /sys/class/power_supply, плюс опрос раз в 5 с в потоке.
 Профиль — power-profiles-daemon (D-Bus, переключение через powerprofilesctl).
-Workflow — как menu-workflows: hyde-shell workflows --set NAME, сигнал Waybar RTMIN+9.
+Workflow — через yumi-workflow set NAME (он же шлёт Waybar RTMIN+9); текущий — ~/.local/state/yumi/workflow,
+  список — ~/.config/hypr/yumi/workflows/*.lua.
 
 Отладка:
   YP_DRYRUN=1        смена профиля и workflow не выполняется: команда пишется в stderr, меню имитирует результат
@@ -14,13 +15,12 @@ Workflow — как menu-workflows: hyde-shell workflows --set NAME, сигна�
   YP_POWER_DEBUG=1  кадры анимации подсветки и смена профиля — в stderr
 Откат: yumi-uninstall panel"""
 import os
-import shutil
 import subprocess
 import sys
 import threading
 import time
 
-sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-panel"))
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi/panel"))
 import yumipanel as yp  # noqa: E402  (сам перезапускает процесс с layer-shell)
 from yumipanel import Gtk, Gio, GLib, Pango  # noqa: E402
 
@@ -31,9 +31,9 @@ SYS_BAT = "/sys/class/power_supply/macsmc-battery"
 UPOWER = "org.freedesktop.UPower"
 PPD = "org.freedesktop.UPower.PowerProfiles"
 PPD_PATH = "/org/freedesktop/UPower/PowerProfiles"
-STATERC = os.path.expanduser("~/.local/state/hyde/staterc")
-WF_DIR = os.path.expanduser("~/.local/share/hypr/lua/workflows")
-HYDE_SHELL = shutil.which("hyde-shell") or os.path.expanduser("~/.local/bin/hyde-shell")
+WF_STATE = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"), "yumi/workflow")
+WF_DIR = os.path.expanduser("~/.config/hypr/yumi/workflows")
+YUMI_WORKFLOW = os.path.expanduser("~/.local/bin/yumi-workflow")
 
 PROFILES = [("power-saver", "󰌪", "Эконом"), ("balanced", "󰾅", "Баланс"), ("performance", "󱐋", "Производит.")]
 PROFILE_SUB = {"power-saver": "тише и дольше от батареи", "balanced": "обычный режим",
@@ -205,14 +205,12 @@ def state_words(d):
 
 
 def current_workflow():
+    """Текущий режим yumi-workflow (одна строка); нет файла — None (тогда первый по алфавиту = 01-default)."""
     try:
-        with open(STATERC) as f:
-            for line in f:
-                if line.startswith("HYPR_WORKFLOW="):
-                    return line.split("=", 1)[1].strip().strip('"')
+        with open(WF_STATE) as f:
+            return f.readline().strip() or None
     except OSError:
-        pass
-    return None
+        return None
 
 
 def workflow_names():
@@ -400,10 +398,13 @@ class Power:
                                       Gio.DBusSignalFlags.NONE, lambda *_: self.schedule_refresh())
             self.bus.signal_subscribe(None, "org.freedesktop.DBus.Properties", "PropertiesChanged", PPD_PATH,
                                       None, Gio.DBusSignalFlags.NONE, lambda *_: self.read_profile())
-        self.wf_mon = Gio.File.new_for_path(os.path.dirname(STATERC)).monitor_directory(
+        # yumi-workflow пишет файл атомарно (временный + переименование) — следим за каталогом, а не за файлом;
+        # каталог создаём заранее: монитор несуществующего каталога пропускает первое изменение
+        os.makedirs(os.path.dirname(WF_STATE), exist_ok=True)
+        self.wf_mon = Gio.File.new_for_path(os.path.dirname(WF_STATE)).monitor_directory(
             Gio.FileMonitorFlags.WATCH_MOVES, None)
         self.wf_mon.connect("changed", lambda _m, f, o, _e: (
-            "staterc" in {x.get_basename() for x in (f, o) if x}) and self.update_workflows())
+            os.path.basename(WF_STATE) in {x.get_basename() for x in (f, o) if x}) and self.update_workflows())
 
         self.apply_battery(read_battery(self.bus, self.bat_path))   # первый раз — сразу, окно открывается готовым
         self.read_profile()
@@ -665,8 +666,7 @@ class Power:
         self.toast(f"Применяю «{title}»…", hold=30)
 
         def work():
-            ok, msg = run_cmd(HYDE_SHELL, "workflows", "--set", name, timeout=20)
-            run_cmd("pkill", "-RTMIN+9", "waybar")
+            ok, msg = run_cmd(YUMI_WORKFLOW, "set", name, timeout=20)   # сигнал Waybar шлёт сам yumi-workflow
             GLib.idle_add(done, ok, msg)
 
         def done(ok, msg):
@@ -677,7 +677,7 @@ class Power:
             if ok:
                 self.toast(f"Workflow: {title}")
             else:
-                self.toast(f"Не удалось: {msg[:60] or 'hyde-shell'}", error=True, hold=6)
+                self.toast(f"Не удалось: {msg[:60] or 'yumi-workflow'}", error=True, hold=6)
             return False
         threading.Thread(target=work, daemon=True).start()
 

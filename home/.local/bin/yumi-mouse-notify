@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# yumi-mouse-notify — напоминания о заряде мыши Logitech PRO X 2 (вместо пилюли мыши в Waybar).
+#   раз в 120 с читает заряд из ядра: /sys/class/power_supply/hidpp_battery_*/{model_name,capacity,status,online}
+#   (драйвер hid-logitech-hidpp — так же, как читало waybar-mouse и читает меню мыши; Solaar не нужен);
+#   при разряде: ≤ 25 % — «Мышь: заряд N %», ≤ 10 % — критическое «поставьте на зарядку» (висит, заменяет первое);
+#   каждое — один раз за цикл разряда. Сброс порога: мышь заряжается (Charging/Full) или заряд снова выше
+#   порога (на 3 % — чтобы колебание 25↔26 не давало повторов). При зарядке критическое закрывается.
+#   Мышь выключена / приёмника нет — ничего не делает и состояние не сбрасывает.
+# Служба: yumi-mouse-notify.service (graphical-session.target) — постоянная: bash в sleep дешевле таймера,
+#   который каждые 2 мин запускал бы новый процесс и хранил состояние в файле.
+# Отладка (пробный режим — уведомления только печатаются):
+#   YUMI_MOUSE_PCT=N        подменить заряд (мышь считается подключённой)
+#   YUMI_MOUSE_STATUS=…     подменить состояние (Discharging по умолчанию при YUMI_MOUSE_PCT; Charging/Full)
+#   YUMI_MOUSE_DRY=1        не слать уведомления, а печатать их
+#   YUMI_MOUSE_ONCE=1       одна проверка и выход
+#   YUMI_MOUSE_INTERVAL=с   период опроса (120)
+#   YUMI_MOUSE_SCRIPT="30 24 20 11 10 9 30 Charging:50 24"  прогнать последовательность значений (с DRY)
+# Откат: systemctl --user disable --now yumi-mouse-notify; rm ~/.local/bin/yumi-mouse-notify \
+#        ~/.config/systemd/user/yumi-mouse-notify.service
+set -u
+
+DEVICE="PRO X 2"
+INTERVAL=${YUMI_MOUSE_INTERVAL:-120}
+LOW=25
+CRIT=10
+HYST=3
+APP="Мышь"
+
+low_done=0 crit_done=0
+nid=""       # id последнего уведомления (для замены и закрытия)
+
+send() {     # send urgency icon summary body
+    if [[ -n ${YUMI_MOUSE_DRY:-} ]]; then
+        echo "[пробный режим] notify-send -a $APP -u $1 -i $2${nid:+ -r $nid} «$3» «$4»"
+        nid=${nid:-1}
+        return
+    fi
+    local args=(-a "$APP" -u "$1" -i "$2" -p)
+    [[ $1 == critical ]] && args+=(-t 0)
+    [[ -n $nid ]] && args+=(-r "$nid")
+    nid=$(notify-send "${args[@]}" "$3" "$4" 2>/dev/null) || nid=""
+}
+
+close_last() {
+    [[ -n $nid ]] || return
+    if [[ -n ${YUMI_MOUSE_DRY:-} ]]; then
+        echo "[пробный режим] закрыть уведомление $nid"
+    else
+        gdbus call --session --dest org.freedesktop.Notifications --object-path /org/freedesktop/Notifications \
+            --method org.freedesktop.Notifications.CloseNotification "$nid" >/dev/null 2>&1
+    fi
+    nid=""
+}
+
+read_mouse() {   # → cap st (глобальные); 1 — мыши нет / не на связи
+    cap="" st=""
+    if [[ -n ${YUMI_MOUSE_PCT:-} ]]; then
+        cap=$YUMI_MOUSE_PCT st=${YUMI_MOUSE_STATUS:-Discharging}
+        return 0
+    fi
+    local d
+    for d in /sys/class/power_supply/hidpp_battery_*; do
+        [[ -r $d/model_name ]] || continue
+        [[ $(<"$d/model_name") == "$DEVICE" ]] || continue
+        [[ $(<"$d/online" 2>/dev/null) == 0 ]] && return 1
+        cap=$(<"$d/capacity") 2>/dev/null || return 1
+        st=$(<"$d/status") 2>/dev/null || return 1
+        [[ $cap =~ ^[0-9]+$ ]] && return 0
+        return 1
+    done
+    return 1
+}
+
+check() {
+    read_mouse || return
+    if [[ $st == Charging || $st == Full ]]; then      # на зарядке — сброс, критическое убрать
+        (( crit_done )) && close_last
+        low_done=0 crit_done=0 nid=""
+        return
+    fi
+    (( cap >= CRIT + HYST )) && { (( crit_done )) && close_last; crit_done=0; }
+    (( cap >= LOW + HYST )) && { low_done=0; (( crit_done )) || nid=""; }
+    if (( cap <= CRIT && !crit_done )); then
+        send critical battery-empty "Мышь: заряд $cap %" "Поставьте $DEVICE на зарядку — скоро выключится"
+        crit_done=1 low_done=1
+    elif (( cap <= LOW && !low_done )); then
+        send normal input-mouse "Мышь: заряд $cap %" "Пора поставить $DEVICE на зарядку"
+        low_done=1
+    fi
+}
+
+if [[ -n ${YUMI_MOUSE_SCRIPT:-} ]]; then          # прогон последовательности (только пробный режим)
+    export YUMI_MOUSE_DRY=1
+    for v in $YUMI_MOUSE_SCRIPT; do
+        if [[ $v == *:* ]]; then YUMI_MOUSE_STATUS=${v%%:*} YUMI_MOUSE_PCT=${v#*:}
+        else YUMI_MOUSE_STATUS=Discharging YUMI_MOUSE_PCT=$v; fi
+        echo "— $YUMI_MOUSE_PCT % $YUMI_MOUSE_STATUS"
+        check
+    done
+    exit 0
+fi
+
+while :; do
+    check
+    [[ -n ${YUMI_MOUSE_ONCE:-} ]] && exit 0
+    sleep "$INTERVAL"
+done

@@ -5,7 +5,7 @@
 Шапка: загрузка CPU и память; мини-графики CPU и RAM за последнюю минуту (раз в 1 с, /proc читается в потоке),
 температура (самый горячий датчик SMC). Ниже — самые тяжёлые приложения (по памяти или по CPU),
 клик — подстраница: PID, команда, память, CPU, время работы, «Завершить» (SIGTERM) и «Убить» (SIGKILL).
-Приложения группируются и скрываются так же, как в пилюле: ~/.local/bin/waybar-top и ~/.config/waybar/top-hide.
+Приложения группируются и скрываются так же, как в пилюле: ~/.local/lib/yumi/bar/top и ~/.config/waybar/top-hide.
 
 Отладка:
   YP_DRYRUN=1          сигналы процессам не отправляются — команда пишется в stderr
@@ -20,7 +20,7 @@ import threading
 import time
 from importlib.machinery import SourceFileLoader
 
-sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-panel"))
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi/panel"))
 import yumipanel as yp  # noqa: E402  (сам перезапускает процесс с layer-shell)
 from yumipanel import Gtk, GLib, Pango  # noqa: E402
 import gi  # noqa: E402
@@ -31,7 +31,7 @@ except (ValueError, ImportError):
     from gi.repository import Gio as DesktopNS  # noqa: E402
 
 # группировка процессов по приложениям, PSS, top-hide, защищённые — общие с пилюлей
-wt = SourceFileLoader("waybar_top", os.path.expanduser("~/.local/bin/waybar-top")).load_module()
+wt = SourceFileLoader("waybar_top", os.path.expanduser("~/.local/lib/yumi/bar/top")).load_module()
 
 HISTORY = 60          # точек на графике (секунд)
 ROWS = 8              # строк в списке приложений

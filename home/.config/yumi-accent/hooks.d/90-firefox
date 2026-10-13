@@ -1,8 +1,0 @@
-#!/bin/sh
-# yumi-firefox: Firefox в цветах обоев через Pywalfox (откат — yumi-firefox-uninstall)
-T="$HOME/.local/bin/yumi-firefox-theme"
-[ -x "$T" ] || exit 0
-command -v pywalfox >/dev/null 2>&1 || exit 0
-timeout 8 "$T" >/dev/null 2>&1 || exit 0
-setsid -f "$T" --notify >/dev/null 2>&1 </dev/null
-exit 0

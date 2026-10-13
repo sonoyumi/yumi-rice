@@ -2,29 +2,28 @@
 """yumi-menu-mouse — меню «Мышь» на GTK (каркас yumi-panel) вместо rofi menu-mouse.
   yumi-menu-mouse [--bar|--center]   открыть / закрыть
   yumi-menu-mouse --close            закрыть открытое меню
-Logitech PRO X 2 через Solaar: заряд (мгновенно из /sys/class/power_supply/hidpp_battery_*, кеш пилюли
-~/.cache/waybar-mouse.json — запасной), DPI (плитки 400/800/1600/3200 + точный ползунок 100–6400),
+Logitech PRO X 2 через Solaar: заряд (мгновенно из /sys/class/power_supply/hidpp_battery_*; пилюли мыши в Waybar
+нет с 13.10 — о низком заряде напоминает yumi-mouse-notify), DPI (плитки 400/800/1600/3200 + точный ползунок 100–6400),
 частота опроса (500–8000 Гц), встроенный профиль мыши (onboard_profiles), «Открыть Solaar».
-Текущие настройки читаются `solaar config` в потоке (~1,5 с). Изменения — `solaar config …`, как в старом меню,
-затем сигнал пилюле Waybar (RTMIN+13).
+Сразу показывается DPI из ~/.config/solaar/config.yaml (dpi_extended), затем текущие настройки читаются
+`solaar config` в потоке (~1,5 с). Изменения — `solaar config …`, как в старом меню.
 
 Отладка:
   YP_DRYRUN=1   настройки мыши не меняются — команды solaar пишутся в stderr
   YP_MOUSE_ACT=dpi:1600 | rate:2000 | onboard:off | slider:1200   через 2,5 с «нажать» элемент (только с YP_DRYRUN=1)
 Откат: удалить этот файл (старое меню ~/.local/bin/menu-mouse не тронуто)."""
 import glob
-import json
 import os
 import re
 import sys
 import threading
 
-sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-panel"))
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi/panel"))
 import yumipanel as yp  # noqa: E402  (сам перезапускает процесс с layer-shell)
 from yumipanel import Gtk, GLib  # noqa: E402
 
 DEVICE = "PRO X 2"
-CACHE = os.path.expanduser("~/.cache/waybar-mouse.json")
+SOLAAR_CONF = os.path.expanduser("~/.config/solaar/config.yaml")
 DPIS = [400, 800, 1600, 3200]
 DPI_MIN, DPI_MAX, DPI_STEP = 100, 6400, 50
 RATES = [(500, "2ms"), (1000, "1ms"), (2000, "500us"), (4000, "250us"), (8000, "125us")]   # Гц → значение Solaar
@@ -76,12 +75,17 @@ def sys_battery():
     return None
 
 
-def cache():
+def config_dpi():
+    """DPI из конфига Solaar (как читала пилюля waybar-mouse): у PRO X 2 «расширенный» DPI хранится
+    в config.yaml как dpi_extended: {0: X, 1: Y, …}. Мгновенно, без запуска Solaar. None — не нашли."""
     try:
-        with open(CACHE) as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return {}
+        with open(SOLAAR_CONF) as f:
+            text = f.read()
+    except OSError:
+        return None
+    block = text.split(f"_NAME: {DEVICE}", 1)[-1]
+    m = re.search(r"dpi_extended:\s*\{0:\s*(\d+)", block)
+    return int(m[1]) if m else None
 
 
 def hz(rate):
@@ -190,12 +194,10 @@ class Mouse:
 
         body.append(yp.row_button("󰒓", "Открыть Solaar", self.open_solaar))
 
-        # первичное заполнение из кеша пилюли — мгновенно; потом Solaar
-        c = cache()
-        if c.get("dpi"):
-            self.st["dpi"] = c["dpi"]
-        if hz(c.get("rate")):
-            self.st["rate_hz"] = hz(c.get("rate"))
+        # первичное заполнение — DPI из конфига Solaar, мгновенно; потом сам Solaar
+        dpi = config_dpi()
+        if dpi:
+            self.st["dpi"] = dpi
         self.apply_settings(loading=True)
         self.refresh_battery()
         GLib.timeout_add_seconds(10, self.refresh_battery)
@@ -215,10 +217,6 @@ class Mouse:
     # ---------- заряд ----------
     def refresh_battery(self):
         b = sys_battery()
-        c = cache()
-        if b is None and c.get("battery") is not None:      # драйвер не отдал — кеш пилюли
-            b = {"pct": c["battery"], "state": "charging" if c.get("charging") else "discharging",
-                 "model": DEVICE, "maker": "Logitech", "cached": True}
         for cl in ("charging", "low", "critical", "offline"):
             self.card.remove_css_class(cl)
         if b is None:
@@ -268,7 +266,7 @@ class Mouse:
     def got_solaar(self, d):
         self.loading.set_visible(False)
         if not d:
-            self.panel.toast("Solaar не ответил — показаны данные пилюли", error=True, hold=4)
+            self.panel.toast("Solaar не ответил — DPI из конфига Solaar", error=True, hold=4)
             return False
         # пока пишем настройку — её не затирать (старое значение из Solaar), остальное принять
         self.st.update({k: v for k, v in d.items() if k not in self.writing})
@@ -315,12 +313,6 @@ class Mouse:
                     break
             if bg and not yp.DRY:
                 yp.spawn(*SOLAAR, "--window=hide")
-            if ok:
-                try:
-                    os.remove(CACHE)                         # DPI/частота изменились — пилюля перечитает их у Solaar
-                except OSError:
-                    pass
-                yp.do("pkill", "-RTMIN+13", "-x", "waybar")    # пилюля перечитает мышь
             GLib.idle_add(done, ok, msg)
 
         def done(ok, msg):
@@ -385,6 +377,7 @@ class Mouse:
                    on_ok=lambda: self.st.update(onboard=val))
 
     def open_solaar(self, *_):
+        self.panel.set_visible(False)        # мгновенно, без хвоста подложки (как в центре управления)
         yp.spawn(*SOLAAR, "--window=show")
         self.panel.app.quit()
 

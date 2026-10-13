@@ -1,0 +1,13 @@
+[SddmGreeterTheme]
+Name=yumi
+Description=Yumi — тёмные полупрозрачные карточки и пилюли в цветах обоев (как экран блокировки Yumi Google)
+Author=sonoyumi
+License=MIT
+Type=sddm-theme
+Version=1.0
+MainScript=Main.qml
+ConfigFile=theme.conf
+Screenshot=preview.png
+Theme-Id=yumi
+Theme-API=2.0
+QtVersion=6

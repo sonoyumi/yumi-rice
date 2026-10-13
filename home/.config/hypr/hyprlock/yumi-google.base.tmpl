@@ -1,9 +1,9 @@
 # ┌──────────────────────────────────────────────────────────────┐
 # │ Yumi Google — экран блокировки в стиле Google (вариант «Табло») │
-# │ Данные: ~/.local/bin/hyprlock-info, цитаты: quotes.txt          │
+# │ Данные: ~/.local/bin/yumi-hyprlock-info, цитаты: quotes.txt     │
 # │ Цвета — из обоев (wallbash), как в layout20                     │
 # │ Центр привязан к центру экрана, уголки — к краям: одинаково на  │
-# │ ШАБЛОН: правь этот файл, затем hyprlock-google-build            │
+# │ ШАБЛОН: правь этот файл, затем yumi-hyprlock-build              │
 # │ (соберёт yumi-google.conf: eDP-1 ×1.0, DP-1 ×0.8)               │
 # └──────────────────────────────────────────────────────────────┘
 
@@ -15,7 +15,7 @@ $on_acc = $wallbash_pry1_rgba
 $text   = $wallbash_txt1_rgba
 $card   = $yumi_card   # тёмный тон обоев (yumi-accent)
 $mono   = JetBrainsMono Nerd Font Propo
-$info   = @HOME@/.local/bin/hyprlock-info
+$info   = @HOME@/.local/bin/yumi-hyprlock-info
 
 general {
     immediate_render = true
@@ -34,7 +34,7 @@ animations {
 
 background {
     monitor =
-    path = @HOME@/.cache/hyde/hyprlock-bg.png
+    path = @HOME@/.cache/yumi/theme/hyprlock-bg.png
     blur_passes = 2
     blur_size = 5
     zindex = 0
@@ -256,7 +256,7 @@ image {
     monitor =
     path = @HOME@/.cache/hyprlock-info/art-placeholder.png
     reload_time = 2
-    reload_cmd = @HOME@/.local/bin/hyprlock-info art
+    reload_cmd = @HOME@/.local/bin/yumi-hyprlock-info art
     size = 68
     rounding = 12
     border_size = 0

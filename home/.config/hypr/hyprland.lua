@@ -1,28 +1,15 @@
--- Hyprland loads this file when it is started without a config, and it prefers
--- it over hyprland.conf. HyDE loads it too, last, as the override layer below.
--- The block keeps the two apart: hyde.lua sets `hyde` on its first line, so it
--- runs only when this file is the entry point and HyDE has not been loaded.
--- Removing it leaves a session with a cursor and nothing else.
-if not hyde then
-	local share = os.getenv("XDG_DATA_HOME") or (os.getenv("HOME") .. "/.local/share")
-	local entry = share .. "/hypr/hyde.lua"
-	local handle = io.open(entry, "r")
-	if not handle then
-		error("HyDE is not installed at " .. entry .. ". Run install.sh -r, or point Hyprland at your own config.")
-	end
-	handle:close()
-	dofile(entry)
-end
+-- ~/.config/hypr/hyprland.lua — точка входа Hyprland.
+-- 1) своя база ~/.config/hypr/yumi (окружение, вид, правила, бинды, раскладки, автозапуск, режим);
+--    карта файлов и подсказки «как добавить бинд/правило/автозапуск» — в yumi/init.lua
+-- 2) ниже — личные настройки: клавиатуры, мониторы, жесты, свои меню и правила; они главнее базы.
+-- Hyprland стартует с этого файла: HYPRLAND_CONFIG задаёт ~/.config/uwsm/env-hyprland.d/90-yumi.sh
+
+dofile((os.getenv("XDG_CONFIG_HOME") or (os.getenv("HOME") .. "/.config")) .. "/hypr/yumi/init.lua")
 
 
 -- === Мои настройки ===
 
--- Один курсор для всех: HyDE ставит Bibata 20 (hyprctl setcursor), а программы без
--- этих переменных брали размер 24 → после разблокировки мелькали два курсора разного размера
-hl.env("XCURSOR_THEME", "Bibata-Modern-Ice")
-hl.env("XCURSOR_SIZE", "20")
-hl.env("HYPRCURSOR_THEME", "Bibata-Modern-Ice")
-hl.env("HYPRCURSOR_SIZE", "20")
+-- Курсор (Bibata-Modern-Ice 20) и переменные окружения — в yumi/env.lua
 
 hl.config({
 	-- Монитор по умолчанию (свои мониторы задайте ниже, в блоке «Два монитора»)
@@ -83,15 +70,15 @@ for _, kb in ipairs({ "logitech-pro-gaming-keyboard", "logitech-pro-gaming-keybo
 end
 
 -- Музыка и громкость с внешней клавиатуры: её Fn не доходит до системы (с Fn и без шлёт одно и то же),
--- поэтому медиа — на ALT + те же клавиши. SUPER+F10..F12 заняты скриншотами HyDE
+-- поэтому медиа — на ALT + те же клавиши. SUPER+F10..F12 заняты скриншотами
 local media = {
 	{ "F9",          "playerctl play-pause",                   "play / pause" },
 	{ "F10",         "playerctl stop",                         "stop" },
 	{ "F11",         "playerctl previous",                     "previous track" },
 	{ "F12",         "playerctl next",                         "next track" },
-	{ "Print",       hyde.sh.volumecontrol("-o", "m"),         "mute" },
-	{ "Scroll_Lock", hyde.sh.volumecontrol("-o", "d"),         "volume down" },
-	{ "Pause",       hyde.sh.volumecontrol("-o", "i"),         "volume up" },
+	{ "Print",       "yumi-volume -o m",                        "mute" },
+	{ "Scroll_Lock", "yumi-volume -o d",                        "volume down" },
+	{ "Pause",       "yumi-volume -o i",                        "volume up" },
 }
 for _, m in ipairs(media) do
 	hl.bind("ALT + " .. m[1], hl.dsp.exec_cmd(m[2]), { description = "[Media] " .. m[3], repeating = (m[1] == "Scroll_Lock" or m[1] == "Pause") })
@@ -101,7 +88,7 @@ end
 hl.on("hyprland.start", function()
 	-- Сервер OpenRGB: устройства опрашиваются один раз, дальше цвет меняется мгновенно (--client)
 	hl.exec_cmd("openrgb --server --server-port 6742")
-	hl.exec_cmd(os.getenv("HOME") .. "/.config/hyde/wallbash/scripts/keyboard.sh")
+	hl.exec_cmd(os.getenv("HOME") .. "/.config/yumi/colors/templates/scripts/keyboard.sh")
 	-- Solaar в фоне: держит DPI и частоту мыши (встроенный профиль выключен)
 	hl.exec_cmd("solaar --window=hide")
 end)
@@ -131,7 +118,6 @@ end)
 -- end
 --
 -- Обои на мониторе, подключённом после старта, перерисовываются ниже (hl.on("monitor.added")) — для любого железа.
--- Меню rofi на внешнем мониторе уменьшает обёртка ~/.local/bin/rofi (DPI по имени монитора).
 
 --hl.bind("SUPER + F",hl.dsp.window.fullscreen({ mode = "maximized", action = "toggle" }))
 hl.bind("XF86KbdBrightnessUp",   hl.dsp.exec_cmd("brightnessctl -d kbd_backlight set 10%+"), { locked = true, repeating = true })
@@ -145,11 +131,10 @@ hl.bind("XF86Launch5", hl.dsp.exec_cmd("@HOME@/.local/bin/yumi-menu-calendar"))
 
 
 
-hl.window_rule({ match = { class = "kitty" },   opacity = "0.85 override 0.70 override" })
+-- kitty: прозрачность общая, как у всех окон (13.10: убрано своё правило 0.85/0.70)
 
 -- Экран блокировки сразу при входе (автовход SDDM).
--- Этот файл выполняется ДВАЖДЫ (точка входа Hyprland + require("hyprland") в конце hyde.lua),
--- поэтому без флага обработчик регистрировался два раза → два hyprlock при входе. Флаг — один раз.
+-- Флаг — страховка: если файл выполнится дважды за загрузку, hyprlock всё равно запустится один раз.
 if not _G.yumi_lock_on_start then
 	_G.yumi_lock_on_start = true
 	hl.on("hyprland.start", function()
@@ -160,14 +145,6 @@ end
 -- Меню выключения
 hl.bind("SUPER + Escape", hl.dsp.exec_cmd("@HOME@/.local/bin/yumi-menu-session --center"), {description = "[Session] power menu"})
 
--- Меню rofi держат фокус клавиатуры, пока открыты (Esc работает при любом положении курсора)
-hl.window_rule {
-  name = "rofi_keep_focus",
-  match = {
-    class = "Rofi"
-  },
-  stay_focused = true
-}
 -- === Крышка MacBook (07.10) ===
 -- Сон при закрытии решает ☕ «Не засыпать» (yumi-caffeine держит блокировку handle-lid-switch у systemd).
 -- Закрыли: блокировка; есть внешний монитор → встроенный экран отключается (всё остаётся на внешнем),
@@ -189,11 +166,11 @@ hl.bind("switch:on:" .. LID, function()
 	end
 end, { locked = true, description = "[Hardware] lid closed" })
 hl.bind("switch:off:" .. LID, function()
-	hl.monitor({ output = "eDP-1", mode = "2560x1600@60.0", position = "0x0", scale = 1.6, vrr = 0 })
+	hl.monitor({ output = "eDP-1", mode = "2560x1600@60.0", position = "0x0", scale = 1.6, vrr = 0, reserved = { top = 38 } })
 	hl.dispatch(hl.dsp.dpms({ action = "enable" }))
 end, { locked = true, description = "[Hardware] lid opened" })
 
--- SUPER+N (центр уведомлений) убран по просьбе пользователя 07.10; был: cc-open --bind
+-- SUPER+N (центр уведомлений) убран по просьбе пользователя 07.10; был: yumi-cc-open --bind
 
 -- Загрузка плагинов Hyprland (hyprexpo) при входе
 hl.on("hyprland.start", function()
@@ -227,26 +204,11 @@ hl.gesture({ fingers = 3, direction = "down", action = function() run_gesture("d
 -- Обзор рабочих столов
 hl.bind("SUPER + grave", hl.dsp.exec_cmd("@HOME@/.local/bin/yumi-menu-system --center"), {description = "[Session] system menu"})
 
--- Обзор рабочих столов
-hl.bind("SUPER + grave", hl.dsp.exec_cmd("@HOME@/.local/bin/yumi-menu-system --center"), {description = "[Session] system menu"})
-
 -- Рисовать рабочий стол под экраном блокировки: после разблокировки всё уже готово, без серого экрана
 hl.config({ misc = { session_lock_xray = true } })
 
--- Прозрачность всех окон: 85% в фокусе, 75% без фокуса, полный экран — непрозрачно
-hl.config({ decoration = { active_opacity = 0.85, inactive_opacity = 0.75, fullscreen_opacity = 1 } })
-
--- Меню rofi: 84% в фокусе, 78% без фокуса (прозрачнее, за ним размытие)
-hl.window_rule {
-  name = "rofi_opacity",
-  match = { class = "Rofi" },
-  opacity = "0.95 override 0.92 override",   -- 08.10: плотнее (было 0.84 / 0.78)
-  opaque = false,
-  -- yumi-corners 08.10.2026: без размытия под окном rofi. Hyprland размывает весь прямоугольник окна
-  -- (обрезанный своим rounding 10), а rofi рисует карточку с радиусом ~1.55em — в углах между ними
-  -- была видна вторая, серая «рамка» из размытия. Откат: удалить эту строку.
-  no_blur = true
-}
+-- Прозрачность всех окон: 75% в фокусе, 65% без фокуса, полный экран — непрозрачно (13.10, было 85/75)
+hl.config({ decoration = { active_opacity = 0.75, inactive_opacity = 0.65, fullscreen_opacity = 1 } })
 
 -- Размытие под центром управления и уведомлениями (как у окон)
 hl.layer_rule({
@@ -279,7 +241,7 @@ hl.layer_rule({
   -- поэтому анимация изменения размера слоя (та же layersIn) больше не срабатывает
 })
 
--- === Мой вид окон: не зависит от темы HyDE (тема меняет только цвета) ===
+-- === Мой вид окон: не зависит от обоев (обои меняют только цвета) ===
 local function my_look()
 	hl.config({
 		general = { border_size = 2, gaps_in = 3, gaps_out = 8 },
@@ -287,16 +249,21 @@ local function my_look()
 		decoration = {
 			rounding = 10,
 			rounding_power = 2,
-			active_opacity = 0.85,
-			inactive_opacity = 0.75,
+			active_opacity = 0.75,
+			inactive_opacity = 0.65,
 			fullscreen_opacity = 1,
 			shadow = { enabled = false },
-			blur = { enabled = true, size = 6, passes = 3 },
+			blur = { enabled = true, size = 3, passes = 2, xray = true },
 		},
 	})
 end
 my_look()
 hl.on("config.reloaded", my_look)
+
+-- 13.10: мягкое проявление слоёв (Waybar после смены обоев появляется плавно, без рывка в конце).
+-- Только кривая, ≈0,2 с; стиль анимации меню (popin) не меняется. Откат: удалить 2 строки ниже
+hl.curve("yumiFade", { type = "bezier", points = { {0.25, 0.1}, {0.25, 1.0} } })
+hl.animation({ leaf = "fadeLayersIn", enabled = true, speed = 2, bezier = "yumiFade" })
 
 -- Тяжёлые программы: только после разблокировки (не мешают загрузке рабочего стола)
 hl.on("hyprland.start", function()
@@ -305,59 +272,21 @@ end)
 
 -- Обои при старте: без анимации перехода, пока открыт экран блокировки
 hl.on("hyprland.start", function()
-	hl.exec_cmd([[sh -c 'for i in $(seq 40); do awww query >/dev/null 2>&1 && break; sleep 0.5; done; sleep 2; awww img --transition-type none "$(readlink -f "$HOME/.cache/hyde/wall.set")"']])
+	hl.exec_cmd([[sh -c 'for i in $(seq 40); do awww query >/dev/null 2>&1 && break; sleep 0.5; done; sleep 2; awww img --transition-type none "$(readlink -f "$HOME/.cache/yumi/theme/wall.set")"']])
 end)
 
 -- Обои на мониторе, подключённом после старта (иначе там чёрный фон)
 hl.on("monitor.added", function()
-	hl.exec_cmd([[sh -c 'sleep 2; awww img --transition-type none "$(readlink -f "$HOME/.cache/hyde/wall.set")"']])
+	hl.exec_cmd([[sh -c 'sleep 2; awww img --transition-type none "$(readlink -f "$HOME/.cache/yumi/theme/wall.set")"']])
 end)
 
 
 -- === Цвета только из обоев ===
--- Wallbash в режиме «всегда тёмный» (enableWallDcol=2), темы HyDE убраны в ~/.local/share/hyde-themes-off.
--- Выбор темы и режима wallbash не нужен — остаются только обои (SUPER+SHIFT+W, SUPER+ALT+←/→)
-hl.unbind("SUPER + SHIFT + T")
-hl.unbind("SUPER + SHIFT + R")
+-- Палитру (формат wallbash, режим «всегда тёмный») считает yumi-colors, применяет yumi/look.lua.
+-- Сочетания клавиш (в т.ч. свои меню: SUPER+K, SUPER+V, SUPER+TAB, SUPER+/, SUPER+SHIFT+W,
+-- CTRL+ALT+DELETE) — в yumi/binds.lua.
 
--- === Раскладка: SUPER+K переключает СРАЗУ все клавиатуры (и на экране блокировки) ===
--- HyDE менял только «текущую» клавиатуру, а у Logitech два устройства — язык иногда не переключался
-hl.unbind("SUPER + K")
-hl.bind("SUPER + K", hl.dsp.exec_cmd("@HOME@/.local/bin/kb-switch"), { description = "[Utilities] toggle keyboard layout", locked = true })
-
--- === Выбор обоев: SUPER+SHIFT+W — GTK-меню yumi-panel (сетка миниатюр) вместо rofi HyDE ===
-hl.unbind("SUPER + SHIFT + W")
-hl.bind("SUPER + SHIFT + W", hl.dsp.exec_cmd("@HOME@/.local/bin/yumi-menu-wallpaper --center"), { description = "[Theming and Wallpaper] select a global wallpaper" })
-
--- === Буфер обмена: SUPER+V / SUPER+SHIFT+V — GTK-меню yumi-panel (поиск, миниатюры, закреп) ===
-hl.unbind("SUPER + V")
-hl.unbind("SUPER + SHIFT + V")
-hl.bind("SUPER + V", hl.dsp.exec_cmd("@HOME@/.local/bin/yumi-menu-clipboard --center"), { description = "[Launcher|Rofi menus] clipboard" })
-hl.bind("SUPER + SHIFT + V", hl.dsp.exec_cmd("@HOME@/.local/bin/yumi-menu-clipboard --center"), { description = "[Launcher|Rofi menus] clipboard manager" })
-
--- Калькулятор rofi не нужен (пакета rofi-calc нет) — сочетание свободно
-hl.unbind("SUPER + SHIFT + K")
-
--- === Рабочие столы: SUPER+TAB — GTK-меню вместо переключателя окон HyDE (altab у нас не работал) ===
-hl.unbind("SUPER + TAB")
-hl.bind("SUPER + TAB", hl.dsp.exec_cmd("@HOME@/.local/bin/yumi-menu-workspaces --center"), { description = "[Workspaces] overview" })
--- остатки переключателя окон HyDE (altab): SUPER+SHIFT+TAB и отпускание SUPER — сняты
-hl.unbind("SUPER + SHIFT + TAB")
-hl.unbind("SUPER + SUPER_L")
-hl.unbind("SUPER + SUPER_R")
-
--- SUPER+/ — режимы работы (workflow) в нашем меню «Питание» вместо старой rofi-панели menu-workflows
-hl.unbind("SUPER + slash")
-hl.bind("SUPER + slash", hl.dsp.exec_cmd("@HOME@/.local/bin/yumi-menu-power --center"), { description = "[Utils] workflows" })
-
--- SUPER+SHIFT+U (выбор макета hyprlock) при каждом шаге по списку запускает НАСТОЯЩИЙ hyprlock → faillock; снят
-hl.unbind("SUPER + SHIFT + U")
-
--- === CTRL+ALT+DELETE — наше меню «Питание системы» вместо меню выхода HyDE ===
-hl.unbind("CTRL + ALT + DELETE")
-hl.bind("CTRL + ALT + DELETE", hl.dsp.exec_cmd("@HOME@/.local/bin/yumi-menu-session --center"), { description = "[Window Management] logout menu" })
-
--- Рамки окон в тоне обоев (yumi-tone, хук 40-hypr-borders): поверх цветов HyDE, и после перезагрузки конфига
+-- Рамки окон в тоне обоев (yumi-tone, хук 40-hypr-borders): поверх палитры look.lua, и после перезагрузки конфига
 local function yumi_borders()
 	local f = loadfile(os.getenv("HOME") .. "/.cache/yumi-tone/hypr-borders.lua")
 	if f then pcall(f) end
@@ -365,9 +294,6 @@ end
 yumi_borders()
 hl.on("config.reloaded", yumi_borders)
 
--- Апплет NetworkManager не нужен: Wi-Fi и VPN — свои пилюли и меню (yumi-menu-wifi, yumi-menu-vpn).
--- HyDE запускает его из hyde.config.start при событии hyprland.start — к этому моменту строка ниже уже выполнена.
--- blueman-applet остаётся: он агент сопряжения (окно PIN); его значок в трее выключен настройкой blueman (StatusIcon).
-if hyde and hyde.config and hyde.config.start then
-	hyde.config.start.applet_network_manager = nil
-end
+-- Апплет NetworkManager не нужен: Wi-Fi и VPN — свои пилюли и меню (yumi-menu-wifi, yumi-menu-vpn);
+-- база его не запускает. blueman-applet стартует из ~/.config/autostart: он агент сопряжения (окно PIN),
+-- его значок в трее выключен настройкой blueman (StatusIcon).

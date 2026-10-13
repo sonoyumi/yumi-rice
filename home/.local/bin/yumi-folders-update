@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Перекрасить папки темы Yumi-Folders в цвета текущих обоев.
-# Вызывается хуком wallbash (~/.config/hyde/wallbash/always/yumi-folders.dcol) при смене обоев.
+# Вызывается шаблоном yumi-colors (~/.config/yumi/colors/templates/always/yumi-folders.dcol) при смене обоев.
 # Откат: yumi-uninstall folders
 set -euo pipefail
-cacheDir="${cacheDir:-${XDG_CACHE_HOME:-$HOME/.cache}/hyde}"
+cacheDir="${cacheDir:-${XDG_CACHE_HOME:-$HOME/.cache}/yumi/theme}"
 PAL="${cacheDir}/wallbash/yumi-folders"
 [[ -r "$PAL" ]] || PAL="${cacheDir}/wall.dcol"
 D="$HOME/.local/share/yumi-folders"

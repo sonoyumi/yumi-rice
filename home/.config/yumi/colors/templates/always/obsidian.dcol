@@ -1,0 +1,53 @@
+${HOME}/Projects/Схемы/.obsidian/snippets/wallbash.css
+/* Obsidian в цветах обоев. Файл генерирует yumi-colors (шаблон ~/.config/yumi/colors/templates/always/obsidian.dcol) — не править вручную. */
+/* Вариант А: цвета карточек Canvas (--canvas-color-1..6) не трогаем — у них смысл (стоп/дальше/вопрос). */
+.theme-dark, .theme-light {
+  --background-primary:          <wallbash_pry1_rgba(1)>;
+  --background-primary-alt:      <wallbash_1xa1_rgba(1)>;
+  --background-secondary:        <wallbash_1xa1_rgba(1)>;
+  --background-secondary-alt:    <wallbash_1xa2_rgba(1)>;
+  --background-modifier-border:  <wallbash_1xa3_rgba(1)>;
+  --background-modifier-border-hover: <wallbash_1xa5_rgba(1)>;
+  --background-modifier-border-focus: <wallbash_1xa6_rgba(1)>;
+  --background-modifier-hover:   <wallbash_1xa3_rgba(0.45)>;
+  --background-modifier-active-hover: <wallbash_1xa4_rgba(0.55)>;
+  --background-modifier-form-field: <wallbash_1xa2_rgba(1)>;
+  --titlebar-background:         <wallbash_1xa1_rgba(1)>;
+  --titlebar-background-focused: <wallbash_1xa2_rgba(1)>;
+  --tab-container-background:    <wallbash_1xa1_rgba(1)>;
+  --ribbon-background:           <wallbash_pry1_rgba(1)>;
+  --text-normal:                 <wallbash_txt1_rgba(1)>;
+  --text-muted:                  <wallbash_1xa8_rgba(1)>;
+  --text-faint:                  <wallbash_1xa6_rgba(1)>;
+  --text-accent:                 <wallbash_1xa8_rgba(1)>;
+  --text-accent-hover:           <wallbash_1xa9_rgba(1)>;
+  --text-selection:              <wallbash_1xa5_rgba(0.45)>;
+  --text-highlight-bg:           <wallbash_1xa6_rgba(0.35)>;
+  --color-accent:                <wallbash_1xa7_rgba(1)>;
+  --color-accent-1:              <wallbash_1xa8_rgba(1)>;
+  --color-accent-2:              <wallbash_1xa9_rgba(1)>;
+  --interactive-accent:          <wallbash_1xa6_rgba(1)>;
+  --interactive-accent-hover:    <wallbash_1xa7_rgba(1)>;
+  --interactive-normal:          <wallbash_1xa2_rgba(1)>;
+  --interactive-hover:           <wallbash_1xa3_rgba(1)>;
+  --text-on-accent:              <wallbash_txt1_rgba(1)>;
+  --link-color:                  <wallbash_1xa8_rgba(1)>;
+  --link-color-hover:            <wallbash_1xa9_rgba(1)>;
+  --link-external-color:         <wallbash_2xa8_rgba(1)>;
+  --link-unresolved-color:       <wallbash_1xa6_rgba(1)>;
+  --h1-color: <wallbash_1xa9_rgba(1)>; --h2-color: <wallbash_1xa8_rgba(1)>; --h3-color: <wallbash_1xa8_rgba(1)>;
+  --scrollbar-thumb-bg:          <wallbash_1xa3_rgba(1)>;
+  --scrollbar-active-thumb-bg:   <wallbash_1xa5_rgba(1)>;
+  --nav-item-color-active:       <wallbash_txt1_rgba(1)>;
+  --nav-item-background-active:  <wallbash_1xa3_rgba(0.6)>;
+  /* холст */
+  --canvas-background:           <wallbash_pry1_rgba(1)>;
+  --canvas-dot-pattern:          <wallbash_1xa3_rgba(1)>;
+  --canvas-card-label-color:     <wallbash_1xa8_rgba(1)>;
+  /* граф */
+  --graph-line:                  <wallbash_1xa4_rgba(1)>;
+  --graph-node:                  <wallbash_1xa7_rgba(1)>;
+  --graph-node-unresolved:       <wallbash_1xa4_rgba(1)>;
+  --graph-node-focused:          <wallbash_1xa9_rgba(1)>;
+  --graph-text:                  <wallbash_txt1_rgba(1)>;
+}

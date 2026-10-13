@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """yumi-airpods — фоновая служба AirPods: двойное нажатие ножки → следующий трек, тройное → предыдущий;
-наушник вынули из уха → пауза, оба снова в ушах → продолжить (~/.config/yumi-panel/airpods.json,
+наушник вынули из уха → пауза, оба снова в ушах → продолжить (~/.config/yumi/panel/airpods.json,
 "pause_on_removal": true/false — перечитывается на лету); экран заблокирован (появился hyprlock) →
 пауза и отключение AirPods, чтобы их подхватил айфон ("handoff_on_lock" там же).
 По обычному Bluetooth (AVRCP) AirPods Pro 2 на Linux шлют на любое нажатие только «play», поэтому
@@ -8,11 +8,18 @@
 (маска 0x06 — двойное + тройное), и они шлют пакет 0x19. Одиночное нажатие остаётся обычным play/pause.
 Нужен спуф производителя в /etc/bluetooth/main.conf: DeviceID = bluetooth:004C:0000:0000.
 
+Заряд: из того же канала AAP (пакет 0x04 — левый, правый, кейс по отдельности; BlueZ Battery1 даёт только одно
+число). Наушник в разряде (не заряжается) ≤ 20 % — «AirPods: пора на зарядку», ≤ 10 % — критическое (висит,
+заменяет первое); каждое — раз за цикл разряда. Сброс: наушники заряжаются (в кейсе) или заряд снова выше
+порога на 3 %; при зарядке критическое закрывается. Выключить: "battery_notify": false в airpods.json.
+
 Канал AAP может держать только одна программа, поэтому служба отдаёт его через сокет aap.relay_path(mac):
 меню yumi-menu-bluetooth (aap.Session) подключается туда, получает последние пакеты и дальше всё
 пересылается в обе стороны.
   yumi-airpods            работать (systemd: yumi-airpods.service)
-  YP_DRYRUN=1             нажатия только печатаются, playerctl не вызывается
+  YP_DRYRUN=1             нажатия только печатаются, playerctl не вызывается, уведомления о заряде печатаются
+  YUMI_AIRPODS_BATT_SCRIPT="L/R[/C] …"   прогнать последовательность заряда без наушников и выйти
+                          (пробный режим): «30/28 19/22 9/15 c40/c45 50/50»; c — наушник заряжается, - — нет данных
 Откат: yumi-uninstall airpods"""
 import os
 import re
@@ -22,8 +29,9 @@ import subprocess
 import sys
 import time
 
-sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-panel"))
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi/panel"))
 import aap  # noqa: E402
+import json  # noqa: E402
 
 DRY = os.environ.get("YP_DRYRUN") == "1"
 POLL_S = 3.0
@@ -91,6 +99,101 @@ def on_ear(data, ear_pause):
     ear = {"primary": data[6], "secondary": data[7]}
     log("уши:", {k: aap.EAR_STATE.get(v, v) for k, v in ear.items()})
     ear_pause.update(ear)
+
+
+class BatteryNotify:
+    """«Пора на зарядку» по заряду из пакетов AAP — как yumi-mouse-notify (пороги, раз за цикл, гистерезис).
+    Состояние живёт всё время службы: переподключение AirPods (кейс открыли-закрыли) его не сбрасывает."""
+
+    LOW, CRIT, HYST = 20, 10, 3
+    BUDS = (("left", "левый"), ("right", "правый"), ("single", "наушники"))
+
+    def __init__(self, dry=False):
+        self.dry = dry
+        self.low_done = self.crit_done = False
+        self.nid = ""                         # id уведомления (для замены и закрытия)
+
+    @staticmethod
+    def enabled():
+        try:
+            with open(aap.PREFS) as f:
+                return bool(json.load(f).get("battery_notify", True))
+        except (OSError, ValueError, AttributeError):
+            return True
+
+    def _notify(self, urgency, icon, summary, body):
+        if self.dry:
+            log(f"[пробный режим] notify-send -u {urgency} -i {icon}{' -r ' + self.nid if self.nid else ''} «{summary}» «{body}»")
+            self.nid = self.nid or "1"
+            return
+        args = ["notify-send", "-a", "AirPods", "-u", urgency, "-i", icon, "-p"]
+        if urgency == "critical":
+            args += ["-t", "0"]
+        if self.nid:
+            args += ["-r", self.nid]
+        try:
+            self.nid = subprocess.run(args + [summary, body], capture_output=True, text=True,
+                                      timeout=5).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            self.nid = ""
+
+    def _close(self):
+        if not self.nid:
+            return
+        if self.dry:
+            log(f"[пробный режим] закрыть уведомление {self.nid}")
+        else:
+            subprocess.run(["gdbus", "call", "--session", "--dest", "org.freedesktop.Notifications",
+                            "--object-path", "/org/freedesktop/Notifications", "--method",
+                            "org.freedesktop.Notifications.CloseNotification", self.nid],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+        self.nid = ""
+
+    def packet(self, data):
+        st = aap.State()
+        if st.handle(data):
+            self.update(st.battery)
+
+    def update(self, battery):
+        """battery: {left/right/single/case: {level, status, available}} — как aap.State.battery."""
+        if not self.enabled():
+            return
+        buds = [(name, battery[k]) for k, name in self.BUDS
+                if k in battery and battery[k].get("available") and 0 <= battery[k].get("level", -1) <= 100]
+        if not buds:
+            return                                       # оба в кейсе без связи / нет данных — ничего не меняем
+        draining = [(n, b["level"]) for n, b in buds if b.get("status") != "charging"]
+        if not draining:                                 # все на зарядке — сброс, критическое убрать
+            if self.crit_done:
+                self._close()
+            self.low_done = self.crit_done = False
+            self.nid = ""
+            return
+        name, lvl = min(draining, key=lambda x: x[1])
+        if lvl >= self.CRIT + self.HYST and self.crit_done:
+            self._close()
+            self.crit_done = False
+        if lvl >= self.LOW + self.HYST:
+            self.low_done = False
+            if not self.crit_done:
+                self.nid = ""
+        parts = [f"{n} {b['level']} %" + (" ⚡" if b.get("status") == "charging" else "") for n, b in buds]
+        case = battery.get("case")
+        if case and case.get("available") and 0 <= case.get("level", -1) <= 100:
+            parts.append(f"кейс {case['level']} %")
+        detail = " · ".join(parts)
+        who = "" if name == "наушники" else f" ({name})"
+        if lvl <= self.CRIT and not self.crit_done:
+            self._notify("critical", "battery-empty", f"AirPods: заряд {lvl} %{who}",
+                         f"Положите AirPods в кейс — скоро выключатся\n{detail}")
+            self.crit_done = self.low_done = True
+        elif lvl <= self.LOW and not self.low_done:
+            self._notify("normal", "audio-headphones", f"AirPods: заряд {lvl} %{who}",
+                         f"Пора на зарядку\n{detail}")
+            self.low_done = True
+
+
+BATTERY = BatteryNotify(dry=DRY)
 
 
 def screen_locked():
@@ -274,6 +377,11 @@ def serve(mac):
                         on_stem(data)
                     elif op == aap.OP_EAR:
                         on_ear(data, ear_pause)
+                    elif op == aap.OP_BATTERY:
+                        try:
+                            BATTERY.packet(data)
+                        except Exception as e:          # заряд — дополнение: не ронять канал из-за него
+                            log("заряд: ошибка", e)
                     else:
                         takeover.packet(op, data)
                     for c in list(clients):
@@ -327,7 +435,25 @@ def main():
         time.sleep(POLL_S)
 
 
+def battery_script(script):
+    """YUMI_AIRPODS_BATT_SCRIPT: «L/R[/C]» через пробел; c перед числом — заряжается, - — нет данных."""
+    bn = BatteryNotify(dry=True)
+    bn.enabled = lambda: True
+    for step in script.split():
+        bat = {}
+        for key, v in zip(("left", "right", "case"), step.split("/")):
+            if v == "-":
+                continue
+            ch = v.startswith("c")
+            bat[key] = {"level": int(v.lstrip("c")), "status": "charging" if ch else "normal", "available": True}
+        print("—", step)
+        bn.update(bat)
+
+
 if __name__ == "__main__":
+    if os.environ.get("YUMI_AIRPODS_BATT_SCRIPT"):
+        battery_script(os.environ["YUMI_AIRPODS_BATT_SCRIPT"])
+        sys.exit(0)
     try:
         main()
     except KeyboardInterrupt:

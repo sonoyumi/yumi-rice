@@ -1,0 +1,9 @@
+#!/bin/sh
+# yumi-zen-theme: Zen в цветах обоев через Pywalfox (было 90-firefox; откат — yumi-uninstall zen-theme)
+# Пишет ~/.cache/wal/colors.json — его читает Pywalfox в Zen. Перекраска запущенного Zen — в фоне.
+T="$HOME/.local/bin/yumi-zen-theme"
+[ -x "$T" ] || exit 0
+command -v pywalfox >/dev/null 2>&1 || exit 0
+timeout 8 "$T" >/dev/null 2>&1 || exit 0
+[ -n "${YUMI_COLORS_WARM:-}" ] || setsid -f "$T" --notify >/dev/null 2>&1 </dev/null
+exit 0

@@ -2,7 +2,7 @@
 """yumi-music — лёгкая музыка из YouTube Music: mpv в фоне (без окна) + свежий yt-dlp, без рекламы и браузера.
 
   yumi-music ensure                  запустить mpv в фоне, если ещё не запущен
-  yumi-music sync [ID]               обновить плейлисты из ~/.config/yumi-music/playlists.json (или один)
+  yumi-music sync [ID]               обновить плейлисты из ~/.config/yumi/music/playlists.json (или один)
   yumi-music play ID [N] [--shuffle] включить плейлист (с трека N или перемешанным)
   yumi-music add VIDEO_ID [--now]    поставить трек следующим (--now — включить сразу)
   yumi-music search ТЕКСТ            поиск песен в YouTube Music → JSON (для меню)
@@ -13,7 +13,11 @@
   yumi-music state                   что играет → JSON
   yumi-music update                  обновить yt-dlp и ytmusicapi в своём окружении (таймер раз в неделю)
   yumi-music prefetch-lyrics URL…    заранее найти тексты треков в кэш yumi-player (зовёт cover.lua в фоне)
+  yumi-music recheck-lyrics [--force]  подобрать/перепроверить тексты всех треков (итог + отчёт TSV в кэше плеера)
   yumi-music restart                 перезапустить mpv с теми же очередью, треком и позицией
+  yumi-music pl-add ID JSON_ТРЕКА    добавить трек в свой/импортированный плейлист (локально, added.json)
+  yumi-music pl-remove ID КЛЮЧ       убрать добавленный трек из плейлиста
+  yumi-music pl-new ИМЯ              новый свой плейлист (только локальный)
   yumi-music mix ИМЯ SC_ССЫЛКА APPLE_ССЫЛКА  совместный плейлист SoundCloud + Apple Music (треки Apple ищутся
                                      на SoundCloud, иначе на YouTube Music; повторы убираются)
 SoundCloud ходит через прокси WARP yumi-music-proxy (127.0.0.1:40080), если служба запущена.
@@ -35,14 +39,15 @@ VENV = os.path.join(BASE, "venv")
 YTDLP = os.path.join(VENV, "bin/yt-dlp")
 YTDLP_MPV = os.path.join(BASE, "yt-dlp-sc")     # для mpv: SoundCloud — через прокси, остальное напрямую
 PROXY = "http://127.0.0.1:40080"                 # yumi-music-proxy (wireproxy, отдельный ключ WARP)
-CONF = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.join(HOME, ".config")), "yumi-music")
+CONF = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.join(HOME, ".config")), "yumi/music")
 PLAYLISTS = os.path.join(CONF, "playlists.json")
+ADDED = os.path.join(CONF, "added.json")       # треки, добавленные вручную: {id плейлиста: [трек, …]}
 SKIP = os.path.join(CONF, "skip.tsv")          # недоступные треки: ключ \t причина — при синхронизации пропускаются
 CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.join(HOME, ".cache")), "yumi-music")
 COVER_LUA = os.path.join(BASE, "cover.lua")
 META = os.path.join(CACHE, "meta.tsv")       # ключ → чистые артист/название (yumimeta: плеер, пилюля, тексты)
 META_EXTRA = os.path.join(CACHE, "meta-extra.tsv")   # то же для найденного поиском
-LIB = os.path.join(HOME, ".local/lib/yumi-panel")    # yumilyrics, yumimeta
+LIB = os.path.join(HOME, ".local/lib/yumi/panel")    # yumilyrics, yumimeta
 SOCK = os.path.join(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"), "yumi-music.sock")
 
 MPV_ARGS = [
@@ -118,6 +123,117 @@ def write_playlists(pls):
 
 def cache_path(pid, ext):
     return os.path.join(CACHE, f"pl-{pid}.{ext}")
+
+
+# ---------- свои добавления: SoundCloud/Apple без входа в аккаунт не изменить, поэтому храним у себя
+# и подмешиваем в конец плейлиста при каждой сборке (write_cache) ----------
+def read_added():
+    try:
+        return json.load(open(ADDED))
+    except (OSError, ValueError):
+        return {}
+
+
+def write_added(d):
+    os.makedirs(CONF, exist_ok=True)
+    tmp = ADDED + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(d, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, ADDED)
+
+
+def norm_track(t):
+    """Трек из меню (поиск, очередь, недавние) → запись как в кэше плейлиста."""
+    url = t.get("url") or ""
+    base = {"title": t.get("title") or "", "artist": t.get("artist") or "", "dur": int(t.get("dur") or 0),
+            "thumb": t.get("thumb") or ""}
+    if "soundcloud.com" in url:
+        url = url.split("?")[0]
+        key = key_for(url)
+        return dict(base, id=str(t.get("id") or key), url=url, key=key, src="sc")
+    vid = t.get("id") if t.get("id") and not str(t["id"]).startswith("http") and not str(t["id"]).isdigit() else ""
+    if not vid:
+        m = re.search(r"(?:[?&]v=|youtu\.be/)([A-Za-z0-9_-]{11})", url)
+        vid = m.group(1) if m else ""
+    if not vid:
+        raise RuntimeError("не понял, что это за трек")
+    return dict(base, id=vid)
+
+
+def thumb_of(key):
+    for name in ("thumbs.tsv", "thumbs-extra.tsv"):
+        try:
+            for line in open(os.path.join(CACHE, name)):
+                k, _, url = line.rstrip("\n").partition("\t")
+                if k == key and url:
+                    return url
+        except OSError:
+            pass
+    return ""
+
+
+def store_cache(pid, name, tracks):
+    os.makedirs(CACHE, exist_ok=True)
+    data = {"id": pid, "name": name, "updated": int(time.time()), "tracks": tracks}
+    for ext, body in (("json", json.dumps(data, ensure_ascii=False)), ("m3u", m3u(tracks))):
+        tmp = cache_path(pid, ext) + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(body)
+        os.replace(tmp, cache_path(pid, ext))
+    return data
+
+
+def read_cache(pid):
+    entry = next((x for x in read_playlists() if x["id"] == pid), None)
+    if not entry:
+        raise RuntimeError("нет такого плейлиста")
+    try:
+        data = json.load(open(cache_path(pid, "json")))
+    except (OSError, ValueError):
+        data = sync(pid, entry.get("name"), entry.get("url"))
+    return data
+
+
+def pl_add(pid, t):
+    t = norm_track(t)
+    key = t.get("key") or t["id"]
+    t["thumb"] = t["thumb"] or thumb_of(key)
+    data = read_cache(pid)
+    have_k = {x.get("key") or x["id"] for x in data["tracks"]}
+    have_n = {track_key(x.get("artist"), x.get("title")) for x in data["tracks"]}
+    tk = track_key(t["artist"], t["title"])
+    if key in have_k or (tk[1] and tk in have_n):
+        return {"dup": True, "name": data["name"]}
+    added = read_added()
+    added.setdefault(pid, []).append(t)
+    write_added(added)
+    store_cache(pid, data["name"], data["tracks"] + [dict(t, added=True)])
+    save_thumbs([dict(t, id=key)], extra=True)
+    return {"dup": False, "name": data["name"], "count": len(data["tracks"]) + 1}
+
+
+def pl_remove(pid, key):
+    added = read_added()
+    lst = added.get(pid, [])
+    added[pid] = [x for x in lst if (x.get("key") or x["id"]) != key]
+    if not added[pid]:
+        added.pop(pid)
+    write_added(added)
+    data = read_cache(pid)
+    tracks = [x for x in data["tracks"] if not (x.get("added") and (x.get("key") or x["id"]) == key)]
+    store_cache(pid, data["name"], tracks)
+    return {"name": data["name"], "count": len(tracks)}
+
+
+def pl_new(name):
+    pls = read_playlists()
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:30]
+    pid = "local-" + (slug or str(int(time.time())))
+    while any(p["id"] == pid for p in pls):
+        pid += "-2"
+    write_playlists(pls + [{"name": name, "id": pid, "src": "local"}])
+    store_cache(pid, name, [])
+    return {"id": pid, "name": name}
 
 
 def big_thumb(item):
@@ -305,7 +421,10 @@ def sc_track(t):
     return {"id": str(t["id"]), "url": t.get("permalink_url", ""), "title": title,
             "artist": artist, "uploader": (t.get("user") or {}).get("username") or "",
             "dur": int((t.get("duration") or 0) / 1000), "thumb": art.replace("-large", "-t500x500"),
-            "policy": t.get("policy") or "", "src": "sc"}
+            "policy": t.get("policy") or "", "src": "sc",
+            # ссылка + теги + жанр: загрузчики пишут «instrumental», «snippet»… там, а не в названии
+            "flags": " ".join(x for x in ((t.get("permalink") or "").replace("-", " "), t.get("tag_list") or "",
+                                          t.get("genre") or "") if x)[:300].lower()}
 
 
 def sync_sc(url, name=None):
@@ -488,6 +607,8 @@ def resolve_apple(t):
                 continue
             seen.add(r["id"])
             st = sc_track(r)
+            if flag_kind(st) and not yumilyrics_kind(t["title"]):   # минус/караоке/sped up/отрывок по тегам
+                continue
             who = st["artist"] + " " + ((r.get("user") or {}).get("username") or "")
             if _JUNK_WORDS.search(re.sub(r"[-_]", " ", st["url"].rsplit("/", 1)[-1])) and \
                     not _JUNK_WORDS.search(t["title"]):      # «instrumental», «reverb»… бывают только в ссылке
@@ -505,7 +626,9 @@ def resolve_apple(t):
         return dict(best, src="sc", title=t["title"], artist=t["artist"], thumb=t["thumb"] or best["thumb"])
     try:
         from ytmusicapi import YTMusic
-        for r in YTMusic().search(f"{first} {t['title']}", filter="songs", limit=5):
+        # explicit — первым: цензурные (clean) версии пользователю не нужны
+        for r in sorted(YTMusic().search(f"{first} {t['title']}", filter="songs", limit=10),
+                        key=lambda r: not r.get("isExplicit")):
             if not r.get("videoId"):
                 continue
             if _score(t, r.get("title") or "", artists_of(r), r.get("duration_seconds") or 0) >= 0.75:
@@ -562,6 +685,8 @@ def sync_mix(entry, log=None):
 
 def sync(pid, name=None, url=None):
     entry = next((x for x in read_playlists() if x["id"] == pid), None)
+    if entry and entry.get("src") == "local":         # свой плейлист — только добавленные треки
+        return write_cache(pid, entry["name"], [])
     if entry and entry.get("src") == "mix":
         return sync_mix(entry)
     if url and "soundcloud.com" in url:
@@ -580,9 +705,186 @@ def sync(pid, name=None, url=None):
     return write_cache(pid, name or p.get("title") or pid, tracks)
 
 
+REPLACE = os.path.join(CACHE, "replace.json")     # ключ переделки → оригинал (или промах) — не искать заново
+KEEP = os.path.join(CONF, "keep-versions.txt")      # «артист — название» версий, которые заменять не надо
+
+
+def find_original(t, kind):
+    """Переделка (ремикс, edit, sped up, минус…) → тот же оригинал строгим поиском resolve_apple или None.
+    Мэшап — None: одного оригинала у него нет."""
+    if kind == "mashup":
+        return None
+    import yumilyrics
+    cands = yumilyrics.candidates(t["title"], t["artist"])
+    cands = cands[1:] + cands[:1]          # «Артист - Песня» внутри названия надёжнее ника загрузившего
+    for a, ti in cands:
+        ot = yumilyrics.original_title(ti)
+        ot = re.sub(r"\s*[(\[][^)\]]*\b(минус\w*|instrumental|инструментал\w*)\b[^)\]]*[)\]]", "", ot, flags=re.I).strip()
+        ot = re.sub(r"\s*[(\[][^)\]]*\b(free\s*(download|dl)|out now|download)\b[^)\]]*[)\]]", "", ot, flags=re.I).strip()
+        if not a or not ot or yumilyrics.kind(ot):
+            continue
+        want = {"artist": a, "title": ot, "dur": 0, "thumb": ""}
+        # длина официальной песни (YouTube Music) — по ней SoundCloud-загрузка проверяется ±4 с:
+        # перезаливки бывают обрезанными или ускоренными
+        try:
+            from ytmusicapi import YTMusic
+            for r in YTMusic().search(f"{a} {ot}", filter="songs", limit=5):
+                if r.get("videoId") and r.get("duration_seconds") and \
+                        _score(want, r.get("title") or "", artists_of(r), 0) >= 0.75:
+                    want["dur"] = r["duration_seconds"]
+                    break
+        except Exception:  # noqa: BLE001
+            pass
+        m = resolve_apple(want)
+        if m:
+            return m
+    return None
+
+
+def _own_account(url, artist):
+    """Загрузка SoundCloud с аккаунта самого артиста (имя аккаунта в ссылке ≈ первый артист)."""
+    acc = re.sub(r"[^0-9a-zа-я]", "", (url.split("/")[3] if url.count("/") > 3 else "").lower())
+    first = re.sub(r"[^0-9a-zа-я]", "", re.split(r",|&| x | X |feat", artist or "")[0].lower())
+    return bool(acc and first and (first in acc or acc in first))
+
+
+def find_official(t, mdur):
+    """Трек, залитый в другой версии (длина ≠ записи, под которую есть текст) → официальная запись длиной mdur ±3 с
+    или None. Порядок (13.10, после «FAX» с чужой перезаливки): песня YouTube Music (explicit первой) →
+    SoundCloud с аккаунта самого артиста → ролик YouTube → чужая перезаливка SoundCloud (крайний случай)."""
+    import difflib
+    import yumilyrics
+    from ytmusicapi import YTMusic
+    cands = [(a, ti) for a, ti in yumilyrics.candidates(t["title"], t["artist"]) if a and ti]
+    for a, ti in cands[:2]:
+        wa, wt = track_key(a, ti)
+        for r in sorted(YTMusic().search(f"{a} {ti}", filter="songs", limit=10), key=lambda r: not r.get("isExplicit")):
+            rd = r.get("duration_seconds") or 0
+            if not r.get("videoId") or not rd or abs(rd - mdur) > 3:
+                continue
+            ra, rt = track_key(artists_of(r), r.get("title") or "")
+            if difflib.SequenceMatcher(None, wt, rt).ratio() >= 0.8 and wa and (wa in _norm(artists_of(r)) or ra in wa):
+                return {"id": r["videoId"], "title": t["title"], "artist": t["artist"], "dur": rd,
+                        "thumb": t.get("thumb") or big_thumb(r), "src": "yt", "explicit": bool(r.get("isExplicit"))}
+    reupload = None
+    for a, ti in cands:
+        m = resolve_apple({"artist": a, "title": ti, "dur": round(mdur), "thumb": ""})
+        if m and m.get("dur") and abs(m["dur"] - mdur) <= 3:
+            if m.get("src") != "sc" or _own_account(m.get("url", ""), a):
+                return m
+            reupload = reupload or m
+    for a, ti in cands[:2]:
+        wa, wt = track_key(a, ti)
+        for r in YTMusic().search(f"{a} {ti}", filter="videos", limit=10):
+            rd = r.get("duration_seconds") or 0
+            title = r.get("title") or ""
+            if not r.get("videoId") or not rd or abs(rd - mdur) > 3 or _JUNK_WORDS.search(title):
+                continue
+            hay = _norm(title + " " + artists_of(r))
+            if wt and wt in hay and wa and wa in hay:
+                return {"id": r["videoId"], "title": t["title"], "artist": t["artist"], "dur": rd,
+                        "thumb": t.get("thumb") or big_thumb(r), "src": "yt"}
+    return reupload
+
+
+def _lyrics_version(t):
+    """Длина официальной записи, если текст нашёлся, но под другую версию (кэш yumilyrics), иначе 0."""
+    import yumilyrics
+    url = t.get("play") or t.get("url") or f"https://music.youtube.com/watch?v={t['id']}"
+    try:
+        c = json.load(open(os.path.join(yumilyrics.CACHE, yumilyrics._key(t["title"], t["artist"], url) + ".json")))
+    except (OSError, ValueError, KeyError):
+        return 0
+    md = c.get("mdur") or 0
+    if "другая версия" in (c.get("source") or "") and md and abs(md - (t.get("dur") or 0)) > 3:
+        return md
+    return 0
+
+
+# признаки версии в ссылке/тегах/жанре SoundCloud (ремиксы — только по названию: «flip», «remix» в тегах шумят)
+_FLAG_KIND = (("instr", re.compile(r"\b(instrumental|инструментал\w*|минус\w*|minus|karaoke|караоке|type ?beat|free ?beat)\b")),
+              ("speed", re.compile(r"\b(sped ?up|speed ?up|slowed|nightcore|8d audio|bass ?boost\w*)\b")),
+              ("fragment", re.compile(r"\b(snippet|preview|leak|demo|отрывок|слив)\b")))
+
+
+def yumilyrics_kind(title):
+    sys.path.insert(0, LIB)
+    import yumilyrics
+    return yumilyrics.kind(title)
+
+
+def flag_kind(t):
+    f = t.get("flags") or ""
+    return next((k for k, rx in _FLAG_KIND if rx.search(f)), "")
+
+
+def replace_versions(tracks):
+    """Ремиксы, edit, sped up/slowed, минусовки → оригиналы на том же месте; мэшапы и ненайденные — убрать.
+    Обычные треки в другой версии (текст под другую длину) → официальная запись; не нашлась — остаются.
+    Исключения — keep-versions.txt. Промах ищется заново раз в неделю."""
+    sys.path.insert(0, LIB)
+    import yumilyrics
+    try:
+        keep = [x.strip().lower() for x in open(KEEP, encoding="utf-8") if x.strip() and not x.startswith("#")]
+    except OSError:
+        keep = []
+    try:
+        rep = json.load(open(REPLACE))
+    except (OSError, ValueError):
+        rep = {}
+    out, changed = [], False
+    for t in tracks:
+        kind = yumilyrics.kind(t.get("title")) or flag_kind(t)
+        name = f"{t.get('artist', '')} — {t.get('title', '')}".lower()
+        if any(k in name for k in keep):
+            out.append(t)
+            continue
+        rk = t.get("key") or t["id"]
+        if not kind:
+            # обычный трек: залит в другой версии, чем официальная (текст не совпадает) → официальная запись;
+            # не нашлась — трек остаётся как есть
+            m = rep.get("ver:" + rk)
+            md = 0 if m else _lyrics_version(t)
+            if not m and not md:
+                out.append(t)
+                continue
+            if m is None or (m.get("miss") and time.time() - m["miss"] > 7 * 86400):
+                try:
+                    m = find_official(t, md or m.get("mdur", 0)) or {"miss": int(time.time()), "mdur": md}
+                except Exception:  # noqa: BLE001
+                    out.append(t)
+                    continue
+                m["was"] = f"{t.get('artist')} — {t.get('title')} ({t.get('dur')} с)"
+                rep["ver:" + rk], changed = m, True
+            if m.get("miss"):
+                out.append(t)
+            else:
+                out.append({k: v for k, v in m.items() if k not in ("src", "was", "mdur")} | {"key": m.get("key") or m["id"]})
+            continue
+        m = rep.get(rk)
+        if m is None or (m.get("miss") and time.time() - m["miss"] > 7 * 86400):
+            try:
+                m = find_original(t, kind) or {"miss": int(time.time())}
+            except Exception:  # noqa: BLE001 — сеть: оставить как есть до следующего раза
+                out.append(t)
+                continue
+            m["was"] = f"{t.get('artist')} — {t.get('title')}"
+            rep[rk], changed = m, True
+        if not m.get("miss"):
+            out.append({k: v for k, v in m.items() if k not in ("src", "was")} | {"key": m.get("key") or m["id"]})
+    if changed:
+        with open(REPLACE + ".tmp", "w") as f:
+            json.dump(rep, f, ensure_ascii=False, indent=0)
+        os.replace(REPLACE + ".tmp", REPLACE)
+    return out
+
+
 def write_cache(pid, name, tracks):
     skip = read_skip()
     tracks = [t for t in tracks if (t.get("key") or t["id"]) not in skip]
+    tracks = replace_versions(tracks) if tracks else []
+    # свои добавления — в конец, как выбраны (без замены версий); повтор того, что уже есть, не добавляем
+    tracks += [dict(t, added=True) for t in read_added().get(pid, []) if (t.get("key") or t["id"]) not in skip]
     uniq, seen = [], set()               # повторы (тот же артист + название, в т.ч. разные загрузки) — один раз
     for t in tracks:
         k = track_key(t.get("artist"), t.get("title"))
@@ -590,14 +892,7 @@ def write_cache(pid, name, tracks):
             continue
         seen.add(k)
         uniq.append(t)
-    tracks = uniq
-    os.makedirs(CACHE, exist_ok=True)
-    data = {"id": pid, "name": name, "updated": int(time.time()), "tracks": tracks}
-    for ext, body in (("json", json.dumps(data, ensure_ascii=False)), ("m3u", m3u(tracks))):
-        tmp = cache_path(pid, ext) + ".tmp"
-        with open(tmp, "w") as f:
-            f.write(body)
-        os.replace(tmp, cache_path(pid, ext))
+    data = store_cache(pid, name, uniq)
     save_thumbs([])
     return data
 
@@ -693,6 +988,61 @@ def prefetch_lyrics(urls):
         m = yumimeta.lookup(url)
         if m:
             _safe(lambda: yumilyrics.fetch(m["title"], m["artist"], m["dur"], url))
+
+
+def recheck_lyrics(force=False, workers=3):
+    """Подобрать/перепроверить тексты всех треков плейлистов (правила yumilyrics v3) → итог и отчёт TSV."""
+    import glob
+    import threading
+    from collections import Counter
+    from concurrent.futures import ThreadPoolExecutor
+    sys.path.insert(0, LIB)
+    import yumilyrics
+    import yumimeta
+    urls = []
+    for f in sorted(glob.glob(os.path.join(CACHE, "pl-*.m3u"))):
+        for line in open(f, encoding="utf-8", errors="replace"):
+            u = line.strip()
+            if u.startswith("http") and u not in urls:
+                urls.append(u)
+    lock, done, rows = threading.Lock(), [0], []
+
+    def one(url):
+        m = yumimeta.lookup(url)
+        if not m or not m.get("dur"):
+            return url, None, "нет данных о треке"
+        res, why = None, ""
+        for attempt in range(2):          # сетевой сбой — ещё раз
+            try:
+                res = yumilyrics.fetch(m["title"], m["artist"], m["dur"], url, force=force or attempt > 0)
+                break
+            except Exception as e:  # noqa: BLE001
+                why = str(e)[:80]
+        if res is None:
+            kind = yumilyrics.kind(m["title"])
+            why = why or ("мэшап — без текста" if kind == "mashup" else "не найден")
+        with lock:
+            done[0] += 1
+            if done[0] % 25 == 0 or done[0] == len(urls):
+                print(f"  {done[0]}/{len(urls)}", file=sys.stderr, flush=True)
+        return url, m, res if res else why
+
+    with ThreadPoolExecutor(workers) as ex:
+        for url, m, r in ex.map(one, urls):
+            if isinstance(r, dict):
+                st = "синхр" if r["synced"] else ("без слов" if r["source"] == "минусовка" else "без таймингов")
+                rows.append((st, r["source"], m["artist"], m["title"], url))
+            else:
+                rows.append(("нет", r, (m or {}).get("artist", ""), (m or {}).get("title", ""), url))
+    rep = os.path.join(os.path.dirname(yumilyrics.CACHE), "lyrics-report.tsv")
+    with open(rep, "w", encoding="utf-8") as f:
+        f.write("статус\tисточник/причина\tартист\tназвание\tссылка\n")
+        for r in sorted(rows):
+            f.write("\t".join(x.replace("\t", " ") for x in r) + "\n")
+    c = Counter(r[0] for r in rows)
+    notes = Counter(n for r in rows for n in ("ускорено", "замедлено", "ремикс", "другая версия")
+                    if n in r[1])
+    return {"треков": len(rows), **c, "пометки": dict(notes), "отчёт": rep}
 
 
 def restart():
@@ -791,6 +1141,18 @@ def main(a):
         return 0
     if cmd == "restart":
         return 0 if restart() else 1
+    if cmd == "pl-add":
+        print(json.dumps(pl_add(args[0], json.loads(args[1])), ensure_ascii=False))
+        return 0
+    if cmd == "pl-remove":
+        print(json.dumps(pl_remove(args[0], args[1]), ensure_ascii=False))
+        return 0
+    if cmd == "pl-new":
+        print(json.dumps(pl_new(" ".join(args)), ensure_ascii=False))
+        return 0
+    if cmd == "recheck-lyrics":           # recheck-lyrics [--force]
+        print(json.dumps(recheck_lyrics(force="--force" in args), ensure_ascii=False, indent=1))
+        return 0
     if cmd == "prefetch-lyrics":
         prefetch_lyrics(args)
         return 0

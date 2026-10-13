@@ -16,7 +16,7 @@
   не чаще раза в 150 мс. Картинки hint image-data — png в каталоге img/ рядом с историей.
   Не хранятся: «прогресс»-уведомления (hint value, synchronous, x-canonical-private-synchronous,
   x-dunst-stack-tag — громкость/яркость), hint transient=true и служебные уведомления по правилам
-  $YNL_IGNORE (~/.config/yumi-notify/ignore.json: раскладка, скриншот, обои…).
+  $YNL_IGNORE (~/.config/yumi/notify/ignore.json: раскладка, скриншот, обои…).
   Удаление: NotificationClosed reason 2 (закрыл пользователь) и 3 (CloseNotification / закрыто
   приложением). reason 1 (истёк таймер всплывашки) — остаётся, как в истории swaync.
   Внешняя правка файла (центр убрал карточку, «Очистить всё») подхватывается: перед изменением
@@ -54,7 +54,7 @@ SAVE_DELAY_MS = 150
 PENDING_TTL = 60            # с: Notify без ответа дольше этого — забыть
 PROGRESS_HINTS = ("value", "synchronous", "x-canonical-private-synchronous", "x-dunst-stack-tag")
 RULES_FILE = os.environ.get("YNL_IGNORE") or os.path.join(
-    os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")), "yumi-notify", "ignore.json")
+    os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")), "yumi/notify", "ignore.json")
 
 ARGS = set(sys.argv[1:])
 VERBOSE = "--test" in ARGS or "--once" in ARGS
@@ -84,7 +84,7 @@ def _int(v, default):
 
 
 class Rules:
-    """Служебные уведомления, которые не нужны в журнале: $YNL_IGNORE (~/.config/yumi-notify/ignore.json).
+    """Служебные уведомления, которые не нужны в журнале: $YNL_IGNORE (~/.config/yumi/notify/ignore.json).
     {"keep": [...], "ignore": [...]}; правило — поля app/summary/body/icon (regex без учёта регистра),
     replaces/urgency (числа); совпасть должны все. keep сильнее ignore. Файл перечитывается при изменении."""
     TEXT = {"app": "app", "summary": "summary", "body": "body"}

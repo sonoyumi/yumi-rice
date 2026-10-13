@@ -8,8 +8,8 @@ import os
 import re
 import sys
 
-sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-panel"))
-sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi-tray"))
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi/panel"))
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi/tray"))
 import yumipanel as yp  # noqa: E402  (сам перезапускает процесс с layer-shell)
 from yumipanel import Gtk, GLib, Gio  # noqa: E402
 import yumitray as yt  # noqa: E402

@@ -1,0 +1,437 @@
+#!/usr/bin/env python3
+"""yumi-menu-websearch — веб-поиск на GTK (каркас yumi-panel; замена `hyde-shell rofi.websearch`).
+  yumi-menu-websearch [--center|--bar]   открыть / закрыть (повторный вызов закрывает)
+  yumi-menu-websearch --close            закрыть
+  yumi-menu-websearch --resolve ТЕКСТ    без окна: напечатать, что откроет Enter (для проверки)
+
+Как пользоваться:
+  • набрать запрос и Enter — поиск в выбранном поисковике (↑/↓ — сменить поисковик);
+  • «имя:запрос» — сразу в нужный: «yt:lofi», «aw:pipewire», «aur:paru», «github:hyprland»
+    (имя — ключ, короткое имя, начало ключа/названия от 2 букв);
+  • адрес («archlinux.org», «https://…», «localhost:8080») открывается как адрес;
+  • пустая строка + Enter — главная страница поисковика;
+  • Tab — к спискам; щелчок по поисковику при введённом запросе ищет сразу; щелчок по истории повторяет запрос.
+Открывает `uwsm app -- xdg-open <адрес>` (браузер по умолчанию, в своей области systemd).
+
+Поисковики: DATA_DIR/websearch.lst (формат HyDE «значок | ключ | адрес» + «| название | короткие имена»);
+  свои добавки/замены — ~/.config/yumi/panel/websearch.lst (тот же формат).
+История: $XDG_CACHE_HOME/yumi-panel/websearch-history.json (последние HISTORY_MAX запросов).
+
+Переменные для проверки:
+  YP_DRYRUN=1               адрес только печатается (stdout и stderr), браузер не открывается, окно не закрывается;
+                            история пишется, только если задан YP_WEBSEARCH_CACHE
+  YP_WEBSEARCH_CACHE=каталог  свой каталог истории (тесты)
+  YP_WEBSEARCH_DATA=каталог   свой каталог с websearch.lst
+  YP_SEARCH=текст           сразу ввести текст;  YP_WS_ENTER=1 — через 0,8 с «нажать» Enter (только с YP_DRYRUN)
+  YP_PRINT_SHAPE=1          через 0,7 с напечатать в stderr «[shape] x y w h» — рамку меню в слое (для снимков)
+Откат: удалить этот файл (и вернуть бинд SUPER+SHIFT+/ на `hyde-shell rofi.websearch`)"""
+import os
+import sys
+import json
+import re
+import shutil
+import time
+import urllib.parse
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+HOME = os.path.expanduser("~")
+_HERE = os.path.dirname(os.path.realpath(__file__))
+# каталог данных меню (будущий общий: ~/.local/share/yumi-panel/data); пока его нет — data/ рядом со скриптом
+DATA_DIR = os.environ.get("YP_WEBSEARCH_DATA") or next(
+    (d for d in (os.path.join(HOME, ".local/share/yumi-panel/data"), os.path.join(_HERE, "data"))
+     if os.path.isfile(os.path.join(d, "websearch.lst"))),
+    os.path.join(HOME, ".local/share/yumi-panel/data"))
+USER_LST = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.join(HOME, ".config")), "yumi/panel/websearch.lst")
+CACHE_DIR = os.environ.get("YP_WEBSEARCH_CACHE") or os.path.join(
+    os.environ.get("XDG_CACHE_HOME", os.path.join(HOME, ".cache")), "yumi-panel")
+HISTORY = os.path.join(CACHE_DIR, "websearch-history.json")
+HISTORY_MAX = 200
+DEFAULT_ENGINE = "google"
+DRY = bool(os.environ.get("YP_DRYRUN"))
+
+
+# ---------- данные (без GTK — работают и в --resolve) ----------
+class Engine:
+    def __init__(self, icon, key, url, name="", aliases=()):
+        self.icon, self.key, self.url = icon or "󰖟", key, url
+        self.name = name or key
+        self.aliases = [a.lower() for a in aliases if a]
+
+    def search_url(self, query):
+        return self.url.replace("%s", urllib.parse.quote(query, safe=""))
+
+    def home_url(self):
+        p = urllib.parse.urlsplit(self.url)
+        return f"{p.scheme}://{p.netloc}/"
+
+
+def load_engines():
+    """[Engine] в порядке файла; пользовательский файл добавляет новые и заменяет одноимённые."""
+    engines = {}
+    for path in (os.path.join(DATA_DIR, "websearch.lst"), USER_LST):
+        try:
+            lines = open(path, encoding="utf-8").read().splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            p = [x.strip() for x in line.split("|")]
+            if len(p) < 3 or not p[1] or not p[2]:
+                continue
+            aliases = [a.strip() for a in p[4].split(",")] if len(p) > 4 else []
+            engines[p[1]] = Engine(p[0], p[1], p[2], p[3] if len(p) > 3 else "", aliases)
+    if not engines:
+        engines[DEFAULT_ENGINE] = Engine("󰊭", DEFAULT_ENGINE, "https://www.google.com/search?q=%s", "Google", ["g"])
+    return list(engines.values())
+
+
+def find_engine(engines, name):
+    """Поисковик по имени: точный ключ → короткое имя → начало ключа/названия → вхождение. Без учёта регистра."""
+    n = name.strip().lower()
+    if not n:
+        return None
+    for test in (lambda e: e.key.lower() == n,
+                 lambda e: n in e.aliases,
+                 lambda e: len(n) >= 2 and (e.key.lower().startswith(n) or e.name.lower().startswith(n)),
+                 lambda e: len(n) >= 3 and (n in e.key.lower() or n in e.name.lower())):
+        for e in engines:
+            if test(e):
+                return e
+    return None
+
+
+URL_SCHEME = re.compile(r"^[a-z][a-z0-9+.-]*://\S+$", re.I)
+URL_BARE = re.compile(r"^(localhost|[\w-]+(\.[\w-]+)*\.[a-z]{2,}|\d{1,3}(\.\d{1,3}){3})(:\d+)?([/?#]\S*)?$", re.I)
+
+
+def as_url(text):
+    """Адрес, если текст похож на адрес (схема или домен с точкой), иначе None."""
+    t = text.strip()
+    if not t or " " in t:
+        return None
+    if URL_SCHEME.match(t) or re.match(r"^(about|file|mailto):", t, re.I):
+        return t
+    if URL_BARE.match(t):
+        return ("http://" if t.lower().startswith(("localhost", "127.", "192.168.", "10.")) else "https://") + t
+    return None
+
+
+def resolve(text, engines, current):
+    """Что сделает Enter: (вид, поисковик, запрос, адрес); вид = url | search | home | none."""
+    t = text.strip()
+    m = re.match(r"^([^\s:/]{1,30}):(?!//)\s*(.*)$", t)
+    if m:
+        e = find_engine(engines, m.group(1))
+        if e and not URL_BARE.match(t):     # «localhost:8080» — адрес, а не поисковик «localhost»
+            q = m.group(2).strip()
+            return ("search", e, q, e.search_url(q)) if q else ("home", e, "", e.home_url())
+    url = as_url(t)
+    if url:
+        return "url", None, t, url
+    if not t:
+        return ("home", current, "", current.home_url()) if current else ("none", None, "", "")
+    return "search", current, t, current.search_url(t)
+
+
+def load_history():
+    try:
+        data = json.load(open(HISTORY, encoding="utf-8"))
+        return [h for h in data if isinstance(h, dict) and h.get("q")]
+    except (OSError, ValueError):
+        return []
+
+
+def save_history(hist, engine_key, query):
+    """Новый запрос — наверх, без повторов (поисковик + текст)."""
+    hist = [h for h in hist if not (h.get("e") == engine_key and h.get("q") == query)]
+    hist.insert(0, {"e": engine_key, "q": query, "t": int(time.time())})
+    hist = hist[:HISTORY_MAX]
+    if DRY and not os.environ.get("YP_WEBSEARCH_CACHE"):
+        print(f"[dry-run] история: {engine_key}: {query} (не записана)", file=sys.stderr, flush=True)
+        return hist
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        tmp = HISTORY + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(hist, f, ensure_ascii=False, indent=0)
+        os.replace(tmp, HISTORY)
+    except OSError as e:
+        print("история не записана:", e, file=sys.stderr)
+    return hist
+
+
+if "--resolve" in sys.argv:                      # проверка без окна и без GTK
+    _engines = load_engines()
+    _cur = find_engine(_engines, DEFAULT_ENGINE) or _engines[0]
+    _kind, _e, _q, _url = resolve(" ".join(sys.argv[sys.argv.index("--resolve") + 1:]), _engines, _cur)
+    print(_kind, _e.key if _e else "-", repr(_q), _url, sep="\t")
+    sys.exit(0)
+
+
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi/panel"))
+import yumipanel as yp  # noqa: E402  (сам перезапускает процесс с layer-shell)
+from yumipanel import Gtk, Gdk, GLib, Pango, Layer  # noqa: E402
+import gi  # noqa: E402
+gi.require_version("Graphene", "1.0")
+from gi.repository import Graphene  # noqa: E402
+
+yp.WIDTH = 520                 # каркас берёт ширину окна и шапки из yp.WIDTH
+GRID_H = 196                   # высота сетки поисковиков (постоянная — окно не меняет размер)
+HIST_H = 150                   # высота списка истории
+HIST_SHOWN = 30
+
+CSS = """
+.yw-entry { font-size: 12pt; }
+.yw-plan { background: alpha(@yp-accent, 0.12); border-radius: 14px; padding: 7px 12px; }
+.yw-plan-icon { color: @yp-accent; font-size: 13pt; min-width: 20px; }
+.yw-plan-text { font-size: 10pt; }
+.yw-plan-url { font-size: 8.5pt; color: alpha(@yp-fg2, 0.65); }
+.yw-kbd { font-size: 8pt; font-weight: 700; color: @yp-on-acc; background: @yp-accent;
+          border-radius: 6px; padding: 1px 6px; }
+.yw-list scrollbar { background: transparent; border: none; }
+flowbox.yw-grid { background: transparent; }
+flowboxchild.yw-cell { padding: 0; background: transparent; border-radius: 12px; outline: none; }
+.yw-eng { background: @yp-btn; color: @yp-fg; border-radius: 12px; border: none; box-shadow: none;
+          padding: 5px 7px; min-height: 22px; transition: background 150ms; }
+.yw-eng:hover { background: @yp-hover; }
+.yw-eng:focus-visible { box-shadow: inset 0 0 0 2px @yp-accent; }
+.yw-eng.active { background: alpha(@yp-accent, 0.25); box-shadow: inset 0 0 0 1px alpha(@yp-accent, 0.75); }
+.yw-eng-icon { color: @yp-accent; font-size: 11pt; min-width: 16px; }
+.yw-eng-name { font-size: 9.5pt; }
+.yw-eng-alias { font-size: 7.5pt; color: alpha(@yp-fg2, 0.55); }
+.yw-hist { background: transparent; color: @yp-fg; border: none; box-shadow: none; border-radius: 12px;
+           padding: 4px 10px; transition: background 150ms; }
+.yw-hist:hover, .yw-hist:focus-visible { background: @yp-btn; }
+.yw-hist:focus-visible { box-shadow: inset 0 0 0 1px alpha(@yp-accent, 0.6); }
+.yw-hist-icon { color: alpha(@yp-accent, 0.85); font-size: 10pt; min-width: 16px; }
+.yw-hist-q { font-size: 10pt; }
+.yw-hist-meta { font-size: 8pt; color: alpha(@yp-fg2, 0.6); }
+.yw-empty { color: alpha(@yp-fg2, 0.6); font-size: 9.5pt; padding: 10px 8px; }
+.yw-dry { color: @yp-accent; font-size: 8.5pt; font-weight: 700; letter-spacing: 1px; padding: 0 6px; }
+"""
+
+
+def ago(ts):
+    d = max(0, int(time.time()) - int(ts or 0))
+    if d < 60:
+        return "только что"
+    if d < 3600:
+        return f"{d // 60} мин назад"
+    if d < 86400:
+        return f"{d // 3600} ч назад"
+    if d < 86400 * 30:
+        return f"{d // 86400} дн назад"
+    return time.strftime("%d.%m.%Y", time.localtime(ts))
+
+
+class WebSearch:
+    def __init__(self, panel, body):
+        self.panel = panel
+        panel.add_css(CSS)
+        self.engines = load_engines()
+        self.history = load_history()
+        last = self.history[0]["e"] if self.history else DEFAULT_ENGINE
+        self.current = find_engine(self.engines, last) or find_engine(self.engines, DEFAULT_ENGINE) or self.engines[0]
+        self.eng_btn = {}
+
+        if os.environ.get("YP_KEYBOARD") != "none":
+            Layer.set_keyboard_mode(panel, Layer.KeyboardMode.EXCLUSIVE)
+
+        self.entry = Gtk.Entry(placeholder_text="Запрос, адрес или имя:запрос", hexpand=True,
+                               css_classes=["yp-entry", "yw-entry"])
+        self.entry.set_icon_from_icon_name(Gtk.EntryIconPosition.PRIMARY, "system-search-symbolic")
+        self.entry.connect("changed", lambda *_: self.update())
+        self.entry.connect("activate", lambda *_: self.go())
+        keys = Gtk.EventControllerKey(propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        keys.connect("key-pressed", self.on_key)
+        self.entry.add_controller(keys)
+        body.append(self.entry)
+
+        # что сделает Enter
+        plan = Gtk.Box(spacing=10, css_classes=["yw-plan"])
+        self.plan_icon = Gtk.Label(css_classes=["yw-plan-icon"], valign=Gtk.Align.CENTER)
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True, valign=Gtk.Align.CENTER)
+        self.plan_text = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END, max_width_chars=1,
+                                   css_classes=["yw-plan-text"])
+        self.plan_url = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE, max_width_chars=1,
+                                  css_classes=["yw-plan-url"])
+        col.append(self.plan_text)
+        col.append(self.plan_url)
+        plan.append(self.plan_icon)
+        plan.append(col)
+        plan.append(Gtk.Label(label="Enter", valign=Gtk.Align.CENTER, css_classes=["yw-kbd"]))
+        body.append(plan)
+
+        # поисковики
+        body.append(yp.section("ПОИСКОВИКИ  ·  ↑ ↓ — выбрать"))
+        self.grid = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
+                                min_children_per_line=3, max_children_per_line=3,
+                                row_spacing=6, column_spacing=6, css_classes=["yw-grid"])
+        for e in self.engines:
+            self.grid.append(self.engine_cell(e))
+        gs = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, css_classes=["yw-list"])
+        h = round(GRID_H * panel.k)
+        gs.set_min_content_height(h)
+        gs.set_max_content_height(h)
+        gs.set_child(self.grid)
+        self.grid_scroll = gs
+        body.append(gs)
+
+        # история
+        self.hist_title = yp.section("НЕДАВНИЕ ЗАПРОСЫ")
+        body.append(self.hist_title)
+        self.hist_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        hs = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, css_classes=["yw-list"])
+        h = round(HIST_H * panel.k)
+        hs.set_min_content_height(h)
+        hs.set_max_content_height(h)
+        hs.set_child(self.hist_box)
+        body.append(hs)
+        if DRY:
+            body.append(Gtk.Label(label="ПРОВЕРКА: БРАУЗЕР НЕ ОТКРЫВАЕТСЯ", xalign=0, css_classes=["yw-dry"]))
+
+        if os.environ.get("YP_SEARCH"):
+            self.entry.set_text(os.environ["YP_SEARCH"])
+        self.update()
+        GLib.timeout_add(80, self.focus_entry)
+        if os.environ.get("YP_PRINT_SHAPE"):          # для снимков: рамка меню внутри слоя (x y w h)
+            GLib.timeout_add(700, lambda: print("[shape]", *(panel.shape or ()), file=sys.stderr, flush=True) and False)
+        if DRY and os.environ.get("YP_WS_ENTER"):
+            GLib.timeout_add(800, lambda: self.go() or False)
+
+    def focus_entry(self):
+        self.entry.grab_focus()
+        self.entry.set_position(-1)          # курсор в конец, без выделения всего текста
+        return False
+
+    # ---------- элементы ----------
+    def engine_cell(self, e):
+        box = Gtk.Box(spacing=6)
+        box.append(Gtk.Label(label=e.icon, css_classes=["yw-eng-icon"]))
+        box.append(Gtk.Label(label=e.name, xalign=0, hexpand=True, ellipsize=Pango.EllipsizeMode.END,
+                             max_width_chars=1, css_classes=["yw-eng-name"]))
+        if e.aliases:
+            box.append(Gtk.Label(label=e.aliases[0], css_classes=["yw-eng-alias"]))
+        b = Gtk.Button(child=box, css_classes=["yw-eng"], tooltip_text=f"{e.name} — «{e.key}:запрос»"
+                       + (f" или «{e.aliases[0]}:запрос»" if e.aliases else ""))
+        b.connect("clicked", lambda *_, x=e: self.pick(x))
+        self.eng_btn[e.key] = b
+        cell = Gtk.FlowBoxChild(child=b, css_classes=["yw-cell"], focusable=False)
+        cell.engine = e
+        return cell
+
+    def render_history(self, q):
+        while (c := self.hist_box.get_first_child()):
+            self.hist_box.remove(c)
+        ql = q.lower()
+        items = [h for h in self.history if not ql or ql in h["q"].lower()][:HIST_SHOWN]
+        for h in items:
+            e = find_engine(self.engines, h.get("e", "")) or self.current
+            row = Gtk.Box(spacing=8)
+            row.append(Gtk.Label(label="󰋚", css_classes=["yw-hist-icon"]))
+            row.append(Gtk.Label(label=h["q"], xalign=0, hexpand=True, ellipsize=Pango.EllipsizeMode.END,
+                                 max_width_chars=1, css_classes=["yw-hist-q"]))
+            row.append(Gtk.Label(label=f"{e.icon} {e.name} · {ago(h.get('t'))}", css_classes=["yw-hist-meta"]))
+            b = Gtk.Button(child=row, css_classes=["yw-hist"])
+            b.connect("clicked", lambda *_, en=e, qq=h["q"]: self.open_search(en, qq))
+            self.hist_box.append(b)
+        if not items:
+            msg = "Ничего похожего в истории" if q and self.history else "Истории пока нет — запросы появятся здесь"
+            self.hist_box.append(Gtk.Label(label=msg, xalign=0, css_classes=["yw-empty"]))
+        n = len(self.history)
+        self.hist_title.set_label(f"НЕДАВНИЕ ЗАПРОСЫ  ·  {n}" if n else "НЕДАВНИЕ ЗАПРОСЫ")
+
+    # ---------- состояние ----------
+    def update(self):
+        text = self.entry.get_text()
+        kind, e, q, url = resolve(text, self.engines, self.current)
+        shown = e if e is not None else self.current
+        for key, b in self.eng_btn.items():
+            (b.add_css_class if key == shown.key else b.remove_css_class)("active")
+        if shown is not getattr(self, "shown", None):
+            self.shown = shown
+            GLib.idle_add(lambda: self.scroll_to(shown) or False)
+
+        if kind == "url":
+            self.plan_icon.set_label("󰌹")
+            self.plan_text.set_label("Открыть адрес")
+        elif kind == "home":
+            self.plan_icon.set_label(e.icon)
+            self.plan_text.set_label(f"Открыть {e.name}")
+        else:
+            self.plan_icon.set_label(e.icon)
+            self.plan_text.set_label(f"Найти «{q}» — {e.name}")
+        self.plan_url.set_label(url)
+        self.plan = (kind, e, q, url)
+        self.render_history(q if kind == "search" else "")
+        self.panel.set_subtitle(f"Поисковик: {self.current.name} · всего {len(self.engines)} · имя:запрос", live=True)
+
+    def on_key(self, _c, keyval, *_):
+        name = Gdk.keyval_name(keyval)
+        if name in ("Up", "Down"):
+            i = self.engines.index(self.current)
+            self.current = self.engines[(i + (1 if name == "Down" else -1)) % len(self.engines)]
+            text = self.entry.get_text()
+            m = re.match(r"^([^\s:/]{1,30}):(?!//)", text.strip())
+            if m and find_engine(self.engines, m.group(1)):     # был префикс «имя:» — заменить на новый
+                self.entry.set_text(self.current.key + ":" + text.split(":", 1)[1])
+                self.entry.set_position(-1)
+            self.update()
+            return True
+        return False
+
+    def scroll_to(self, e):
+        """Прокрутить сетку так, чтобы выбранный поисковик был виден."""
+        b = self.eng_btn.get(e.key)
+        ok, pt = b.compute_point(self.grid, Graphene.Point())
+        if not ok:
+            return
+        adj = self.grid_scroll.get_vadjustment()
+        y, h = pt.y, b.get_height()
+        if y < adj.get_value():
+            adj.set_value(y)
+        elif y + h > adj.get_value() + adj.get_page_size():
+            adj.set_value(y + h - adj.get_page_size())
+
+    def pick(self, e):
+        """Щелчок по поисковику: есть запрос — искать в нём сразу, нет — просто выбрать."""
+        self.current = e
+        kind, _e, q, _url = resolve(self.entry.get_text(), self.engines, e)
+        if kind == "search" and q:
+            self.open_search(e, q)
+            return
+        self.update()
+        self.entry.grab_focus()
+        self.entry.set_position(-1)
+
+    # ---------- действия ----------
+    def go(self):
+        kind, e, q, url = self.plan
+        if kind == "search" and e is not None:
+            self.open_search(e, q)
+        elif kind in ("url", "home"):
+            self.open_url(url, f"Открываю {url}")
+
+    def open_search(self, e, q):
+        self.current = e
+        self.history = save_history(self.history, e.key, q)
+        self.open_url(e.search_url(q), f"{e.name}: {q}")
+
+    def open_url(self, url, what):
+        cmd = (["uwsm", "app", "--"] if shutil.which("uwsm") else []) + ["xdg-open", url]
+        if DRY:
+            print("[dry-run]", " ".join(cmd), flush=True)
+            print("[dry-run]", " ".join(cmd), file=sys.stderr, flush=True)
+            self.panel.toast(f"Имитация: {what}", hold=4)
+            self.update()
+            return
+        self.panel.set_visible(False)
+        yp.spawn(*cmd)                   # каркас убирает LD_PRELOAD у дочерних программ
+        GLib.timeout_add(150, lambda: self.panel.app.quit() or False)
+
+
+if __name__ == "__main__":
+    app = yp.PanelApp("org.yumi.panel.websearch", "Веб-поиск", "󰖟", lambda panel, body: WebSearch(panel, body))
+    sys.exit(app.run(sys.argv))

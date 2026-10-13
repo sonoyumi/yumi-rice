@@ -1,0 +1,122 @@
+//   --// Модули yumi: ключи, которые раньше приходили из ~/.local/share/waybar/modules (HyDE) //--
+// Подключается из layouts/yumi.jsonc ("$XDG_CONFIG_HOME/waybar/modules/*json*"). Ключи yumi.jsonc главнее:
+// здесь только то, чего там нет (раньше это давал includes/includes.json HyDE).
+{
+    // целиком из HyDE (hyprland-workspaces.jsonc): колесо листает занятые рабочие столы
+    "hyprland/workspaces": {
+        "active-only": false,
+        "all-outputs": true,
+        "disable-scroll": false,
+        "on-scroll-down": "hyprctl dispatch 'hl.dsp.focus({workspace=\"e+1\"})'",
+        "on-scroll-up": "hyprctl dispatch 'hl.dsp.focus({workspace=\"e-1\"})'",
+        "persistent-workspaces": {},
+        "tooltip": false
+    },
+    // из HyDE (cpu.jsonc) — остальное в yumi.jsonc
+    "cpu": {
+        "format-icons": [
+            "▁",
+            "▂",
+            "▃",
+            "▄",
+            "▅",
+            "▆",
+            "▇",
+            "█"
+        ],
+        "rotate": 0
+    },
+    // из HyDE (custom-updates.jsonc)
+    "custom/updates": {
+        "rotate": 0
+    },
+    // из HyDE (custom-swaync.jsonc); меню выключено "menu": "" в yumi.jsonc, разметка — своя копия в menus/
+    "custom/swaync": {
+        "escape": true,
+        "format-icons": {
+            "battery-notification": "󰁺<span foreground='white'><sup></sup></span>",
+            "chat-notification": "󱋊<span foreground='white'><sup></sup></span>",
+            "dnd": "",
+            "dnd-inhibited-none": "",
+            "dnd-inhibited-notification": "<span foreground='red'><sup></sup></span>",
+            "dnd-none": "",
+            "dnd-notification": "<span foreground='red'><sup></sup></span>",
+            "email-notification": "<span foreground='white'><sup></sup></span>",
+            "error-notification": "󱨪<span foreground='red'><sup></sup></span>",
+            "inhibited-none": "",
+            "inhibited-notification": "<span foreground='red'><sup></sup></span>",
+            "music-notification": "󰝚<span foreground='white'><sup></sup></span>",
+            "network-notification": "󱂇<span foreground='white'><sup></sup></span>",
+            "none": "",
+            "notification": "<span foreground='red'><sup></sup></span>",
+            "update-notification": "󰚰<span foreground='white'><sup></sup></span>",
+            "volume-notification": "󰕿<span foreground='white'><sup></sup></span>",
+            "warning-notification": "󱨪<span foreground='yellow'><sup></sup></span>"
+        },
+        "menu-actions": {
+            "clear-all": "swaync-client --close-all",
+            "reload-config": "swaync-client --reload-config",
+            "reload-css": "swaync-client --reload-css",
+            "toggle-dnd": "swaync-client --toggle-dnd"
+        },
+        "menu-file": "@HOME@/.config/waybar/menus/swaync.xml",
+        "tooltip": true
+    },
+    // из HyDE (pulseaudio.jsonc); средняя кнопка и колесо — yumi-volume вместо hyde-shell volumecontrol
+    "pulseaudio": {
+        "on-click-middle": "@HOME@/.local/bin/yumi-volume -o m",
+        "on-scroll-down": "@HOME@/.local/bin/yumi-volume -o d",
+        "on-scroll-up": "@HOME@/.local/bin/yumi-volume -o i",
+        "rotate": 0,
+        "scroll-step": 5,
+        "tooltip-format": "{icon} {desc} // {volume}%"
+    },
+    // из HyDE (clock.jsonc): календарь во всплывашке, правая кнопка — месяц/год, колесо — листать
+    "clock": {
+        "actions": {
+            "on-click-backward": "tz_down",
+            "on-click-forward": "tz_up",
+            "on-click-right": "mode",
+            "on-scroll-down": "shift_down",
+            "on-scroll-up": "shift_up"
+        },
+        "calendar": {
+            "format": {
+                "months": "<span color='#ffead3'><b>{}</b></span>",
+                "today": "<span color='#ff6699'><b>{}</b></span>",
+                "weekdays": "<span color='#ffcc66'><b>{}</b></span>"
+            },
+            "mode": "month",
+            "mode-mon-col": 3,
+            "on-click-right": "mode",
+            "on-scroll": 1
+        },
+        "rotate": 0
+    },
+    // из HyDE (battery.jsonc)
+    "battery": {
+        "format-alt": "{time} {icon}",
+        "format-icons": [
+            "󰂎",
+            "󰁺",
+            "󰁻",
+            "󰁼",
+            "󰁽",
+            "󰁾",
+            "󰁿",
+            "󰂀",
+            "󰂁",
+            "󰂂",
+            "󰁹"
+        ],
+        "rotate": 0
+    },
+    // из HyDE (custom-power.jsonc)
+    "custom/power": {
+        "format": "{0}",
+        "interval": 86400,
+        "rotate": 0,
+        "tooltip": true
+    },
+    "position": "top"   // из includes.json HyDE (то же, что по умолчанию)
+}

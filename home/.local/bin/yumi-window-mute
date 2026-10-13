@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# yumi-window-mute — выключить/включить звук активного окна (замена `hyde-shell window.mute`, SUPER+CTRL+M)
+# Потоки окна ищутся как в window.mute.py HyDE, по очереди:
+#   1) application.process.id потока = PID окна;  2) класс окна в имени/ID/программе потока
+#      или заголовок окна в media.name;  3) поток от процесса-потомка окна (браузеры, Electron);
+#   4) в цепочке родителей потока есть процесс с именем, как класс окна.
+# Хоть один поток со звуком → выключить все найденные, иначе включить. Уведомление как у HyDE:
+# «Muted|Unmuted <заголовок>», ниже — устройство вывода; значок muted-/unmuted-speaker; одно окно, 0,8 с.
+# DRY=1 — только показать найденные потоки и команды. Откат: вернуть `hyde-shell window.mute` в binds.lua
+
+ICONS=${YUMI_OSD_ICONS:-${XDG_DATA_HOME:-$HOME/.local/share}/icons/Wallbash-Icon/media}
+run() { if [[ -n $DRY ]]; then printf 'DO:'; printf ' %q' "$@"; echo; else "$@"; fi; }
+note() { run notify-send -r 91190 "$@"; }
+
+win=$(hyprctl -j activewindow)
+pid=$(jq -r '.pid // 0' <<<"$win")
+class=$(jq -r '.class // ""' <<<"$win")
+title=$(jq -r '.title // ""' <<<"$win")
+label=$(jq -r '.initialTitle // .title // .class // "audio"' <<<"$win")
+((pid > 0)) || { echo "у активного окна нет PID" >&2; exit 1; }
+
+inputs=$(pactl --format=json list sink-inputs 2>/dev/null) || inputs='[]'
+
+# предки процесса: PID, его родитель, … до 1 (с именами)
+ancestors() { local p=$1; while [[ -n $p && $p -gt 1 ]]; do echo "$p $(cat /proc/"$p"/comm 2>/dev/null)"; p=$(awk '{print $4}' /proc/"$p"/stat 2>/dev/null); done; }
+
+mapfile -t ids < <(jq -r --argjson pid "$pid" '.[] | select((.properties["application.process.id"] // "") == ($pid|tostring)) | .index' <<<"$inputs")
+if ((${#ids[@]} == 0)); then
+    norm() { tr 'A-Z_~.-' 'a-z    ' <<<"$1" | xargs; }
+    mapfile -t ids < <(jq -r --arg c "${class,,}" --arg t "$(norm "$title")" '.[] |
+        .properties as $p |
+        select(($c != "" and ([$p["application.name"], $p["application.id"], $p["application.process.binary"]]
+                  | map(ascii_downcase? // "") | any(contains($c))))
+            or ($t != "" and (($p["media.name"] // "") | ascii_downcase | gsub("[-_~.]"; " ") | contains($t))))
+        | .index' <<<"$inputs")
+fi
+if ((${#ids[@]} == 0)); then
+    while read -r idx spid; do
+        [[ $spid =~ ^[0-9]+$ ]] || continue
+        ancestors "$spid" | awk '{print $1}' | grep -qx "$pid" && ids+=("$idx")
+    done < <(jq -r '.[] | "\(.index) \(.properties["application.process.id"] // "")"' <<<"$inputs")
+fi
+if ((${#ids[@]} == 0)) && [[ -n $class ]]; then
+    while read -r idx spid; do
+        [[ $spid =~ ^[0-9]+$ ]] || continue
+        ancestors "$spid" | awk '{print $2}' | grep -qxF -- "$class" && ids+=("$idx")
+    done < <(jq -r '.[] | "\(.index) \(.properties["application.process.id"] // "")"' <<<"$inputs")
+fi
+
+if ((${#ids[@]} == 0)); then
+    note -a t1 -t 1200 -i "${ICONS%/media}/wallbash.svg" "No sink input available."
+    echo "нет звуковых потоков у окна: $class" >&2
+    exit 1
+fi
+
+sel=$(printf '%s\n' "${ids[@]}" | jq -R 'tonumber' | jq -s '.')
+all_muted=$(jq --argjson s "$sel" '[.[] | select(.index as $i | $s | index($i)) | .mute] | all' <<<"$inputs")
+[[ $all_muted == true ]] && { want=0; state=Unmuted; icon=unmuted-speaker; } || { want=1; state=Muted; icon=muted-speaker; }
+[[ -n $DRY ]] && echo "потоки окна «$class»: ${ids[*]}"
+for i in "${ids[@]}"; do run pactl set-sink-input-mute "$i" "$want"; done
+
+sink=$(pactl get-default-sink 2>/dev/null)
+desc=$(pactl --format=json list sinks 2>/dev/null | jq -r --arg n "$sink" '.[] | select(.name == $n) | .description' | head -1)
+note -a t2 -t 800 -i "$ICONS/$icon.svg" "$state $label" "${desc:-$sink}"

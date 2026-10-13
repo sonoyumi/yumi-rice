@@ -1,0 +1,461 @@
+#!/usr/bin/env python3
+"""yumi-menu-launcher — «Программы и файлы» на GTK (каркас yumi-panel; замена rofi-меню HyDE
+`hyde-shell rofilaunch d` — SUPER+A и `hyde-shell rofilaunch f` — SUPER+SHIFT+E).
+  yumi-menu-launcher [--apps|--files] [--center|--bar]   открыть / закрыть
+  yumi-menu-launcher --close                              закрыть
+
+Программы — все .desktop из ~/.local/share/applications, XDG_DATA_DIRS (там же Flatpak) и /usr/share:
+учитываются Hidden, NoDisplay, TryExec, OnlyShowIn/NotShowIn (рабочий стол из XDG_CURRENT_DESKTOP),
+названия на русском (Name[ru]). Поиск — нечёткий по названию, описанию, ключевым словам и команде;
+выше — то, что запускается чаще (~/.cache/yumi-panel/launcher-usage.json). Запуск: `uwsm app -- <id>.desktop`.
+Файлы — поиск по имени в домашней папке (fd, если есть, иначе find; в фоне, без зависания окна),
+кроме скрытых, node_modules, __pycache__ и т.п. Пустой поиск — недавние файлы (recently-used.xbel).
+Enter — открыть программой по умолчанию, Shift+Enter — открыть папку файла.
+
+Клавиши: ↑/↓ (PgUp/PgDn) — выбор, Enter — запустить/открыть, Tab — Программы ⇄ Файлы,
+Esc — очистить поиск, повторно — закрыть. Мышь: щелчок по строке.
+
+Переменные для проверки:
+  YP_DRYRUN=1      ничего не запускается — команда печатается в stderr, окно не закрывается,
+                   счётчик запусков не пишется
+  YP_SEARCH=текст  сразу ввести текст в поиск
+  YP_KEYBOARD=none не брать клавиатуру (снимки экрана агентом)
+  YP_TEST=enter|shift-enter  через 1,5 с (файлы — 3 с) «нажать» Enter / Shift+Enter на выбранной строке
+Общие функции (.desktop, поиск, частота запусков, файлы) — ~/.local/lib/yumi/panel/yumiapps.py (их же берёт yumi-pult).
+Откат: удалить этот файл (и ~/.cache/yumi-panel/launcher-usage.json)"""
+import os
+import sys
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi/panel"))
+import yumipanel as yp  # noqa: E402  (сам перезапускает процесс с layer-shell)
+from yumipanel import Gtk, Gdk, GLib, Gio, Pango, Layer  # noqa: E402
+# разбор .desktop, нечёткий поиск, частота запусков, поиск файлов — общие с пультом (yumi-pult)
+from yumiapps import (load_apps, app_score, load_usage, usage_boost, save_usage, short,  # noqa: E402
+                      find_cmd, file_score, recent_files, file_gicon, default_app_id)
+
+HOME = os.path.expanduser("~")
+DRY = yp.DRY
+WIDTH = 460                    # шире обычного меню: длинные пути у файлов
+LIST_H = 420                   # высота списка постоянна — рамка не прыгает при поиске и смене вкладки
+ICON = 30                      # значок программы, px
+APP_LIMIT = 120                # строк на экране за раз
+FILE_LIMIT = 60
+FIND_LIMIT = 400               # find останавливаем после стольких совпадений
+
+CSS = """
+.yl-search { margin-bottom: 2px; }
+.yl-seg .yp-seg-btn { padding: 5px 4px; }
+.yl-seg .yp-seg-icon { font-size: 12pt; }
+.yl-seg .yp-seg-text { font-size: 8.5pt; }
+.yl-list scrollbar { background: transparent; border: none; }
+.yl-row { background: transparent; border: none; box-shadow: none; border-radius: 14px;
+          padding: 5px 10px; color: @yp-fg; transition: background 120ms; }
+.yl-row:hover { background: @yp-btn; }
+.yl-row.sel { background: alpha(@yp-accent, 0.22); box-shadow: inset 0 0 0 1px alpha(@yp-accent, 0.6); }
+.yl-name { font-size: 10.5pt; }
+.yl-sub { font-size: 8.5pt; color: alpha(@yp-fg2, 0.65); }
+.yl-badge { font-size: 8pt; color: alpha(@yp-fg2, 0.55); }
+.yl-glyph { color: @yp-accent; font-size: 15pt; min-width: 30px; }
+.yl-tool { min-width: 28px; min-height: 28px; border-radius: 14px; padding: 0; font-size: 12pt;
+           background: transparent; color: alpha(@yp-fg2, 0.6); border: none; box-shadow: none; }
+.yl-tool:hover { background: alpha(@yp-fg, 0.12); color: @yp-fg; }
+.yl-empty { color: alpha(@yp-fg2, 0.6); font-size: 10pt; padding: 18px 6px; }
+.yl-keys { color: alpha(@yp-fg2, 0.55); font-size: 8.5pt; padding: 0 6px; }
+.yl-dry { color: @yp-accent; font-size: 8.5pt; font-weight: 700; letter-spacing: 1px; padding: 0 6px; }
+"""
+
+
+# ---------- меню ----------
+class Launcher:
+    def __init__(self, panel, body, mode):
+        self.panel = panel
+        self.mode = mode
+        panel.add_css(CSS)
+        self.k = panel.k
+        self.apps = load_apps()
+        self.usage = load_usage()
+        self.items = []              # текущие строки: [(кнопка, действие, действие с Shift)]
+        self.sel = 0
+        self.files = []              # найденные пути (текущий поиск)
+        self.find_gen = 0
+        self.find_proc = None
+        self.find_cancel = None
+        self.find_timer = 0
+        self.render_timer = 0
+        self.searching = False
+        self.truncated = False
+        self.recent = None
+        self.theme = Gtk.IconTheme.get_for_display(Gdk.Display.get_default())
+
+        if os.environ.get("YP_KEYBOARD") != "none":
+            Layer.set_keyboard_mode(panel, Layer.KeyboardMode.EXCLUSIVE)
+
+        self.search = Gtk.SearchEntry(hexpand=True, css_classes=["yp-entry", "yl-search"])
+        self.search.connect("search-changed", lambda *_: self.on_query())
+        self.search.set_key_capture_widget(panel)
+        body.append(self.search)
+
+        self.seg = yp.Segmented([("apps", "󰀻", "Программы", True), ("files", "󰈞", "Файлы", True)],
+                                mode, self.set_mode)
+        self.seg.add_css_class("yl-seg")
+        for b in self.seg.btns.values():
+            b.set_focusable(False)
+        body.append(self.seg)
+
+        self.list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        self.scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, css_classes=["yl-list"],
+                                         min_content_height=round(LIST_H * self.k),
+                                         max_content_height=round(LIST_H * self.k))
+        self.scroll.set_child(self.list)
+        body.append(self.scroll)
+
+        self.keys_l = Gtk.Label(xalign=0, css_classes=["yl-keys"], ellipsize=Pango.EllipsizeMode.END,
+                                max_width_chars=1, hexpand=True)
+        body.append(self.keys_l)
+        if DRY:
+            body.append(Gtk.Label(label="ПРОВЕРКА: НИЧЕГО НЕ ЗАПУСКАЕТСЯ", xalign=0, css_classes=["yl-dry"]))
+
+        prev_hook = getattr(panel, "on_key_hook", None)
+        panel.on_key_hook = lambda kv: self.on_key(kv) or (prev_hook and prev_hook(kv))
+        panel.app.connect("shutdown", lambda *_: self.stop_find())      # find не оставлять работать после закрытия
+
+        self.apply_mode()
+        if os.environ.get("YP_SEARCH"):
+            self.search.set_text(os.environ["YP_SEARCH"])
+        GLib.timeout_add(80, lambda: self.search.grab_focus() and False)
+        test = os.environ.get("YP_TEST")          # проверка без клавиатуры: «нажать» Enter / Shift+Enter
+        if test in ("enter", "shift-enter"):
+            GLib.timeout_add(1500 if self.mode == "apps" else 3000,
+                             lambda: self.activate(self.sel, test == "shift-enter") or False)
+
+    # ---------- вкладки ----------
+    def set_mode(self, mode):
+        if mode == self.mode:
+            return
+        self.mode = mode
+        self.apply_mode()
+        self.on_query()
+        self.search.grab_focus()
+
+    def apply_mode(self):
+        self.seg.set_active(self.mode)
+        apps = self.mode == "apps"
+        self.panel.title_l.set_label(f"{'󰀻' if apps else '󰈞'}  {'Программы' if apps else 'Файлы'}")
+        self.search.set_placeholder_text("Найти программу…" if apps else "Имя файла или папки…")
+        self.keys_l.set_label("↑↓ выбор · Enter запустить · Tab файлы" if apps else
+                              "Enter открыть · Shift+Enter папка · Tab программы")
+        if not apps:
+            self.stop_find()
+        self.render()
+
+    # ---------- клавиши ----------
+    def shift_held(self):
+        try:
+            kb = Gdk.Display.get_default().get_default_seat().get_keyboard()
+            return bool(kb.get_modifier_state() & Gdk.ModifierType.SHIFT_MASK)
+        except Exception:
+            return False
+
+    def on_key(self, keyval):
+        name = Gdk.keyval_name(keyval) or ""
+        if name == "Escape" and self.search.get_text() and not self.panel.pages:
+            self.search.set_text("")
+            return True
+        if name in ("Tab", "ISO_Left_Tab"):
+            self.set_mode("files" if self.mode == "apps" else "apps")
+            return True
+        step = {"Down": 1, "Up": -1, "Page_Down": 8, "Page_Up": -8, "KP_Down": 1, "KP_Up": -1}.get(name)
+        if step:
+            self.move(step)
+            return True
+        if name in ("Return", "KP_Enter", "ISO_Enter"):
+            self.activate(self.sel, self.shift_held())
+            return True
+        return False
+
+    def move(self, step):
+        if not self.items:
+            return
+        self.select(min(max(self.sel + step, 0), len(self.items) - 1))
+
+    def select(self, i):
+        if not self.items:
+            return
+        self.items[self.sel][0].remove_css_class("sel")
+        self.sel = i
+        btn = self.items[i][0]
+        btn.add_css_class("sel")
+        GLib.idle_add(self.scroll_to, btn)
+
+    def scroll_to(self, btn):
+        ok, b = btn.compute_bounds(self.list)
+        if not ok:
+            return False
+        adj = self.scroll.get_vadjustment()
+        y, h, top, page = b.get_y(), b.get_height(), adj.get_value(), adj.get_page_size()
+        if y < top:
+            adj.set_value(y)
+        elif y + h > top + page:
+            adj.set_value(y + h - page)
+        return False
+
+    def activate(self, i, shift=False):
+        if 0 <= i < len(self.items):
+            _b, act, act_shift = self.items[i]
+            (act_shift if shift and act_shift else act)()
+
+    # ---------- список ----------
+    def clear(self):
+        while (c := self.list.get_first_child()):
+            self.list.remove(c)
+        self.items = []
+        self.sel = 0
+
+    def on_query(self):
+        if self.mode == "apps":
+            self.render()
+            return
+        if self.find_timer:                    # поиск файлов — после паузы в наборе
+            GLib.source_remove(self.find_timer)
+        self.find_timer = GLib.timeout_add(220, self.start_find)
+
+    def render(self):
+        self.clear()
+        if self.mode == "apps":
+            self.render_apps()
+        else:
+            self.render_files()
+        if self.items:
+            self.items[0][0].add_css_class("sel")
+        self.scroll.get_vadjustment().set_value(0)
+
+    def row(self, icon_widget, name, sub, act, act_shift=None, badge="", tools=()):
+        box = Gtk.Box(spacing=12)
+        box.append(icon_widget)
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0, hexpand=True, valign=Gtk.Align.CENTER)
+        col.append(Gtk.Label(label=name, xalign=0, ellipsize=Pango.EllipsizeMode.END, max_width_chars=1,
+                             hexpand=True, css_classes=["yl-name"]))
+        if sub:
+            col.append(Gtk.Label(label=sub, xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE, max_width_chars=1,
+                                 css_classes=["yl-sub"]))
+        box.append(col)
+        if badge:
+            box.append(Gtk.Label(label=badge, valign=Gtk.Align.CENTER, css_classes=["yl-badge"]))
+        for t in tools:
+            box.append(t)
+        btn = Gtk.Button(child=box, focusable=False, css_classes=["yl-row"])
+        idx = len(self.items)
+        btn.connect("clicked", lambda *_: self.activate(idx, self.shift_held()))
+        self.items.append((btn, act, act_shift))
+        self.list.append(btn)
+        return btn
+
+    def empty(self, text):
+        self.list.append(Gtk.Label(label=text, xalign=0, wrap=True, max_width_chars=1, css_classes=["yl-empty"]))
+
+    def app_icon(self, name):
+        px = round(ICON * self.k)
+        img = None
+        if name and os.path.isabs(name):
+            if os.path.exists(name):
+                img = Gtk.Image.new_from_gicon(Gio.FileIcon.new(Gio.File.new_for_path(name)))
+        elif name:
+            for n in (name, name.rsplit(".", 1)[0] if name.endswith((".png", ".svg", ".xpm")) else None):
+                if n and self.theme.has_icon(n):
+                    img = Gtk.Image.new_from_icon_name(n)
+                    break
+        if img is None:
+            img = Gtk.Image.new_from_icon_name("application-x-executable")
+        img.set_pixel_size(px)
+        img.set_valign(Gtk.Align.CENTER)
+        return img
+
+    def render_apps(self):
+        q = " ".join(self.search.get_text().casefold().split())
+        if q:
+            scored = []
+            for a in self.apps:
+                s = app_score(a, q)
+                if s:
+                    scored.append((s + usage_boost(self.usage.get(a["id"])) * 0.5, a))
+            scored.sort(key=lambda x: (-x[0], x[1]["name"].casefold()))
+            apps = [a for _s, a in scored]
+        else:
+            used = sorted((a for a in self.apps if self.usage.get(a["id"])),
+                          key=lambda a: -usage_boost(self.usage.get(a["id"])))[:6]
+            if used:
+                self.list.append(yp.section("ЧАСТО"))
+                for a in used:
+                    self.app_row(a)
+                self.list.append(yp.section("ВСЕ ПРОГРАММЫ"))
+            apps = self.apps
+        for a in apps[:APP_LIMIT]:
+            self.app_row(a)
+        if not apps:
+            self.empty("Ничего не найдено")
+        sub = f"Найдено: {len(apps)}" if q else f"Программ: {len(self.apps)}"
+        self.panel.set_subtitle(sub, live=True)
+
+    def app_row(self, a):
+        sub = next((t for t in (a["generic"], a["comment"]) if t and t.casefold() != a["name"].casefold()), "")
+        badge = "flatpak" if a["flatpak"] else ("терминал" if a["terminal"] else "")
+        self.row(self.app_icon(a["icon"]), a["name"], sub, lambda a=a: self.launch(a), badge=badge)
+
+    def render_files(self):
+        q = self.search.get_text().strip()
+        if not q:
+            if self.recent is None:
+                self.recent = recent_files()
+            if self.recent:
+                self.list.append(yp.section("НЕДАВНИЕ"))
+                for p in self.recent:
+                    self.file_row(p)
+            else:
+                self.empty("Введите часть имени файла или папки — поиск по домашней папке")
+            self.panel.set_subtitle("Недавние · поиск по домашней папке", live=True)
+            return
+        words = q.casefold().split()
+        scored = [(file_score(p, words), p) for p in self.files]
+        ranked = [p for _s, p in sorted(((s, p) for s, p in scored if s is not None), key=lambda x: (-x[0], x[1]))]
+        for p in ranked[:FILE_LIMIT]:
+            self.file_row(p)
+        if not ranked:
+            self.empty("Ищу…" if self.searching else "Ничего не найдено")
+        n = len(ranked)
+        more = "+" if self.truncated else ""
+        if self.searching:
+            sub = f"Ищу… найдено {n}"
+        elif n > FILE_LIMIT or self.truncated:
+            sub = f"Найдено: {n}{more} · показаны первые {min(n, FILE_LIMIT)} — уточните"
+        else:
+            sub = f"Найдено: {n}"
+        self.panel.set_subtitle(sub, live=True)
+
+    def file_row(self, path):
+        is_dir = os.path.isdir(path)
+        img = Gtk.Image.new_from_gicon(file_gicon(path, is_dir))
+        img.set_pixel_size(round(26 * self.k))
+        img.set_valign(Gtk.Align.CENTER)
+        folder = Gtk.Button(label="󰉋", tooltip_text="Открыть папку (Shift+Enter)", focusable=False,
+                            valign=Gtk.Align.CENTER, css_classes=["yl-tool"])
+        folder.connect("clicked", lambda *_: self.open_folder(path))
+        self.row(img, os.path.basename(path) + ("/" if is_dir else ""), short(os.path.dirname(path)),
+                 lambda: self.open_path(path), lambda: self.open_folder(path), tools=(folder,))
+
+    # ---------- поиск файлов в фоне ----------
+    def stop_find(self):
+        if self.find_cancel:
+            self.find_cancel.cancel()
+        if self.find_proc:
+            try:
+                self.find_proc.force_exit()
+            except Exception:
+                pass
+        self.find_proc = self.find_cancel = None
+        self.searching = False
+
+    def start_find(self):
+        self.find_timer = 0
+        self.stop_find()
+        self.files = []
+        self.truncated = False
+        q = self.search.get_text().strip()
+        words = q.casefold().split()
+        if self.mode != "files" or not words:
+            self.render()
+            return False
+        self.find_gen += 1
+        gen = self.find_gen
+        word = max(words, key=len)              # find ищет по самому длинному слову, остальные — фильтр
+        try:
+            self.find_proc = Gio.Subprocess.new(find_cmd(word), Gio.SubprocessFlags.STDOUT_PIPE |
+                                                Gio.SubprocessFlags.STDERR_SILENCE)
+        except GLib.Error as e:
+            self.panel.toast(f"Поиск не запустился: {e.message}", error=True, hold=4)
+            return False
+        self.find_cancel = Gio.Cancellable()
+        self.searching = True
+        stream = Gio.DataInputStream.new(self.find_proc.get_stdout_pipe())
+        self.render()
+        stream.read_line_async(GLib.PRIORITY_DEFAULT, self.find_cancel, self.on_line, (gen, stream))
+        return False
+
+    def on_line(self, stream, res, data):
+        gen, _s = data
+        try:
+            line, _n = stream.read_line_finish_utf8(res)
+        except GLib.Error:
+            return                                 # отменён (новый запрос или закрытие)
+        if gen != self.find_gen:
+            return
+        if line is None:                           # конец вывода
+            self.searching = False
+            self.find_proc = self.find_cancel = None
+            self.schedule_render(0)
+            return
+        path = line.rstrip("/")
+        if path and path != HOME:
+            self.files.append(path)
+        if len(self.files) >= FIND_LIMIT:
+            self.truncated = True
+            self.stop_find()
+            self.schedule_render(0)
+            return
+        self.schedule_render(150)
+        stream.read_line_async(GLib.PRIORITY_DEFAULT, self.find_cancel, self.on_line, data)
+
+    def schedule_render(self, delay):
+        """Список обновляем пачками, а не на каждую найденную строку."""
+        if self.render_timer and delay:
+            return
+        if self.render_timer:
+            GLib.source_remove(self.render_timer)
+        self.render_timer = GLib.timeout_add(delay, self._render_now)
+
+    def _render_now(self):
+        self.render_timer = 0
+        sel = self.sel
+        self.render()
+        if sel and sel < len(self.items):          # выбор стрелками не сбрасываем при дозагрузке
+            self.items[0][0].remove_css_class("sel")
+            self.select(sel)
+        return False
+
+    # ---------- действия ----------
+    def launch(self, a):
+        yp.do("uwsm", "app", "--", a["id"], background=True)
+        save_usage(self.usage, a["id"])
+        self.done(f"Запуск: {a['name']}")
+
+    def open_path(self, path):
+        app = default_app_id(path)
+        if app:
+            yp.do("uwsm", "app", "--", app, path, background=True)
+        else:
+            yp.do("uwsm", "app", "--", "xdg-open", path, background=True)
+        self.done("Открываю " + os.path.basename(path))
+
+    def open_folder(self, path):
+        folder = os.path.dirname(path) or HOME
+        self.open_path(folder)
+
+    def done(self, msg):
+        self.panel.toast(msg, hold=3)
+        if DRY:
+            return                                 # в проверке окно не закрываем — видно результат
+        GLib.timeout_add(80, lambda: self.panel.app.quit() or False)
+
+
+def main():
+    mode = "files" if "--files" in sys.argv else "apps"
+    yp.WIDTH = WIDTH                          # каркас берёт ширину окна и шапки из yp.WIDTH
+    yp.HEADER_H = 96
+    app = yp.PanelApp("org.yumi.panel.launcher", "Программы", "󰀻",
+                      lambda panel, body: Launcher(panel, body, mode))
+    return app.run(sys.argv)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

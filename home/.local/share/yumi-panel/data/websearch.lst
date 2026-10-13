@@ -1,0 +1,33 @@
+# Поисковики для yumi-menu-websearch (перенесено из HyDE ~/.local/share/hyde/websearch.lst).
+# Формат: значок | ключ | адрес (%s — запрос) | название в меню | короткие имена через запятую
+# Первые поля — как у HyDE, поэтому старый файл тоже читается. Порядок строк = порядок в меню.
+ | google | https://www.google.com/search?q=%s | Google | g
+󰇥 | duckduckgo | https://duckduckgo.com/?q=%s | DuckDuckGo | d, ddg
+ | youtube | https://www.youtube.com/results?search_query=%s | YouTube | y, yt
+ | wikipedia | https://en.wikipedia.org/w/index.php?search=%s | Wikipedia EN | w, wiki
+ | wikiru | https://ru.wikipedia.org/w/index.php?search=%s | Википедия | вики, wr
+ | archwiki | https://wiki.archlinux.org/index.php?search=%s | Arch Wiki | aw
+ | archlinux | https://archlinux.org/packages/?sort=&q=%s | Пакеты Arch | pkg, pac
+ | AUR | https://aur.archlinux.org/packages?O=0&K=%s | AUR | aur
+ | github | https://www.github.com/search?q=%s | GitHub | gh
+ | stackoverflow | https://www.stackoverflow.com/search?q=%s | StackOverflow | so
+ | brave | https://search.brave.com/search?q=%s | Brave | br
+ | startpage | https://www.startpage.com/do/search?query=%s | Startpage | sp
+ | bing | https://www.bing.com/search?q=%s | Bing | b
+ | yahoo | https://search.yahoo.com/search?p=%s | Yahoo
+ | perplexity | https://www.perplexity.ai/search?q=%s | Perplexity | px
+ | chatGPT | https://chat.openai.com/?q=%s | ChatGPT | gpt
+ | amazon | https://www.amazon.com/s?k=%s | Amazon | amz
+ | OpenStreetMap | https://www.openstreetmap.org/search?query=%s | OpenStreetMap | osm, map
+ | quickRef | https://quickref.me/%s | QuickRef | qr
+ | superuser | https://superuser.com/search?q=%s | Super User | su
+ | stackexchange | https://stackexchange.com/search?q=%s | Stack Exchange | se
+ | softwareengineering | https://softwareengineering.stackexchange.com/search?q=%s | SoftwareEng SE
+ | tex | https://tex.stackexchange.com/search?q=%s | TeX SE
+ | dictionary | https://www.dictionary.com/browse/%s | Dictionary.com | dict
+ | thesaurus | https://www.thesaurus.com/browse/%s | Thesaurus | ths
+󰆼 | searXNG | https://searx.tiekoetter.com/?q=%s | SearXNG | sx
+󰆼 | searx | http://searx.neocities.org/?q=%s | Searx
+󰋊 | lens.org | https://www.lens.org/lens/search/patent/list?q=%s | Lens (патенты)
+ | patents.google | https://patents.google.com/?q=%s | Google Patents
+ | worldwide.espacenet | https://worldwide.espacenet.com/patent/search?q=%s | Espacenet

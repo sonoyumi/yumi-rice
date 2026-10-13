@@ -1,0 +1,1081 @@
+/* yumi-base: база стиля Waybar, бывший ~/.local/share/waybar/styles/hyprdots.css (HyDE) со всеми его @import,
+   вставленными по месту в том же порядке. Правила не менялись. Подключается из styles/yumi.css. */
+
+/* You  can also recycle the default.css file to create your own theme */
+/* ── было @import "defaults.css" (~/.local/share/waybar/styles/defaults.css) ── */
+/* Group Styles */
+
+/* Pill Styles */
+/* ── было @import "groups/pill.css" (~/.local/share/waybar/styles/groups/pill.css) ── */
+/* ? Full Pill  shape*/
+
+window#waybar.bottom #pill,
+window#waybar.bottom #pill button,
+window#waybar.top #pill,
+window#waybar.top #pill button {
+    border-radius: 10pt 10pt 10pt 10pt;
+    /* border-width: 0 0.411em; */ /*Causes black on edge*/
+}
+
+window#waybar.left #pill,
+window#waybar.left #pill button,
+window#waybar.right #pill,
+window#waybar.right #pill button {
+    border-radius: 10pt 10pt 10pt 10pt;
+    /* border-width: 0; */ /*Causes black on edge*/
+}
+
+window#waybar.top #pill,
+window#waybar.bottom #pill {
+    margin: 0.3em 1em 0.3em 1em;
+}
+
+window#waybar.left #pill,
+window#waybar.right #pill {
+    margin: 1em 0.3em 1em 0.3em;
+}
+/* ── конец pill.css ── */
+/* ── было @import "groups/pill-up.css" (~/.local/share/waybar/styles/groups/pill-up.css) ── */
+/* ? half pill with the flat surface pointing upwards */
+
+window#waybar.top #pill-up,
+window#waybar.top #pill-up button,
+window#waybar.bottom #pill-up,
+window#waybar.bottom #pill-up button {
+    border-radius: 10pt 10pt 0 0;
+    border-width: 0em;
+}
+
+window#waybar.left #pill-up,
+window#waybar.left #pill-up button,
+window#waybar.right #pill-up,
+window#waybar.right #pill-up button {
+    border-radius: 10pt 10pt 0 0;
+    border-width: 0em;
+}
+
+window#waybar.top #pill-up,
+window#waybar.bottom #pill-up {
+    margin: 0.3em 1em 0.3em 1em;
+}
+
+window#waybar.left #pill-up,
+window#waybar.right #pill-up {
+    margin: 1em 0.3em 1em 0.3em;
+}
+/* ── конец pill-up.css ── */
+/* ── было @import "groups/pill-right.css" (~/.local/share/waybar/styles/groups/pill-right.css) ── */
+/* ? half pill with the curve pointing to the right */
+
+window#waybar.top #pill-right,
+window#waybar.top #pill-right button,
+window#waybar.bottom #pill-right,
+window#waybar.bottom #pill-right button {
+    border-radius: 0 10pt 10pt 0;
+    border-width: 0em;
+}
+
+window#waybar.left #pill-right,
+window#waybar.left #pill-right button,
+window#waybar.right #pill-right,
+window#waybar.right #pill-right button {
+    border-radius: 0 10pt 10pt 0;
+    border-width: 0em;
+}
+
+window#waybar.top #pill-right,
+window#waybar.bottom #pill-right {
+    margin: 0.3em 1em 0.3em 0em;
+}
+
+window#waybar.left #pill-right,
+window#waybar.right #pill-right {
+    margin: 1em 0.3em 1em 0em;
+}
+/* ── конец pill-right.css ── */
+/* ── было @import "groups/pill-down.css" (~/.local/share/waybar/styles/groups/pill-down.css) ── */
+/* ? half pill with the curve pointing dowmwards */
+
+
+window#waybar.top #pill-down,
+window#waybar.top #pill-down button,
+window#waybar.bottom #pill-down,
+window#waybar.bottom #pill-down button {
+    border-radius: 0em 0em 10pt 10pt;
+    border-width: 0em;
+}
+
+window#waybar.left #pill-down,
+window#waybar.left #pill-down button,
+window#waybar.right #pill-down,
+window#waybar.right #pill-down button {
+    border-radius: 0 0 10pt 10pt;
+    border-width: 0em;
+}
+
+window#waybar.top #pill-down,
+window#waybar.bottom #pill-down {
+    margin: 0em 1em 0.3em 1em;
+}
+
+window#waybar.left #pill-down,
+window#waybar.right #pill-down {
+    margin: 1em 1em 1em 1em;
+}
+/* ── конец pill-down.css ── */
+/* ── было @import "groups/pill-left.css" (~/.local/share/waybar/styles/groups/pill-left.css) ── */
+/* ? half pill with the curve pointing to left */
+
+window#waybar.top #pill-left,
+window#waybar.top #pill-left button,
+window#waybar.bottom #pill-left,
+window#waybar.bottom #pill-left button {
+    border-radius: 10pt 0 0 10pt;
+    border-width: 0em;
+}
+
+window#waybar.left #pill-left,
+window#waybar.left #pill-left button,
+window#waybar.right #pill-left,
+window#waybar.right #pill-left button {
+    border-radius: 10pt 0 0 10pt;
+    border-width: 0em;
+}
+
+window#waybar.top #pill-left,
+window#waybar.bottom #pill-left {
+    margin: 0.3em 0em 0.3em 1em;
+}
+
+window#waybar.left #pill-left,
+window#waybar.right #pill-left {
+    margin: 1em 0em 1em 0.3em;
+}
+/* ── конец pill-left.css ── */
+/* ── было @import "groups/pill-in.css" (~/.local/share/waybar/styles/groups/pill-in.css) ── */
+/* 
+? half pill with the curve pointing inwards 
+*/
+
+window#waybar.top #pill-in,
+window#waybar.top #pill-in button {
+    border-radius: 0 0 10pt 10pt;
+    border-width: 0em;
+}
+
+window#waybar.right #pill-in,
+window#waybar.right #pill-in button {
+    border-radius: 10pt 0 0 10pt;
+    border-width: 0em;
+}
+
+window#waybar.bottom #pill-in,
+window#waybar.bottom #pill-in button {
+    border-radius: 10pt 10pt 0 0;
+    border-width: 0em;
+}
+
+window#waybar.left #pill-in,
+window#waybar.left #pill-in button {
+    border-radius: 0 10pt 10pt 0;
+    border-width: 0em;
+}
+
+
+
+window#waybar.top #pill-in {
+    margin: 0em 1em 0.3em;
+}
+
+
+window#waybar.right #pill-in {
+    margin: 1em 0em 1em 0.3em;
+}
+
+
+window#waybar.bottom #pill-in {
+    margin: 0.3em 1em 0em 1em;
+}
+
+window#waybar.left #pill-in {
+    margin: 1em 0.3em 1em 0em;
+}
+/* ── конец pill-in.css ── */
+/* ── было @import "groups/pill-out.css" (~/.local/share/waybar/styles/groups/pill-out.css) ── */
+/* ? half pill with the curve pointing to outwards */
+
+
+window#waybar.top #pill-out,
+window#waybar.top #pill-out button {
+    border-radius: 10pt 10pt 0 0;
+    border-width: 0em;
+}
+
+window#waybar.right #pill-out,
+window#waybar.right #pill-out button {
+    border-radius: 0 10pt 10pt 0;
+    border-width: 0em;
+}
+
+window#waybar.bottom #pill-out,
+window#waybar.bottom #pill-out button {
+    border-radius: 0 0 10pt 10pt;
+    border-width: 0em;
+}
+
+window#waybar.left #pill-out,
+window#waybar.left #pill-out button {
+    border-radius: 10pt 0 0 10pt;
+    border-width: 0em;
+}
+
+window#waybar.top #pill-out {
+    margin: 0.3em 1em 0em 1em;
+}
+
+window#waybar.right #pill-out {
+    margin: 1em 0.3em 1em 0em;
+}
+
+window#waybar.bottom #pill-out {
+    margin: 0em 1em 0.3em 1em;
+}
+
+window#waybar.left #pill-out {
+    margin: 1em 0em 1em 0.3em;
+}
+
+/* ============================ */
+/* ── конец pill-out.css ── */
+/* Leaf Style */
+/* ── было @import "groups/leaf.css" (~/.local/share/waybar/styles/groups/leaf.css) ── */
+/* ? Leaf shape */
+
+window#waybar.top #leaf,
+window#waybar.top #leaf button,
+window#waybar.bottom #leaf,
+window#waybar.bottom #leaf button {
+    border-radius: 10pt 0 10pt 0;
+    border-width: 0em;
+}
+
+window#waybar.left #leaf,
+window#waybar.left #leaf button,
+window#waybar.right #leaf,
+window#waybar.right #leaf button {
+    border-radius: 10pt 0 10pt 0;
+    border-width: 0em;
+}
+
+window#waybar.top #leaf,
+window#waybar.bottom #leaf {
+    margin: 0.3em 1em 0.3em 0em;
+}
+
+window#waybar.left #leaf,
+window#waybar.right #leaf {
+    margin: 1em 0.3em 1em 0.3em;
+}
+/* ── конец leaf.css ── */
+/* ── было @import "groups/leaf-inverse.css" (~/.local/share/waybar/styles/groups/leaf-inverse.css) ── */
+/* ? Inverse Leaf shape */
+
+window#waybar.top #leaf-inverse,
+window#waybar.top #leaf-inverse button,
+window#waybar.bottom #leaf-inverse,
+window#waybar.bottom #leaf-inverse button {
+    border-radius: 0 10pt 0 10pt;
+    border-width: 0em;
+}
+
+window#waybar.left #leaf-inverse,
+window#waybar.left #leaf-inverse button,
+window#waybar.right #leaf-inverse,
+window#waybar.right #leaf-inverse button {
+    border-radius: 0 10pt 0 10pt;
+    border-width: 0em;
+}
+
+window#waybar.top #leaf-inverse,
+window#waybar.bottom #leaf-inverse {
+    margin: 0.3em 1em 0.3em 0em;
+}
+
+window#waybar.left #leaf-inverse,
+window#waybar.right #leaf-inverse {
+    margin: 1em 0.3em 1em 0.3em;
+}
+/* ── конец leaf-inverse.css ── */
+/* classes */
+/* ── было @import "classes/cpuinfo.css" (~/.local/share/waybar/styles/classes/cpuinfo.css) ── */
+/* Temperature buckets (5°C increments from cpuinfo.sh: temp-0, temp-5, …) */
+#custom-cpuinfo.temp-0,
+#custom-cpuinfo.temp-5,
+#custom-cpuinfo.temp-10 {
+    color: #4169e1;
+}
+
+#custom-cpuinfo.temp-15,
+#custom-cpuinfo.temp-20 {
+    color: #4682b4;
+}
+
+#custom-cpuinfo.temp-25,
+#custom-cpuinfo.temp-35,
+#custom-cpuinfo.temp-30 {
+    color: #87ceeb;
+}
+
+#custom-cpuinfo.temp-40,
+#custom-cpuinfo.temp-45,
+#custom-cpuinfo.temp-50,
+#custom-cpuinfo.temp-55 {
+    color: unset;
+}
+
+#custom-cpuinfo.temp-60 {
+    color: #ffa500;
+}
+
+#custom-cpuinfo.temp-65 {
+    color: #ff8c00;
+}
+
+#custom-cpuinfo.temp-70 {
+    color: #ff6347;
+}
+
+#custom-cpuinfo.temp-75 {
+    color: #ff471a;
+}
+
+#custom-cpuinfo.temp-80 {
+    color: #d22f2f;
+}
+
+#custom-cpuinfo.temp-85 {
+    color: #ad1f2f;
+}
+
+#custom-cpuinfo.temp-90,
+#custom-cpuinfo.temp-95,
+#custom-cpuinfo.temp-100 {
+    color: #8b0000;
+}
+
+/* Utilization buckets (font weight by load) */
+#custom-cpuinfo.util-0,
+#custom-cpuinfo.util-10,
+#custom-cpuinfo.util-20 {
+    font-weight: 400;
+}
+
+#custom-cpuinfo.util-30,
+#custom-cpuinfo.util-40,
+#custom-cpuinfo.util-50 {
+    font-weight: 500;
+}
+
+#custom-cpuinfo.util-60,
+#custom-cpuinfo.util-70,
+#custom-cpuinfo.util-80 {
+    font-weight: 600;
+}
+
+#custom-cpuinfo.util-90,
+#custom-cpuinfo.util-100 {
+    font-weight: 700;
+}
+/* ── конец cpuinfo.css ── */
+/* ── было @import "classes/gpuinfo.css" (~/.local/share/waybar/styles/classes/gpuinfo.css) ── */
+/* Temperature buckets (5°C increments) */
+#custom-gpuinfo.temp-0,
+#custom-gpuinfo.temp-5,
+#custom-gpuinfo.temp-10 {
+    color: #4169e1;
+}
+
+#custom-gpuinfo.temp-15,
+#custom-gpuinfo.temp-20 {
+    color: #4682b4;
+}
+
+#custom-gpuinfo.temp-25,
+#custom-gpuinfo.temp-35,
+#custom-gpuinfo.temp-30 {
+    color: #87ceeb;
+}
+
+#custom-gpuinfo.temp-40,
+#custom-gpuinfo.temp-45,
+#custom-gpuinfo.temp-50,
+#custom-gpuinfo.temp-55 {
+    color: unset;
+}
+
+#custom-gpuinfo.temp-60 {
+    color: #ffa500;
+}
+
+#custom-gpuinfo.temp-65 {
+    color: #ff8c00;
+}
+
+#custom-gpuinfo.temp-70 {
+    color: #ff6347;
+}
+
+#custom-gpuinfo.temp-75 {
+    color: #ff471a;
+}
+
+#custom-gpuinfo.temp-80 {
+    color: #d22f2f;
+}
+
+#custom-gpuinfo.temp-85 {
+    color: #ad1f2f;
+}
+
+#custom-gpuinfo.temp-90,
+#custom-gpuinfo.temp-95,
+#custom-gpuinfo.temp-100 {
+    color: #8b0000;
+}
+
+/* Utilization buckets (font weight by load) */
+#custom-gpuinfo.util-0,
+#custom-gpuinfo.util-10,
+#custom-gpuinfo.util-20 {
+    font-weight: 400;
+}
+
+#custom-gpuinfo.util-30,
+#custom-gpuinfo.util-40,
+#custom-gpuinfo.util-50 {
+    font-weight: 500;
+}
+
+#custom-gpuinfo.util-60,
+#custom-gpuinfo.util-70,
+#custom-gpuinfo.util-80 {
+    font-weight: 600;
+}
+
+#custom-gpuinfo.util-90,
+#custom-gpuinfo.util-100 {
+    font-weight: 700;
+}
+/* ── конец gpuinfo.css ── */
+/* Dynamic Stuff */
+/*
+"../../../" Use relative path to navigate $HOME $HOME/
+*/
+/* ── было @import "../../../../.config/waybar/includes/border-radius.css" (~/.config/waybar/includes/border-radius.css) ── */
+/* 
+This is an autogenerated file. 
+Do not edit this file directly.
+
+This is modified to dynamically 
+change the border-radius which will 
+follow the border-radius of hyprland.
+
+To parse this file, we use PT as a unit
+to represent the border-radius. 
+This is stored separately to avoid 
+issues on parsing the border-radius
+
+*/
+
+/* ? Leaf shape */
+
+window#waybar.top #leaf,
+window#waybar.top #leaf button,
+window#waybar.top #leaf menu,
+window#waybar.top #leaf menuitem,
+window#waybar.top #leaf tooltip,
+window#waybar.bottom #leaf,
+window#waybar.bottom #leaf button,
+window#waybar.bottom #leaf menu,
+window#waybar.bottom #leaf menuitem,
+window#waybar.bottom #leaf tooltip {
+    border-radius: 10pt 0 10pt 0;
+}
+
+window#waybar.left #leaf,
+window#waybar.left #leaf button,
+window#waybar.left #leaf menu,
+window#waybar.left #leaf menuitem,
+window#waybar.left #leaf tooltip,
+window#waybar.right #leaf,
+window#waybar.right #leaf button,
+window#waybar.right #leaf menu,
+window#waybar.right #leaf menuitem,
+window#waybar.right #leaf tooltip {
+    border-radius: 10pt 0 10pt 0;
+}
+
+/* ? Inverse Leaf shape */
+
+window#waybar.top #leaf-inverse,
+window#waybar.top #leaf-inverse button,
+window#waybar.top #leaf-inverse menu,
+window#waybar.top #leaf-inverse menuitem,
+window#waybar.top #leaf-inverse tooltip,
+window#waybar.bottom #leaf-inverse,
+window#waybar.bottom #leaf-inverse button,
+window#waybar.bottom #leaf-inverse menu,
+window#waybar.bottom #leaf-inverse menuitem,
+window#waybar.bottom #leaf-inverse tooltip {
+    border-radius: 0 10pt 0 10pt;
+}
+
+window#waybar.left #leaf-inverse,
+window#waybar.left #leaf-inverse button,
+window#waybar.left #leaf-inverse menu,
+window#waybar.left #leaf-inverse menuitem,
+window#waybar.left #leaf-inverse tooltip,
+window#waybar.right #leaf-inverse,
+window#waybar.right #leaf-inverse button,
+window#waybar.right #leaf-inverse menu,
+window#waybar.right #leaf-inverse menuitem,
+window#waybar.right #leaf-inverse tooltip {
+    border-radius: 0 10pt 0 10pt;
+}
+
+
+/* ? Full Pill  shape*/
+
+window#waybar.bottom #pill menuitem,
+window#waybar.bottom #pill menu,
+window#waybar.bottom #pill tooltip,
+window#waybar.bottom #pill,
+window#waybar.bottom #pill button,
+window#waybar.top #pill menuitem,
+window#waybar.top #pill menu,
+window#waybar.top #pill tooltip,
+window#waybar.top #pill,
+window#waybar.top #pill button {
+    border-radius: 10pt 10pt 10pt 10pt;
+}
+
+window#waybar.left #pill menuitem,
+window#waybar.left #pill menu,
+window#waybar.left #pill tooltip,
+window#waybar.left #pill,
+window#waybar.left #pill button,
+window#waybar.right #pill menuitem,
+window#waybar.right #pill menu,
+window#waybar.right #pill tooltip,
+window#waybar.right #pill,
+window#waybar.right #pill button {
+    border-radius: 10pt 10pt 10pt 10pt;
+}
+
+
+/* ? half pill with the curve pointing dowmwards */
+
+
+window#waybar.top #pill-down,
+window#waybar.top #pill-down button,
+window#waybar.top #pill-down menu,
+window#waybar.top #pill-down menuitem,
+window#waybar.top #pill-down tooltip,
+window#waybar.bottom #pill-down,
+window#waybar.bottom #pill-down button,
+window#waybar.bottom #pill-down menu,
+window#waybar.bottom #pill-down menuitem,
+window#waybar.bottom #pill-down tooltip {
+    border-radius: 0 0 10pt 10pt;
+}
+
+window#waybar.left #pill-down,
+window#waybar.left #pill-down button,
+window#waybar.left #pill-down menu,
+window#waybar.left #pill-down menuitem,
+window#waybar.left #pill-down tooltip,
+window#waybar.right #pill-down,
+window#waybar.right #pill-down button,
+window#waybar.right #pill-down menu,
+window#waybar.right #pill-down menuitem,
+window#waybar.right #pill-down tooltip {
+    border-radius: 0 0 10pt 10pt;
+}
+
+
+/* 
+? half pill with the curve pointing inwards 
+*/
+
+window#waybar.top #pill-in,
+window#waybar.top #pill-in button,
+window#waybar.top #pill-in menu,
+window#waybar.top #pill-in menuitem,
+window#waybar.top #pill-in tooltip {
+    border-radius: 0 0 10pt 10pt;
+}
+
+window#waybar.right #pill-in,
+window#waybar.right #pill-in button,
+window#waybar.right #pill-in menu,
+window#waybar.right #pill-in menuitem,
+window#waybar.right #pill-in tooltip {
+    border-radius: 10pt 0 0 10pt;
+}
+
+window#waybar.bottom #pill-in,
+window#waybar.bottom #pill-in button,
+window#waybar.bottom #pill-in menu,
+window#waybar.bottom #pill-in menuitem,
+window#waybar.bottom #pill-in tooltip {
+    border-radius: 10pt 10pt 0 0;
+}
+
+window#waybar.left #pill-in,
+window#waybar.left #pill-in button,
+window#waybar.left #pill-in menu,
+window#waybar.left #pill-in menuitem,
+window#waybar.left #pill-in tooltip {
+    border-radius: 0 10pt 10pt 0;
+}
+
+
+
+/* ? half pill with the curve pointing to left */
+
+window#waybar.top #pill-left,
+window#waybar.top #pill-left button,
+window#waybar.top #pill-left menu,
+window#waybar.top #pill-left menuitem,
+window#waybar.top #pill-left tooltip,
+window#waybar.bottom #pill-left,
+window#waybar.bottom #pill-left button,
+window#waybar.bottom #pill-left menu,
+window#waybar.bottom #pill-left menuitem,
+window#waybar.bottom #pill-left tooltip {
+    border-radius: 10pt 0 0 10pt;
+}
+
+window#waybar.left #pill-left,
+window#waybar.left #pill-left button,
+window#waybar.left #pill-left menu,
+window#waybar.left #pill-left menuitem,
+window#waybar.left #pill-left tooltip,
+window#waybar.right #pill-left,
+window#waybar.right #pill-left button,
+window#waybar.right #pill-left menu,
+window#waybar.right #pill-left menuitem,
+window#waybar.right #pill-left tooltip {
+    border-radius: 10pt 0 0 10pt;
+}
+
+
+/* ? half pill with the curve pointing to outwards */
+
+
+window#waybar.top #pill-out,
+window#waybar.top #pill-out button,
+window#waybar.top #pill-out menu,
+window#waybar.top #pill-out menuitem,
+window#waybar.top #pill-out tooltip {
+    border-radius: 10pt 10pt 0 0;
+}
+
+window#waybar.right #pill-out,
+window#waybar.right #pill-out button,
+window#waybar.right #pill-out menu,
+window#waybar.right #pill-out menuitem,
+window#waybar.right #pill-out tooltip {
+    border-radius: 0 10pt 10pt 0;
+}
+
+window#waybar.bottom #pill-out,
+window#waybar.bottom #pill-out button,
+window#waybar.bottom #pill-out menu,
+window#waybar.bottom #pill-out menuitem,
+window#waybar.bottom #pill-out tooltip {
+    border-radius: 0 0 10pt 10pt;
+}
+
+window#waybar.left #pill-out,
+window#waybar.left #pill-out button,
+window#waybar.left #pill-out menu,
+window#waybar.left #pill-out menuitem,
+window#waybar.left #pill-out tooltip {
+    border-radius: 10pt 0 0 10pt;
+}
+
+
+/* ============================ */
+/* ? half pill with the curve pointing to the right */
+
+window#waybar.top #pill-right,
+window#waybar.top #pill-right button,
+window#waybar.bottom #pill-right menu,
+window#waybar.bottom #pill-right menuitem,
+window#waybar.bottom #pill-right tooltip,
+window#waybar.bottom #pill-right,
+window#waybar.bottom #pill-right button,
+window#waybar.top #pill-right menu,
+window#waybar.top #pill-right menuitem,
+window#waybar.top #pill-right tooltip {
+    border-radius: 0 10pt 10pt 0;
+}
+
+window#waybar.left #pill-right,
+window#waybar.left #pill-right button,
+window#waybar.right #pill-right menu,
+window#waybar.right #pill-right menuitem,
+window#waybar.right #pill-right tooltip,
+window#waybar.right #pill-right,
+window#waybar.right #pill-right button,
+window#waybar.left #pill-right menu,
+window#waybar.left #pill-right menuitem,
+window#waybar.left #pill-right tooltip {
+    border-radius: 0 10pt 10pt 0;
+}
+
+
+/* ? half pill with the flat surface pointing upwards */
+
+window#waybar.top #pill-up,
+window#waybar.top #pill-up button,
+window#waybar.top #pill-up menu,
+window#waybar.top #pill-up menuitem,
+window#waybar.top #pill-up tooltip,
+window#waybar.bottom #pill-up,
+window#waybar.bottom #pill-up button,
+window#waybar.bottom #pill-up menu,
+window#waybar.bottom #pill-up menuitem,
+window#waybar.bottom #pill-up tooltip {
+    border-radius: 10pt 10pt 0 0;
+}
+
+window#waybar.left #pill-up,
+window#waybar.left #pill-up button,
+window#waybar.left #pill-up menu,
+window#waybar.left #pill-up menuitem,
+window#waybar.left #pill-up tooltip,
+window#waybar.right #pill-up,
+window#waybar.right #pill-up button,
+window#waybar.right #pill-up menu,
+window#waybar.right #pill-up menuitem,
+window#waybar.right #pill-up tooltip {
+    border-radius: 10pt 10pt 0 0;
+}
+
+tooltip {
+    border-radius: 10pt;
+}
+
+menu {
+    border-radius: 10pt;
+}
+
+menu menuitem {
+    border-radius: 10pt;
+}
+
+window.popup decoration {
+    border-radius: 10pt;
+}
+/* ── конец border-radius.css ── */
+/* ── было @import "../../../../.config/waybar/includes/global.css" (~/.config/waybar/includes/global.css) ── */
+/*
+ Dynamic Style Configuration *
+ This is handled by HyDE
+
+ To generate a dynamic configuration
+ base on theme and user settings
+
+*/
+
+* {
+    border-radius: 0em;
+    font-family: "JetBrainsMono Nerd Font","JetBrainsMono Nerd Font";
+    font-size: 10px;
+}
+/* ── конец global.css ── */
+/* Base HyDE Styles */
+
+window#waybar {
+    background: @bar-bg;
+}
+
+.module {
+    color: @main-fg;
+}
+
+/*
+These are groups/islands configs
+*/
+#leaf,
+#leaf-inverse,
+#leaf-up,
+#leaf-down,
+#leaf-right,
+#leaf-left,
+#pill,
+#pill-right,
+#pill-left,
+#pill-down,
+#pill-up,
+#pill-in,
+#pill-out {
+    background-color: @main-bg;
+    border-style: solid;
+    border-color: @main-bg;
+}
+
+#workspaces button {
+    box-shadow: none;
+    text-shadow: none;
+    padding: 0em;
+    margin-top: 0.3em;
+    margin-bottom: 0.3em;
+    margin-left: 0em;
+    padding-left: 0.3em;
+    padding-right: 0.3em;
+    margin-right: 0em;
+    color: @main-fg;
+    animation: ws_normal 20s ease-in-out 1;
+}
+
+#workspaces button.active {
+    background: @wb-act-bg;
+    color: @wb-act-fg;
+    margin-left: 0.3em;
+    padding-left: 1.2em;
+    padding-right: 1.2em;
+    margin-right: 0.3em;
+    animation: ws_active 20s ease-in-out 1;
+    transition: all 0.4s cubic-bezier(.55, -0.68, .48, 1.682);
+}
+
+#workspaces button:hover {
+    background: @wb-hvr-bg;
+    color: @wb-hvr-fg;
+    animation: ws_hover 20s ease-in-out 1;
+    transition: all 0.3s cubic-bezier(.55, -0.68, .48, 1.682);
+}
+
+#taskbar button {
+    box-shadow: none;
+    text-shadow: none;
+    padding: 0em;
+    margin-top: 0.3em;
+    margin-bottom: 0.3em;
+    margin-left: 0em;
+    padding-left: 0.3em;
+    padding-right: 0.3em;
+    margin-right: 0em;
+    color: @wb-color;
+    animation: tb_normal 20s ease-in-out 1;
+}
+
+#taskbar button.active {
+    background: @wb-act-bg;
+    color: @wb-act-color;
+    margin-left: 0.3em;
+    padding-left: 1.2em;
+    padding-right: 1.2em;
+    margin-right: 0.3em;
+    animation: tb_active 20s ease-in-out 1;
+    transition: all 0.4s cubic-bezier(.55, -0.68, .48, 1.682);
+}
+
+#taskbar button:hover {
+    background: @wb-hvr-bg;
+    color: @wb-hvr-color;
+    animation: tb_hover 20s ease-in-out 1;
+    transition: all 0.3s cubic-bezier(.55, -0.68, .48, 1.682);
+}
+
+#workspaces,
+#taskbar {
+    padding: 0em;
+}
+
+#window {
+    margin: 0 0.5em;
+}
+
+#privacy,
+#tray {
+    margin: 0 0.3em;
+}
+
+window#waybar.top .modules-left,
+window#waybar.top .modules-center,
+window#waybar.top .modules-right,
+window#waybar.bottom .modules-left,
+window#waybar.bottom .modules-center,
+window#waybar.bottom .modules-right {
+    padding-left: 0.3em;
+    padding-right: 0.3em;
+    margin-left: 0.3em;
+    margin-right: 0.3em;
+
+}
+
+window#waybar.top label.module,
+window#waybar.bottom label.module {
+    padding-left: 0.2em;
+    padding-right: 0.2em;
+    margin-left: 0.2em;
+    margin-right: 0.2em;
+}
+
+window#waybar.left label.module,
+window#waybar.right label.module {
+    padding-top: 0.2em;
+    padding-bottom: 0.2em;
+    margin-top: 0.2em;
+    margin-bottom: 0.2em;
+}
+
+window#waybar.right #leaf,
+window#waybar.left #leaf,
+window#waybar.right #leaf-inverse,
+window#waybar.left #leaf-inverse,
+window#waybar.right #leaf-up,
+window#waybar.left #leaf-up,
+window#waybar.right #leaf-down,
+window#waybar.left #leaf-down,
+window#waybar.right #leaf-right,
+window#waybar.left #leaf-right,
+window#waybar.right #leaf-left,
+window#waybar.left #leaf-left,
+window#waybar.right #pill,
+window#waybar.left #pill,
+window#waybar.right #pill-right,
+window#waybar.left #pill-right,
+window#waybar.right #pill-left,
+window#waybar.left #pill-left,
+window#waybar.right #pill-down,
+window#waybar.left #pill-down,
+window#waybar.right #pill-up,
+window#waybar.left #pill-up,
+window#waybar.right #pill-in,
+window#waybar.left #pill-in,
+window#waybar.right #pill-out,
+window#waybar.left #pill-out {
+    padding: 0em;
+}
+
+window#waybar.bottom #leaf,
+window#waybar.bottom #leaf-inverse,
+window#waybar.bottom #leaf-up,
+window#waybar.bottom #leaf-down,
+window#waybar.bottom #leaf-right,
+window#waybar.bottom #leaf-left,
+window#waybar.bottom #pill,
+window#waybar.bottom #pill-right,
+window#waybar.bottom #pill-left,
+window#waybar.bottom #pill-down,
+window#waybar.bottom #pill-up,
+window#waybar.bottom #pill-in,
+window#waybar.bottom #pill-out,
+window#waybar.top #leaf,
+window#waybar.top #leaf-inverse,
+window#waybar.top #leaf-up,
+window#waybar.top #leaf-down,
+window#waybar.top #leaf-right,
+window#waybar.top #leaf-left,
+window#waybar.top #pill,
+window#waybar.top #pill-right,
+window#waybar.top #pill-left,
+window#waybar.top #pill-down,
+window#waybar.top #pill-up,
+window#waybar.top #pill-in,
+window#waybar.top #pill-out {
+    padding: 0em 1em;
+}
+
+/* ? Dynamic button */
+
+window#waybar.top button,
+window#waybar.bottom button {
+    margin: 0.41em 0.11em;
+    border: 0em;
+    /* padding: 0.1em 0.5em; */
+
+}
+
+window#waybar.left button,
+window#waybar.right button {
+    margin: 0.11em 0.41em;
+    border: 0em
+}
+
+tooltip * {
+    background: transparent;
+    border: none
+}
+
+tooltip {
+    /* all: unset; */
+    background: @main-bg;
+    color: @main-fg;
+    border: 0.1em solid @main-fg;
+}
+
+window.popup decoration {
+    border: 0.1em solid @main-fg;
+}
+
+#tray menu * {
+    min-height: 1.6em;
+}
+
+#tray menu separator {
+    min-height: 0.1em;
+}
+
+#tray menu menuitem check,
+#tray menu menuitem radio {
+    min-height: 1em;
+    min-width: 1em;
+}
+
+#language {
+    min-width: 1.11em;
+}
+
+#temperature,
+#temperature.warning,
+#temperature.critical {
+    background-color: transparent;
+}
+
+menu {
+    background-color: @main-bg;
+}
+
+menu menuitem {
+    transition: 0.25s;
+}
+
+menu menuitem:hover {
+    background-color: @wb-act-bg;
+    color: @wb-act-fg;
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+    }
+
+    to {
+        opacity: 1;
+    }
+}
+
+tooltip,
+menu {
+    animation-name: fadeIn;
+    animation-duration: 0.25s;
+    animation-timing-function: ease-out;
+    animation-iteration-count: 1;
+}
+/* ── конец defaults.css ── */
