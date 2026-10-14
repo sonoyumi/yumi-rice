@@ -92,8 +92,6 @@ bind(MOD .. " + V", exec(BIN .. "yumi-menu-clipboard --center"), { description =
 bind(MOD .. " + SHIFT + V", exec(BIN .. "yumi-menu-clipboard --center"), { description = "[Launcher|Rofi menus] clipboard manager" })
 -- Режимы работы (workflow) — в меню «Питание»
 bind(MOD .. " + slash", exec(BIN .. "yumi-menu-power --center"), { description = "[Utils] workflows" })
--- Настройки — вид окон, экран, ввод, оформление, поведение (GTK-меню yumi-menu-settings, 14.10)
-bind(MOD .. " + I", exec(BIN .. "yumi-menu-settings --center"), { description = "[Utils] settings" })
 -- Рабочие столы — GTK-меню (переключатель окон HyDE altab у нас не работал)
 bind(MOD .. " + TAB", exec(BIN .. "yumi-menu-workspaces --center"), { description = "[Workspaces] overview" })
 -- SUPER+SHIFT+K (калькулятор rofi) снят: пакета rofi-calc нет

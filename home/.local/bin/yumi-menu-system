@@ -46,12 +46,11 @@ ACTIONS = {
     "wallpaper":  ("󰸉", "Обои", [os.path.join(HOME, ".local/bin/yumi-menu-wallpaper"), "--center"], False),
     "waybar":     ("󰑓", "Перезапустить Waybar", ["systemctl", "--user", "restart", "waybar.service"], True),
     "accent":     ("󰏘", "Пересчитать цвета", [os.path.join(HOME, ".local/bin/yumi-accent")], True),
-    "settings":   ("󰒓", "Настройки", [os.path.join(HOME, ".local/bin/yumi-menu-settings"), "--center"], False),
     "btop":       ("󰄨", "Системный монитор (btop)", ["kitty", "--title", "btop", "-e", "btop"], False),
     "wiki":       ("󰖟", "Arch Wiki", ["xdg-open", "https://wiki.archlinux.org"], False),
     "keys":       ("󰌌", "Горячие клавиши", [os.path.join(HOME, ".local/bin/yumi-menu-keys"), "--center"], False),
 }
-TILE_TEXT = {"wallpaper": "Обои", "settings": "Настройки",
+TILE_TEXT = {"wallpaper": "Обои",
              "waybar": "Перезапустить\nWaybar", "accent": "Пересчитать\nцвета",
              "btop": "Монитор\nbtop", "wiki": "Arch\nWiki", "keys": "Горячие\nклавиши"}
 SNAP_DESC = "Вручную из меню «Система»"
@@ -354,8 +353,7 @@ class SystemMenu:
         # ОФОРМЛЕНИЕ
         body.append(yp.section("ОФОРМЛЕНИЕ"))
         # без «Анимаций» и «Экрана блокировки» (hyde-shell; второй запускал настоящий hyprlock)
-        body.append(self.tiles([("wallpaper", 0, 0, 3), ("settings", 3, 0, 3),
-                                ("waybar", 0, 1, 3), ("accent", 3, 1, 3)]))
+        body.append(self.tiles([("wallpaper", 0, 0, 2), ("waybar", 2, 0, 2), ("accent", 4, 0, 2)]))
 
         # СИСТЕМА
         body.append(yp.section("СИСТЕМА"))

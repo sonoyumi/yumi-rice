@@ -141,8 +141,7 @@ TILES = [("wifi",     "󰖩", "󰖪", "Wi-Fi",       st_wifi,     tg_wifi,     "
          ("saver",    "󰌪", "󰌪", "Экономия",    st_saver,    tg_saver,    "yumi-menu-power"),
          ("caffeine", "󰅶", "󰾪", "Кофеин",      st_caffeine, tg_caffeine, None),
          # не переключатель: щелчок открывает меню (мышь — DPI, частота; клавиатура — подсветка), как плитка старого центра swaync
-         ("devices",  "󰌢", "󰌢", "Устройства",  lambda: (False, "Мышь · клавиатура"), None, "yumi-menu-devices"),
-         ("settings", "󰒓", "󰒓", "Настройки",   lambda: (False, "Вид · экран · ввод"), None, "yumi-menu-settings")]
+         ("devices",  "󰌢", "󰌢", "Устройства",  lambda: (False, "Мышь · клавиатура"), None, "yumi-menu-devices")]
 
 
 class Tile:
@@ -224,8 +223,6 @@ class Tile:
     def open_menu(self):
         if self.key == "devices" and open_devices_page(self.panel):
             return
-        if self.key == "settings" and open_settings_page(self.panel):
-            return
         fire(os.path.join(BIN, self.menu))
         self.panel.app.quit()
 
@@ -247,25 +244,6 @@ def open_devices_page(panel):
         return True
     except Exception as e:                      # что-то сломалось — откроем отдельным окном, как раньше
         print("[yumi-menu-control] устройства:", e, file=sys.stderr, flush=True)
-        return False
-
-
-def open_settings_page(panel):
-    """«Настройки» (yumi-menu-settings) — страницей внутри центра, как «Устройства»."""
-    try:
-        import importlib.machinery
-        import importlib.util
-        path = os.path.join(BIN, "yumi-menu-settings")
-        loader = importlib.machinery.SourceFileLoader("yumi_menu_settings", path)
-        spec = importlib.util.spec_from_loader("yumi_menu_settings", loader)
-        mod = importlib.util.module_from_spec(spec)
-        loader.exec_module(mod)
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        mod.Settings(panel, box)
-        panel.push("󰒓  Настройки", box, "Вид · экран · ввод · оформление · поведение")
-        return True
-    except Exception as e:
-        print("[yumi-menu-control] настройки:", e, file=sys.stderr, flush=True)
         return False
 
 
@@ -506,19 +484,16 @@ def build(panel, body):
             grid.append(t.btn)
     else:
         grid = Gtk.Grid(column_spacing=8, row_spacing=8, column_homogeneous=True, css_classes=["ycc-grid"])
-        n = len(tiles)                       # 6 колонок: по 3 плитки в ряд; 1–2 плитки в последнем ряду делят его поровну
-        last_row, in_last = (n - 1) // 3, n - (n - 1) // 3 * 3
         for i, t in enumerate(tiles):
-            row, col = i // 3, i % 3
-            span = 6 // in_last if row == last_row else 2
-            grid.attach(t.btn, col * span, row, span, 1)
+            if i == len(tiles) - 1 and i % 3 == 0:   # одинокая последняя плитка — на всю ширину ряда
+                grid.attach(t.btn, 0, i // 3, 3, 1)
+            else:
+                grid.attach(t.btn, i % 3, i // 3, 1, 1)
     body.append(wrap(grid, card))
     for t in tiles:
         t.refresh()
     if os.environ.get("YCC_PAGE") == "devices":          # проверка: сразу открыть страницу «Устройства»
         GLib.timeout_add(300, lambda: open_devices_page(panel) and False)
-    elif os.environ.get("YCC_PAGE") == "settings":       # … или «Настройки»
-        GLib.timeout_add(300, lambda: open_settings_page(panel) and False)
 
     # яркость
     sl = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8 if VAR == "a" else 6, css_classes=["ycc-sliders"])
