@@ -14,5 +14,7 @@ hl.on("hyprland.start", function()
 	hl.exec_cmd("dbus-update-activation-environment --systemd " .. session_env)
 	hl.exec_cmd("systemctl --user import-environment " .. session_env)
 	hl.exec_cmd("uwsm finalize")
-	hl.exec_cmd("hyprctl setcursor Bibata-Modern-Ice 20")
+	hl.exec_cmd("hyprctl setcursor Bibata-Modern-Ice " .. tostring((yumi.settings or {}).cursor_size or 20))
+	-- сохранённое в меню «Настройки» (ночной свет hyprsunset) — применить при входе
+	hl.exec_cmd((os.getenv("HOME") or "") .. "/.local/bin/yumi-menu-settings --apply")
 end)

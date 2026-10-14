@@ -44,6 +44,7 @@
 .local/bin/yumi-menu-picker
 .local/bin/yumi-menu-power
 .local/bin/yumi-menu-session
+.local/bin/yumi-menu-settings
 .local/bin/yumi-menu-sound
 .local/bin/yumi-menu-system
 .local/bin/yumi-menu-top

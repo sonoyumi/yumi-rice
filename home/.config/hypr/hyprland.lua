@@ -270,3 +270,9 @@ hl.on("config.reloaded", yumi_borders)
 -- Апплет NetworkManager не нужен: Wi-Fi и VPN — свои пилюли и меню (yumi-menu-wifi, yumi-menu-vpn);
 -- база его не запускает. blueman-applet стартует из ~/.config/autostart: он агент сопряжения (окно PIN),
 -- его значок в трее выключен настройкой blueman (StatusIcon).
+
+-- Настройки из меню «Настройки» (SUPER+I, yumi-menu-settings): ввод, курсор, частота монитора —
+-- после всех личных hl.config/hl.monitor выше (иначе они бы перебили выбор из меню). Вид — в yumi/look.lua.
+if yumi.apply_settings_late then
+	yumi.apply_settings_late()
+end
