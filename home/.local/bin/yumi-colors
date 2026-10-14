@@ -783,6 +783,21 @@ def link_dcol(dcol):
     os.replace(tmp, link)
 
 
+def link_wall(wall, sha):
+    """Ссылки wall.set и миниатюр на эти обои (как link_wall в yumi-wallpaper), если они смотрят не туда."""
+    pairs = [("wall.set", wall)] + [("wall." + e, os.path.join(THUMBS, "%s.%s" % (sha, e)))
+                                    for e in ("sqre", "thmb", "blur", "quad")]
+    for name, target in pairs:
+        link = os.path.join(CACHE, name)
+        if not os.path.exists(target) or (os.path.islink(link) and os.readlink(link) == target):
+            continue
+        tmp = link + ".yumi-tmp"
+        if os.path.lexists(tmp):
+            os.remove(tmp)
+        os.symlink(target, tmp)
+        os.replace(tmp, link)
+
+
 def prepare(args, defer=True, warm=False):
     """Возвращает "cached" (из комплекта) или "full" (хуки)."""
     os.makedirs(OWN, exist_ok=True)
@@ -805,6 +820,11 @@ def prepare(args, defer=True, warm=False):
         mode = "cached"
         log("из комплекта: %d файлов к подмене, %.3f с" % (n, time.time() - t0))
     else:
+        # хуки (yumi-accent, hyprtoolkit, тачбар…) читают обои по ссылке wall.set. yumi-wallpaper при «есть
+        # комплект» ставит её только после commit — а если комплект оказался негодным (сменилась версия
+        # скриптов, guard_ok сбросил всё), смена идёт полная, и хуки брали ПРОШЛЫЕ обои: акцент сакуры
+        # выходил зелёным от леса и попадал в её комплект (13.10). Поэтому перед хуками — ссылки на эти обои
+        link_wall(wall, sha)
         d = read_dcol(dcol)
         hooks = render_live(d)
         log("шаблоны: %.2f с" % (time.time() - t0))

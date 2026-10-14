@@ -37,13 +37,7 @@ hl.config({
 
 	},
 
-	decoration = {
-
-		active_opacity = 0.95,
-
-		inactive_opacity = 0.85,
-
-	},
+	-- прозрачность окон — в yumi/look.lua (14.10: здесь были 0.95/0.85 со времён 2.5, их перебивал my_look)
 
 	general = {
 			layout = "dwindle",
@@ -166,7 +160,7 @@ hl.bind("switch:on:" .. LID, function()
 	end
 end, { locked = true, description = "[Hardware] lid closed" })
 hl.bind("switch:off:" .. LID, function()
-	hl.monitor({ output = "eDP-1", mode = "2560x1600@60.0", position = "0x0", scale = 1.6, vrr = 0, reserved = { top = 38 } })
+	hl.monitor({ output = "eDP-1", disabled = false, mode = "2560x1600@60.0", position = "0x0", scale = 1.6, vrr = 0, reserved = { top = 38 } })
 	hl.dispatch(hl.dsp.dpms({ action = "enable" }))
 end, { locked = true, description = "[Hardware] lid opened" })
 
@@ -204,12 +198,6 @@ hl.gesture({ fingers = 3, direction = "down", action = function() run_gesture("d
 -- Обзор рабочих столов
 hl.bind("SUPER + grave", hl.dsp.exec_cmd("@HOME@/.local/bin/yumi-menu-system --center"), {description = "[Session] system menu"})
 
--- Рисовать рабочий стол под экраном блокировки: после разблокировки всё уже готово, без серого экрана
-hl.config({ misc = { session_lock_xray = true } })
-
--- Прозрачность всех окон: 75% в фокусе, 65% без фокуса, полный экран — непрозрачно (13.10, было 85/75)
-hl.config({ decoration = { active_opacity = 0.75, inactive_opacity = 0.65, fullscreen_opacity = 1 } })
-
 -- Размытие под центром управления и уведомлениями (как у окон)
 hl.layer_rule({
   name = "swaync_blur",
@@ -241,24 +229,9 @@ hl.layer_rule({
   -- поэтому анимация изменения размера слоя (та же layersIn) больше не срабатывает
 })
 
--- === Мой вид окон: не зависит от обоев (обои меняют только цвета) ===
-local function my_look()
-	hl.config({
-		general = { border_size = 2, gaps_in = 3, gaps_out = 8 },
-		misc = { session_lock_xray = true },
-		decoration = {
-			rounding = 10,
-			rounding_power = 2,
-			active_opacity = 0.75,
-			inactive_opacity = 0.65,
-			fullscreen_opacity = 1,
-			shadow = { enabled = false },
-			blur = { enabled = true, size = 3, passes = 2, xray = true },
-		},
-	})
-end
-my_look()
-hl.on("config.reloaded", my_look)
+-- Вид окон (рамки, отступы, скругление, прозрачность, размытие, session_lock_xray) — один файл yumi/look.lua.
+-- 14.10: прежний my_look() отсюда убран (дублировал look.lua со времён HyDE 2.5); режимы workflows/*.lua
+-- теперь могут менять вид (gaming/powersaver — без размытия и скругления). Откат: ~/.local/share/yumi-archive/look-merge-20261014
 
 -- 13.10: мягкое проявление слоёв (Waybar после смены обоев появляется плавно, без рывка в конце).
 -- Только кривая, ≈0,2 с; стиль анимации меню (popin) не меняется. Откат: удалить 2 строки ниже
