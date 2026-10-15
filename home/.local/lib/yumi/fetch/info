@@ -22,14 +22,20 @@ collect() {
         case $s in ok) put doc "✔ всё хорошо";; *) put doc "⚠ проблем: $v, предупреждений: $w";; esac
     else put snap "—"; put doc "не проверялся (yumi-doctor)"; fi
     if [ ! -s "$RT/doctor.json" ] || [ -n "$(find "$RT/doctor.json" -mmin +10 2>/dev/null)" ]; then   # кэш пишет меню «Система»
-        ( "$HOME/.local/bin/yumi-doctor" --json > "$RT/doctor.json.tmp" 2>/dev/null && mv "$RT/doctor.json.tmp" "$RT/doctor.json" ) </dev/null >/dev/null 2>&1 &
+        # код выхода доктора 1 = есть предупреждения, JSON при этом верный — проверяем сам JSON;
+        # 7>&- — не держать блокировку кэша, иначе остальные строки fastfetch ждут доктора
+        ( "$HOME/.local/bin/yumi-doctor" --json > "$RT/doctor.json.tmp" 2>/dev/null
+          jq -e .status "$RT/doctor.json.tmp" >/dev/null 2>&1 && mv "$RT/doctor.json.tmp" "$RT/doctor.json" ) </dev/null >/dev/null 2>&1 7>&- &
     fi
     s=$(stat -c %W / 2>/dev/null); [ "${s:-0}" -gt 0 ] && put age "$(( ($(date +%s) - s) / 86400 )) дн. назад" || put age "—"
     # 機 машина
-    # нагрузка: ЦП — по /proc/stat за 0,2 с, ОЗУ — занято без кэша и буферов
+    # нагрузка: ЦП — по /proc/stat с прошлого сбора (снимок в cpu.stat; без снимка — за 0,1 с),
+    # ОЗУ — занято без кэша и буферов
     local c1 c2 i1 i2 mt ma
-    read -r _ a1 b1 c1 i1 w1 x1 y1 z1 _ < /proc/stat; sleep 0.2
+    if [ -s "$RT/cpu.stat" ]; then read -r _ a1 b1 c1 i1 w1 x1 y1 z1 _ < "$RT/cpu.stat"
+    else read -r _ a1 b1 c1 i1 w1 x1 y1 z1 _ < /proc/stat; sleep 0.1; fi
     read -r _ a2 b2 c2 i2 w2 x2 y2 z2 _ < /proc/stat
+    head -1 /proc/stat > "$RT/cpu.stat"
     local busy=$(( (a2+b2+c2+x2+y2+z2) - (a1+b1+c1+x1+y1+z1) )) idle=$(( (i2+w2) - (i1+w1) ))
     mt=$(awk '/^MemTotal:/{print $2}' /proc/meminfo); ma=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)
     put load "ЦП $(( busy * 100 / (busy + idle > 0 ? busy + idle : 1) )) % · ОЗУ $(( (mt - ma) * 100 / mt )) %"
