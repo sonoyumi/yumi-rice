@@ -119,13 +119,13 @@ hl.window_rule({
 -- ── Слои ──
 hl.layer_rule({
 	name = "yumi_layer_blur",
-	match = { namespace = any({ "notifications", "swaync-(notification-window|control-center)", "waybar" }) },
+	match = { namespace = any({ "notifications" }) },
 	blur = true,
 })
 
 hl.layer_rule({
 	name = "yumi_layer_ignore_alpha",
-	match = { namespace = any({ "notifications", "swaync-(notification-window|control-center)", "waybar", "selection" }) },
+	match = { namespace = any({ "notifications", "selection" }) },
 	ignore_alpha = 0,
 })
 
@@ -135,9 +135,13 @@ hl.layer_rule({
 	no_anim = true,
 })
 
--- Waybar перезапускается при смене обоев — пусть исчезает и появляется затуханием, а не рывком
-hl.layer_rule({
-	name = "yumi_waybar_fade",
-	match = { namespace = "^waybar$" },
-	animation = "fade",
-})
+-- Quickshell (yumi-rice 3.1): бар/меню/уведомления на QML — размытие, прозрачность, затухание.
+-- Откат: yumi-uninstall quickshell
+-- 29.10 «Остров»: острова сплошные — размытие под ними не видно, а считалось каждый кадр анимации меню. Было: blur = true
+hl.layer_rule({ name = "yumi_qs_blur", match = { namespace = "^yumi-qs-" }, blur = false })
+hl.layer_rule({ name = "yumi_qs_ignore_alpha", match = { namespace = "^yumi-qs-" }, ignore_alpha = 0 })
+hl.layer_rule({ name = "yumi_qs_fade", match = { namespace = "^yumi-qs-" }, animation = "fade" })
+-- 19.10: виджет обоев W2 — своё пространство имён БЕЗ размытия: при растворении превью сквозь него не должны
+-- проступать размытые обои (это и было «моргание» при смене). Только затухание.
+hl.layer_rule({ name = "yumi_wall_fade", match = { namespace = "^yumi-wall-" }, animation = "fade" })
+

@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# yumi-polkit-switch — кто показывает окна пароля polkit (pkexec, монтирование, сеть…): свой агент Quickshell «Черта»
+# (~/.config/quickshell/yumi/polkit) или штатный hyprpolkitagent. Агент в сессии может быть только один.
+#   yumi-polkit-switch on       флаг ~/.config/yumi/polkit-qs, hyprpolkitagent stop+disable, рестарт yumi-quickshell
+#   yumi-polkit-switch off      убрать флаг, hyprpolkitagent enable+start, рестарт yumi-quickshell (= откат)
+#   yumi-polkit-switch status   что сейчас отвечает за окна
+# Рестарт оболочки глушит музыку: если что-то играло, после рестарта плеер yumi-music возобновляется.
+# hyprpolkitagent НЕ маскируется — откат простой: off (или вручную: rm флаг; systemctl --user enable --now hyprpolkitagent).
+set -u
+FLAG=~/.config/yumi/polkit-qs
+UNIT=hyprpolkitagent.service
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+say() { printf '%s\n' "$*"; }
+
+restart_qs() {
+    local playing=0
+    playerctl -a status 2>/dev/null | grep -qx Playing && playing=1
+    systemctl --user restart yumi-quickshell.service
+    local i
+    for i in $(seq 1 30); do qs -c yumi ipc call menu current >/dev/null 2>&1 && break; sleep 0.5; done
+    qs -c yumi ipc call menu current >/dev/null 2>&1 && say "✔ Quickshell перезапущен" || say "✘ Quickshell не отвечает — journalctl --user -u yumi-quickshell -n 30"
+    if [ $playing = 1 ]; then
+        (echo '{"cmd":"resume"}'; sleep 30) | systemd-run --user --scope -q ~/.local/lib/yumi/qs/player >/dev/null 2>&1 &
+        disown
+        say "♪ музыка возобновлена"
+    fi
+}
+
+qs_registered() {   # последнее сообщение агента в журнале текущего запуска оболочки
+    journalctl --user -u yumi-quickshell.service -b --no-pager -o cat 2>/dev/null | grep -oE 'yumi-polkit: агент .*' | tail -1
+}
+
+status() {
+    local hp qs
+    systemctl --user is-active --quiet $UNIT && hp="запущен" || hp="остановлен"
+    hp="$hp, $(systemctl --user is-enabled $UNIT 2>/dev/null || echo '?')"
+    if [ -e "$FLAG" ]; then qs="включён (флаг есть)"; else qs="выключен (флага нет)"; fi
+    say "hyprpolkitagent: $hp"
+    say "агент Quickshell: $qs"
+    local r; r=$(qs_registered)
+    [ -n "$r" ] && say "журнал оболочки: ${r#yumi-polkit: }"
+    if [ -e "$FLAG" ] && ! systemctl --user is-active --quiet $UNIT; then say "→ окна показывает: Quickshell «Черта»"
+    elif [ ! -e "$FLAG" ] && systemctl --user is-active --quiet $UNIT; then say "→ окна показывает: hyprpolkitagent"
+    else say "→ смешанное состояние (флаг и hyprpolkitagent вместе или ни одного) — выполните on или off"; fi
+}
+
+case "${1:-}" in
+    on)
+        mkdir -p "$(dirname "$FLAG")"; touch "$FLAG"
+        systemctl --user stop $UNIT; systemctl --user disable $UNIT >/dev/null 2>&1
+        restart_qs
+        sleep 1; status ;;
+    off)
+        rm -f "$FLAG"
+        restart_qs                                   # сначала снять свой агент, потом поднять штатный
+        systemctl --user enable $UNIT >/dev/null 2>&1; systemctl --user reset-failed $UNIT >/dev/null 2>&1; systemctl --user start $UNIT
+        sleep 1; status ;;
+    status) status ;;
+    *) say "yumi-polkit-switch on|off|status" >&2; exit 1 ;;
+esac

@@ -1,0 +1,36 @@
+#!/bin/bash
+# yumi-power-profile (29.10.2026) — режимы питания через частоту процессора, вместо power-profiles-daemon
+# (на этом M1 он заглушка «placeholder», а при холодной загрузке вешает экран блокировки ~25 с — маска 25.10).
+#   yumi-power-profile get              power-saver | balanced | performance
+#   yumi-power-profile set NAME         поставить и запомнить
+#   yumi-power-profile apply            применить запомненный (при входе, служба yumi-power-profile.service)
+# Экономия: мощные ядра (policy4) не выше 1,96 ГГц; Баланс: без ограничений (schedutil); Производительность: performance.
+# Писать в sysfs может группа wheel — /etc/tmpfiles.d/yumi-power-profile.conf (ставится через sudo).
+# Откат: systemctl --user disable yumi-power-profile; удалить этот файл, юнит и tmpfiles-правило.
+P=/sys/devices/system/cpu/cpufreq
+CONF="${XDG_CONFIG_HOME:-$HOME/.config}/yumi/power/profile"
+maxf() { cat "$P/$1/cpuinfo_max_freq"; }
+get() {
+    [ "$(cat $P/policy0/scaling_governor 2>/dev/null)" = performance ] && { echo performance; return; }
+    if [ "$(cat $P/policy4/scaling_max_freq 2>/dev/null)" -lt "$(maxf policy4)" ] 2>/dev/null; then echo power-saver; else echo balanced; fi
+}
+put() { echo "$2" > "$P/$1/$3" 2>/dev/null || { echo "нет прав на $P/$1/$3 — нужно правило tmpfiles (sudo)" >&2; exit 1; }; }
+set_() {
+    local g m0 m4
+    case "$1" in
+        power-saver) g=schedutil;   m0=$(maxf policy0); m4=1956000 ;;
+        balanced)    g=schedutil;   m0=$(maxf policy0); m4=$(maxf policy4) ;;
+        performance) g=performance; m0=$(maxf policy0); m4=$(maxf policy4) ;;
+        *) echo "неизвестный режим: $1" >&2; exit 2 ;;
+    esac
+    for pol in policy0 policy4; do put $pol "$g" scaling_governor; done
+    put policy0 "$m0" scaling_max_freq; put policy4 "$m4" scaling_max_freq
+    mkdir -p "$(dirname "$CONF")"; echo "$1" > "$CONF"
+    timeout 3 qs -c yumi ipc call bar refresh ppd >/dev/null 2>&1 || true
+}
+case "${1:-get}" in
+    get)   get ;;
+    set)   set_ "${2:-}" ;;
+    apply) [ -f "$CONF" ] && set_ "$(cat "$CONF")" ;;
+    *)     echo "использование: yumi-power-profile get | set power-saver|balanced|performance | apply" >&2; exit 2 ;;
+esac

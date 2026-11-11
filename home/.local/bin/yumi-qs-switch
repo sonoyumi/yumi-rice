@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# yumi-qs-switch — безопасное переключение интерфейса Waybar+swaync ⇄ Quickshell (yumi-rice 3.1).
+#   yumi-qs-switch on       перейти на Quickshell (с проверкой и автооткатом)
+#   yumi-qs-switch off      вернуть Waybar + swaync — только если их снова поставить (удалены 19.10.2026)
+#   yumi-qs-switch status   что сейчас запущено
+# «on»: бинды берутся из *.quickshell-ready, Hyprland перечитывает конфиг, затем проверки:
+#   скругления не 0 и масштаб макбука 1.6 (конфиг Hyprland загружен), Quickshell отвечает по IPC,
+#   держит шину уведомлений, нет «вечных» окон на весь экран. Любая проверка не прошла — сразу «off».
+# После «on» 60 с ждём подтверждения: `yumi-qs-switch ok` (или любая клавиша в этом терминале).
+# Нет подтверждения — откат (ввод не работает → откатится само).
+set -u
+H=~/.config/hypr; U=~/.config/systemd/user
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export HYPRLAND_INSTANCE_SIGNATURE="${HYPRLAND_INSTANCE_SIGNATURE:-$(ls -t "$XDG_RUNTIME_DIR/hypr" | head -1)}"
+FLAG="$XDG_RUNTIME_DIR/yumi-qs-switch.ok"
+say() { printf '%s\n' "$*"; }
+
+hypr_ok() {   # конфиг Hyprland загружен целиком
+    local r s
+    r=$(hyprctl getoption decoration:rounding -j 2>/dev/null | grep -o '"int": [0-9]*' | grep -o '[0-9]*$')
+    s=$(hyprctl monitors -j 2>/dev/null | python3 -I -c 'import json,sys;print(next((m["scale"] for m in json.load(sys.stdin) if m["name"]=="eDP-1"),1.6))')
+    [ "${r:-0}" -gt 0 ] && [ "$s" = "1.6" ] && [ -z "$(hyprctl configerrors 2>/dev/null | tr -d '[:space:]')" ]
+}
+reload_hypr() { hyprctl reload >/dev/null 2>&1; sleep 2; hypr_ok; }
+
+binds() {   # binds old|qs
+    local suf; [ "$1" = qs ] && suf=quickshell-ready || suf=bak-quickshell-20261015
+    cp -a "$H/hyprland.lua.$suf" "$H/hyprland.lua" && cp -a "$H/yumi/binds.lua.$suf" "$H/yumi/binds.lua"
+}
+
+off() {
+    command -v waybar >/dev/null && command -v swaync >/dev/null || {
+        echo "Waybar и swaync удалены 19.10.2026 — возврат на них сейчас некуда." >&2
+        echo "Сначала: sudo pacman -S waybar swaync и конфиги из ~/.local/share/yumi-archive/waybar-swaync-20261019 (там README.txt)." >&2
+        return 1; }
+    say "→ возвращаю Waybar + swaync"
+    [ -e ~/.local/bin/yumi-menu-wifi ] || say "! старые GTK-меню в архиве — клики Waybar их не найдут; вернуть: ~/.local/share/yumi-archive/legacy-menus-20261016/restore.sh"
+    systemctl --user disable --now yumi-quickshell.service >/dev/null 2>&1; pkill -x qs 2>/dev/null
+    systemctl --user unmask swaync.service waybar.service >/dev/null 2>&1
+    systemctl --user reset-failed swaync.service waybar.service >/dev/null 2>&1
+    systemctl --user enable --now waybar.service swaync.service yumi-notify-log.service yumi-tray.service >/dev/null 2>&1
+    binds old
+    reload_hypr && say "✔ Hyprland: конфиг загружен" || say "✘ Hyprland: конфиг не загрузился — hyprctl configerrors"
+    say "✔ сейчас: $(status_line)"
+}
+
+checks() {
+    local i
+    for i in $(seq 1 20); do qs -c yumi ipc call menu current >/dev/null 2>&1 && break; sleep 0.5; done
+    qs -c yumi ipc call menu current >/dev/null 2>&1 || { say "✘ Quickshell не отвечает"; return 1; }
+    busctl --user list 2>/dev/null | grep -q '^org.freedesktop.Notifications .* qs ' || { say "✘ уведомления не у Quickshell"; return 1; }
+    # окна меню/шторки на весь экран при закрытых меню — признак беды (так было 15.10); законны бар, всплывашки
+    # (колонка справа, клики сквозь, кроме карточек), OSD и подсказки
+    local bad
+    bad=$(hyprctl layers -j | python3 -I -c '
+import json,sys
+ok={"yumi-qs-bar","yumi-qs-notif-popups","yumi-qs-osd","yumi-qs-tooltip"}
+d=json.load(sys.stdin)
+print(" ".join(sorted({l["namespace"] for v in d.values() for ls in v["levels"].values() for l in ls
+     if l["namespace"].startswith("yumi-qs-") and l["namespace"] not in ok})))')
+    [ -z "$bad" ] || { say "✘ висит окно Quickshell: $bad"; return 1; }
+    hypr_ok || { say "✘ Hyprland потерял конфиг"; return 1; }
+    say "✔ проверки пройдены"
+}
+
+on() {
+    say "→ перехожу на Quickshell"
+    binds qs
+    reload_hypr || { say "✘ Hyprland не принял бинды — откат"; off; return 1; }
+    systemctl --user disable --now yumi-notify-log.service yumi-tray.service >/dev/null 2>&1   # журнал и трей — сам Quickshell
+    systemctl --user reset-failed yumi-quickshell.service >/dev/null 2>&1
+    systemctl --user enable --now yumi-quickshell.service >/dev/null 2>&1
+    checks || { say "→ откат"; off || say "Waybar нет — остаёмся на Quickshell, см. qs log -c yumi"; return 1; }
+    rm -f "$FLAG"
+    say "Проверь: бар, клики, бинды, клавиатура. Всё работает — нажми Enter здесь или выполни «yumi-qs-switch ok»."
+    say "Нет ответа 60 с — верну Waybar сам."
+    local t=0
+    while [ $t -lt 60 ]; do
+        [ -e "$FLAG" ] && break
+        if [ -t 0 ] && read -r -t 1 _; then touch "$FLAG"; break; fi
+        [ -t 0 ] || sleep 1
+        t=$((t+1))
+    done
+    if [ -e "$FLAG" ]; then say "✔ остаёмся на Quickshell"; else say "нет подтверждения"; off || say "Waybar нет — остаёмся на Quickshell"; fi
+}
+
+status_line() {
+    local a; a=""
+    for s in yumi-quickshell; do a="$a $s=$(systemctl --user is-active $s 2>/dev/null)"; done
+    echo "${a# }"
+}
+
+case "${1:-status}" in
+    on) on ;;
+    off) off ;;
+    ok) touch "$FLAG"; say "подтверждено" ;;
+    status) status_line; hypr_ok && say "Hyprland: конфиг загружен" || say "Hyprland: конфиг НЕ загружен" ;;
+    *) sed -n '2,10p' "$0" ;;
+esac

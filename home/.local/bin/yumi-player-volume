@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+"""yumi-player-volume up|down|get [шаг%] — громкость ПОТОКА плеера в PipeWire, как ползунок плеера в баре (19.10.2026).
+
+Та же логика, что в ~/.config/quickshell/yumi/services/Player.qml: активный MPRIS-плеер → его PID (D-Bus
+GetConnectionUnixProcessID) → поток (sink-input) с application.process.id = PID; не нашли — по имени
+бинарника/приложения; нет и его — системный выход. Поэтому бар, микшер и тачбар показывают одно и то же.
+(Раньше кнопки тачбара звали `yumi-volume -p ''` — это внутренняя громкость mpv по MPRIS, её бар не видит.)
+Шаг по умолчанию 5 %, предел 0…100 % (как в баре).
+После up/down — капсула Quickshell «Плеер · N%» со своей нотой (qs ipc call osd show player N), чтобы не путать
+с системной громкостью; YUMI_PLAYER_OSD=0 — без капсулы.
+"""
+import json, os, subprocess, sys
+
+
+def run(*cmd):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=3).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def active_player():
+    names = [n for n in run("playerctl", "-l").split() if n]
+    for n in names:
+        if run("playerctl", "-p", n, "status").strip() == "Playing":
+            return n
+    return names[0] if names else ""
+
+
+def player_pid(name):
+    out = run("busctl", "--user", "call", "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+              "GetConnectionUnixProcessID", "s", "org.mpris.MediaPlayer2." + name)
+    parts = out.split()
+    return parts[1] if len(parts) == 2 and parts[0] == "u" else ""
+
+
+def find_stream(name, pid):
+    try:
+        inputs = json.loads(run("pactl", "-f", "json", "list", "sink-inputs") or "[]")
+    except ValueError:
+        inputs = []
+    if pid:
+        for s in inputs:
+            if str(s.get("properties", {}).get("application.process.id", "")) == pid:
+                return s
+    short = name.split(".")[0].lower()
+    if short:
+        for s in inputs:
+            p = s.get("properties", {})
+            hay = " ".join(str(p.get(k, "")) for k in ("application.process.binary", "application.name", "node.name")).lower()
+            if short in hay:
+                return s
+    return None
+
+
+def percent(vol):
+    chans = [v.get("value_percent", "0%") for v in (vol or {}).values()]
+    vals = [int(str(c).rstrip("%") or 0) for c in chans]
+    return max(vals) if vals else 0
+
+
+def osd(pct):
+    if os.environ.get("YUMI_PLAYER_OSD", "1") != "0":
+        subprocess.Popen(["qs", "-c", "yumi", "ipc", "call", "--", "osd", "show", "player", str(pct)],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+def main():
+    action = sys.argv[1] if len(sys.argv) > 1 else "get"
+    step = int(sys.argv[2]) if len(sys.argv) > 2 else 5
+    name = active_player()
+    s = find_stream(name, player_pid(name)) if name else None
+    if s is None:                                     # как бар: нет потока — системный выход
+        cur = run("wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@").split()
+        now = round(float(cur[1]) * 100) if len(cur) > 1 else 0
+        if action in ("up", "down"):
+            new = max(0, min(100, now + (step if action == "up" else -step)))
+            run("wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", f"{new}%")
+            now = new
+            osd(now)
+        print(f"{now}% (системный выход)")
+        return
+    now = percent(s.get("volume"))
+    if action in ("up", "down"):
+        new = max(0, min(100, now + (step if action == "up" else -step)))
+        run("pactl", "set-sink-input-volume", str(s["index"]), f"{new}%")
+        now = new
+        osd(now)
+    print(f"{now}% ({name})")
+
+
+if __name__ == "__main__":
+    main()

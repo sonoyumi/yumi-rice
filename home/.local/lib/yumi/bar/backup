@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# backup — текст пилюли бэкапа для бара: значок 󰁯 + сколько дней назад был последний бэкап.
+# Класс: ok (свежий) · overdue (давно) · none (ещё не было) · running (идёт сейчас, значок 󰓦 + %). Читает состояние yumi-backup.
+set -uo pipefail
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/yumi-backup"
+CFG="${XDG_CONFIG_HOME:-$HOME/.config}/yumi-backup/config"
+
+OVERDUE_DAYS=4
+[ -f "$CFG" ] && OVERDUE_DAYS=$(sed -n 's/^OVERDUE_DAYS=\([0-9]*\).*/\1/p' "$CFG" | head -1); OVERDUE_DAYS=${OVERDUE_DAYS:-4}
+
+ico='󰁯'
+# идёт бэкап (yumi-backup run жив): значок синхронизации + проценты, класс running; percentage — для полоски под кнопкой
+pid=$(cat "$STATE/pid" 2>/dev/null)
+if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    P=$(cat "$STATE/progress" 2>/dev/null); [ -n "$P" ] || P='{}'
+    read -r phase pct done total files started < <(jq -r '[.phase // "prepare", .pct // -1, .done // 0, .total // 0, .files // 0, .started // 0] | @tsv' <<< "$P" 2>/dev/null)
+    phase=${phase:-prepare}; pct=${pct:--1}
+    gb() { awk -v b="${1:-0}" 'BEGIN { printf "%.1f", b / 1e9 }'; }
+    el=$(( $(date +%s) - ${started:-0} )); [ "${started:-0}" -gt 0 ] || el=0
+    elh=$(printf '%d:%02d' $((el / 60)) $((el % 60)))
+    case "$phase" in
+        prepare) label="…";      what="подготовка" ;;
+        create)  if [ "$pct" -ge 0 ]; then label="${pct}%"; else label="$(gb "$done") ГБ"; fi; what="копирование" ;;
+        prune)   label="99%";    what="прореживание старых архивов" ;;
+        compact) label="99%";    what="уплотнение репозитория" ;;
+        *)       label="…";      what="$phase" ;;
+    esac
+    tip="Идёт бэкап · $(gb "$done") из ~$(gb "$total") ГБ · $elh"   # 29.10: коротко, одной строкой
+    printf '{"text": %s, "tooltip": %s, "class": "running", "percentage": %s}\n' \
+        "$(jq -Rn --arg t "󰓦 $label" '$t')" "$(jq -Rn --arg t "$tip" '$t')" "$pct"
+    exit 0
+fi
+
+if [ -f "$STATE/last" ]; then
+    last=$(cat "$STATE/last" 2>/dev/null); now=$(date +%s)
+    age=$(( (now - last) / 86400 ))
+    when=$(date -d "@$last" '+%d.%m %H:%M' 2>/dev/null)
+    if [ "$age" -le 0 ]; then human="сегодня"; else human="${age}д"; fi
+    if [ "$age" -ge "$OVERDUE_DAYS" ]; then cls="overdue"; else cls="ok"; fi
+    text="$ico $human"
+    case $age in 0) tip="Бэкап: сегодня в ${when#* }";; 1) tip="Бэкап: вчера в ${when#* }";; *) tip="Бэкап: $age дн. назад ($when)";; esac   # 29.10: коротко, без «левый клик» (клик — меню)
+    agef=$(awk -v n="$now" -v l="$last" 'BEGIN { printf "%.2f", (n - l) / 86400 }')   # 29.10: точный возраст — для цвета пилюли
+else
+    cls="none"; text="$ico"
+    tip="Бэкапа ещё не было"
+fi
+
+printf '{"text": %s, "tooltip": %s, "class": %s, "age": %s}\n' \
+    "$(jq -Rn --arg t "$text" '$t')" \
+    "$(jq -Rn --arg t "$tip"  '$t')" \
+    "$(jq -Rn --arg c "$cls"  '$c')" \
+    "${agef:-null}"

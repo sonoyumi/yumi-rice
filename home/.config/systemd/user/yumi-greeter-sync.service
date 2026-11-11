@@ -1,0 +1,16 @@
+[Unit]
+# 19.10: копия экрана блокировки для экрана входа greetd (/var/lib/yumi-greeter) — при входе в сеанс
+# и после правок lock/ или greeter.qml (yumi-greeter-sync.path). Откат: yumi-greeter-uninstall.
+Description=yumi: обновить копию экрана входа (greetd)
+After=graphical-session.target
+ConditionPathIsReadWrite=/var/lib/yumi-greeter/home
+
+[Service]
+Type=oneshot
+# дебаунс: правки QML идут пачкой — дать дописаться (новые события за это время войдут в тот же запуск)
+ExecStartPre=/bin/sleep 5
+ExecStart=%h/.local/bin/yumi-greeter-sync
+Nice=10
+
+[Install]
+WantedBy=graphical-session.target

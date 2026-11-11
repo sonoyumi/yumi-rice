@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# yumi-freeze-check — проверка целостности заморозки ядра (план freeze-6mo).
+#   Запускать ПОСЛЕ `yumi-update`: убеждается, что пины на месте и что
+#   GPU/аудио/отпечаток/.pacnew в порядке после -Syu.
+#   Сам НИЧЕГО не обновляет — обновление делает yumi-update (snap-pac снимает до/после).
+#   Пины живут в /etc/pacman.conf (см. ~/Documents/Заметки/pacman.conf.mesa-pin).
+#   Откат: rm ~/.local/bin/yumi-freeze-check
+set -uo pipefail
+
+PINS=(linux-asahi linux-asahi-headers mesa vulkan-asahi libdrm fprintd libfprint asahi-audio speakersafetyd)
+# патченый Hyprland (yumi-hypr-freeze, 30.10.2026): пины + версия + .so
+HYPR_VER=0.56.2-4.2
+HYPR_PINS=(hyprland aquamarine hyprutils hyprlang hyprgraphics hyprcursor hyprwire hyprland-guiutils hyprland-protocols hyprwayland-scanner hyprtoolkit hyprpm hyprlock hypridle xdg-desktop-portal-hyprland)
+HYPR_BAK=~/.local/src/yumi-hypr-freeze/hyprland-$HYPR_VER-files.tar.xz
+
+m(){ printf '\033[1;35m▶ %s\033[0m\n' "$*"; }
+ok(){ printf '  \033[1;32m✔\033[0m %s\n' "$*"; }
+bad(){ printf '  \033[1;31m✘ %s\033[0m\n' "$*"; FAIL=1; }
+warn(){ printf '  \033[1;33m‣ %s\033[0m\n' "$*"; }   # примечание, не провал
+FAIL=
+
+m "Закрепления (IgnorePkg) в /etc/pacman.conf:"
+for p in "${PINS[@]}"; do
+  grep '^IgnorePkg' /etc/pacman.conf | grep -qw "$p" && ok "$p" || bad "НЕ закреплён: $p"
+done
+
+m "Патченый Hyprland:"
+miss=()
+for p in "${HYPR_PINS[@]}"; do
+  grep '^IgnorePkg' /etc/pacman.conf | grep -qw "$p" || miss+=("$p")
+done
+[ ${#miss[@]} -eq 0 ] && ok "все ${#HYPR_PINS[@]} пакетов закреплены" \
+  || bad "НЕ закреплены: ${miss[*]} → sudo ~/.local/src/yumi-hypr-freeze/setup.sh"
+v=$(pacman -Q hyprland 2>/dev/null | awk '{print $2}')
+[ "$v" = "$HYPR_VER" ] && ok "hyprland $v (свой патч)" \
+  || bad "hyprland $v вместо $HYPR_VER — патч заменён! файлы: $HYPR_BAK"
+nf=$(ldd /usr/bin/Hyprland 2>/dev/null | grep 'not found' || true)
+[ -z "$nf" ] && ok "все библиотеки Hyprland находятся" \
+  || { bad "Hyprland не найдёт библиотеки (сессия не запустится!):"; printf '%s\n' "$nf" | sed 's/^/      /'; }
+[ -f "$HYPR_BAK" ] && ok "копия файлов патча на месте" || warn "нет копии $HYPR_BAK"
+# прогноз: какие НЕзакреплённые зависимости Hyprland придут со следующим -Syu
+deps=$(pacman -Qi hyprland 2>/dev/null | sed -n '/^Depends On/,/^[A-Z]/p' \
+  | sed 's/^Depends On *://; /^[A-Z][a-z]/d' | tr ' ' '\n' | grep -v '^lib.*\.so' | sed 's/[<>=].*//' | grep . | sort -u)
+if command -v checkupdates >/dev/null; then
+  up=$(checkupdates 2>/dev/null | awk '{print $1}' | grep -xFf <(printf '%s\n' $deps) || true)
+  [ -z "$up" ] && ok "в ожидающих обновлениях зависимостей Hyprland нет" || {
+    warn "придут обновления зависимостей Hyprland — после yumi-update проверь строку «библиотеки» выше:"
+    checkupdates 2>/dev/null | grep -wFf <(printf '%s\n' $up) | sed 's/^/      /'; }
+fi
+
+m "Состояние системы после обновления:"
+r=$(glxinfo -B 2>/dev/null | grep -i 'OpenGL renderer' || true)
+echo "$r" | grep -q 'Apple M1' \
+  && ok "GPU на железе ($r)" \
+  || bad "GPU в софтрендере! → sudo snapper -c root rollback + перезагрузка  ($r)"
+pactl list short sinks 2>/dev/null | grep -q . && ok "аудио: синк есть" || bad "аудио: синков нет"
+fprintd-list "$USER" 2>/dev/null | grep -qi finger \
+  && ok "отпечатки на месте" \
+  || echo "    (палец: проверь вручную — fprintd-verify)"
+pn=$(find /etc -name '*.pacnew' 2>/dev/null)
+crit=$(printf '%s\n' "$pn" | grep -E '/(pam\.d|polkit-1|sudoers)' || true)
+if [ -z "$pn" ]; then
+  ok ".pacnew нет"
+elif [ -n "$crit" ]; then
+  bad ".pacnew в КРИТИЧНЫХ (pam/polkit/sudoers) — проверь вход/Touch ID (sudo pacdiff):"
+  printf '%s\n' "$crit" | sed 's/^/      /'
+else
+  warn ".pacnew есть, но не критичны (на досуге: sudo pacdiff):"
+  printf '%s\n' "$pn" | sed 's/^/      /'
+fi
+
+echo
+[ -z "$FAIL" ] && m "Всё зелёное — заморозка цела." || { m "Есть проблемы — см. ✘ выше."; exit 1; }

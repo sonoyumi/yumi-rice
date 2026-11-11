@@ -1,5 +1,6 @@
--- yumi/look.lua — вид окон и общие опции (были defaults.lua, тема HyDE и dynamic.lua)
--- Свой «закреплённый» вид (my_look) остаётся в hyprland.lua и применяется поверх.
+-- yumi/look.lua — вид окон и общие опции (были defaults.lua, тема HyDE и dynamic.lua).
+-- 14.10: единственный файл вида — my_look() из hyprland.lua сюда объединён (rounding_power, session_lock_xray).
+-- Грузится до workflow.lua, поэтому режимы (gaming, powersaver, snappy…) могут менять эти значения.
 
 local FONT, FONT_SIZE = "Cantarell", 10
 
@@ -20,6 +21,7 @@ hl.config({
 	},
 	decoration = {
 		rounding = 10,
+		rounding_power = 2,         -- из my_look (14.10)
 		dim_special = 0.3,
 		active_opacity = 0.75,      -- как в «Моих настройках» hyprland.lua (13.10)
 		inactive_opacity = 0.65,
@@ -46,7 +48,10 @@ hl.config({
 		preserve_split = true,
 	},
 	misc = {
+		session_lock_xray = true,   -- рисовать рабочий стол под экраном блокировки: после разблокировки всё готово
 		vrr = 0,
+		-- свой фон Hyprland выключен: он грузится лениво и рисуется в логических пикселях (логотип в 1,6 раза крупнее,
+		-- видео IMG_1201); мост при загрузке — awww с кадром загрузки (yumi-awww-post). 16.10
 		disable_hyprland_logo = true,
 		disable_splash_rendering = true,
 		force_default_wallpaper = 0,
@@ -106,7 +111,8 @@ function yumi.apply_palette(with_borders)
 			},
 		},
 		misc = {
-			background_color = c._pry1_rgba,
+			-- чёрный, как у заставки загрузки: пока нет обоев и экрана блокировки, нет цветной вспышки (16.10)
+			background_color = "rgba(0,0,0,1)",
 		},
 	}
 	if with_borders then

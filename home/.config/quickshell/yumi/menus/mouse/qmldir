@@ -1,0 +1,5 @@
+MouseMenu 1.0 MouseMenu.qml
+MouseData 1.0 MouseData.qml
+MousePanel 1.0 MousePanel.qml
+HSlider 1.0 HSlider.qml
+ToggleRow 1.0 ToggleRow.qml

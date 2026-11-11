@@ -528,7 +528,11 @@ def render_live(d, only=()):
 HOOK_AFTER = {"yumi-accent": {"code-wallbash", "discord"}}
 HOOK_BACKGROUND = {"keyboard"}
 # вместо хука — одна команда в очередь (подсветка клавиатуры: yumi-kb-light ~30 мс через yumirgb)
-HOOK_AS_COMMIT = {"keyboard": os.path.join(HOME, ".local/bin/yumi-kb-light")}
+HOOK_AS_COMMIT = {"keyboard": os.path.join(HOME, ".local/bin/yumi-kb-light"),
+                  # Quickshell перекрашивается сам, как только меняется colors.json (FileView) — поэтому файл подменяется
+                  # только в общий момент commit, вместе с kitty/рамками/Waybar, а не при prepare (3.1)
+                  "quickshell": "cp -f %s %s" % (os.path.join(CACHE, "wallbash/quickshell.json"),
+                                                 os.path.join(XDG_CONFIG, "yumi/quickshell/colors.json"))}
 
 
 def queue(cmd):
@@ -604,11 +608,14 @@ BUNDLE_FILES = [
     ".config/hypr/themes/colors.conf", ".config/kitty/theme.conf", ".config/kitty/yumi-colors.conf",
     ".config/qt5ct/colors/wallbash.conf", ".config/qt5ct/colors/yumi-tone.conf",
     ".config/qt6ct/colors/wallbash.conf", ".config/qt6ct/colors/yumi-tone.conf",
-    ".config/swaync/theme.css",
-    ".config/waybar/theme.css", ".config/waybar/yumi-accent.css",
     ".config/yumi/player/accent.css", ".config/yumi/player/colors.css",
     ".local/state/yumi/colors.lua", ".local/share/yumi-telegram/yumi.tdesktop-theme",
-    ".local/state/omarchy/current/theme/colors.toml",
+    # палитра Quickshell: шаблон quickshell.dcol пишет её при prepare, в общий момент сигнал cp кладёт её в
+    # ~/.config/yumi/quickshell/colors.json. Без неё в комплекте cp брал файл ПРОШЛЫХ обоев — бар и часы
+    # оставались в чужой палитре (19.10). colors.toml тачбара (omarchy) убран: его каждый раз пишет 80-touchbar
+    # на месте (INPLACE_ACCENT), а при прогреве хук пропускается — во всех комплектах лежал серый файл
+    ".cache/yumi/theme/wallbash/quickshell.json",
+    "Projects/Схемы/.obsidian/snippets/wallbash.css",                # Obsidian в цвете бара (хук 65-obsidian)
     # Kvantum (оформление Qt: Dolphin, KWrite…): сама тема и «чистые копии» шаблона у yumi-tone — без них хук Qt
     # при смене из кэша перекрашивал бы шаблон ПРОШЛЫХ обоев (Dolphin выходил коричневым, 13.10)
     ".config/Kvantum/yumi/yumi.kvconfig", ".config/Kvantum/yumi/yumi.svg",
@@ -623,12 +630,13 @@ BUNDLE_GLOBS = [".vscode/extensions/yumi.wallbash-theme-*/themes/wallbash.json",
 # хуки, которые правят часть чужого файла — при смене из комплекта запускаются в общий момент
 ACCENT_HOOKS = os.path.join(XDG_CONFIG, "yumi/accent/hooks.d")
 INPLACE = ["cava", "discord"]                                    # шаблоны: их хук-скрипты
-INPLACE_ACCENT = ["30-qt", "75-vesktop"]                         # хуки yumi-accent (kdeglobals, quickCss)
+INPLACE_ACCENT = ["30-qt", "75-vesktop", "80-touchbar"]          # хуки yumi-accent (kdeglobals, quickCss, тачбар)
 BG_AFTER = ["60-restart-bg-gtk", "95-sddm"]                      # невидимое — в фоне после момента (95-sddm — экран входа)
 VERSION_INPUTS = WALLBASH_DIRS + [ACCENT_HOOKS, os.path.join(HOME, ".local/lib/yumi/tone"),
                                       DEFER_DIR] + [os.path.join(HOME, ".local/bin", n) for n in (
     "yumi-accent", "yumi-telegram-theme", "yumi-vesktop-theme", "yumi-zen-theme", "yumi-touchbar-theme",
-    "yumi-hyprtoolkit-theme", "yumi-folders-update")]
+    "yumi-hyprtoolkit-theme", "yumi-folders-update", "yumi-obsidian-theme")] + [
+    os.path.abspath(__file__), SKIP_FILE]          # 19.10: правка списка комплекта или skip — комплекты заново
 
 
 def manifest():
@@ -680,16 +688,15 @@ def guard_ok():
     """Файлы комплекта сейчас ровно те, что записали мы сами? (иначе кто-то правил — комплекты не годятся)"""
     import json
     try:
-        if open(VERSION).read().strip() != version_sig():
-            drop_bundles("поменялись шаблоны или хуки")
-            return False
         live = json.load(open(LIVE))
     except (OSError, ValueError):
         return False
     for r, h in live.items():
         p = os.path.join(HOME, r)
         if not os.path.exists(p) or sha1_file(p) != h:
-            drop_bundles("файл изменён не сменой обоев: " + r)
+            # раньше здесь сбрасывались ВСЕ комплекты; теперь только эта смена идёт полным путём (хуки
+            # перепишут файл заново), а live.json обновится после неё — остальные комплекты остаются
+            log("файл изменён не сменой обоев: %s — эта смена полным путём" % r)
             return False
     return True
 
@@ -698,8 +705,30 @@ def bundle_dir(sha):
     return os.path.join(BUNDLES, sha)
 
 
+_SIG = None
+
+
+def current_sig():
+    global _SIG
+    if _SIG is None:
+        _SIG = version_sig()
+    return _SIG
+
+
 def has_bundle(sha):
-    return os.path.isfile(os.path.join(bundle_dir(sha), "complete"))
+    """Комплект годен, если собран этой же версией шаблонов и хуков (у каждого комплекта — своя метка version).
+    Устаревшие не удаляются все разом: смена на такие обои идёт полным путём и пересобирает только их комплект,
+    остальные тихо пересобирает yumi-wallpaper warm --idle, пока экраны погашены."""
+    bd = bundle_dir(sha)
+    if not os.path.isfile(os.path.join(bd, "complete")):
+        return False
+    try:
+        if open(os.path.join(bd, "version")).read().strip() != current_sig():
+            return False
+    except OSError:
+        return False
+    files = os.path.join(bd, "files")                 # нет файла из нынешнего списка — комплект неполный
+    return all(os.path.exists(os.path.join(files, r)) for r in manifest())
 
 
 def snapshot(sha, queue_file):
@@ -726,6 +755,8 @@ def snapshot(sha, queue_file):
         pass
     with open(os.path.join(tmp, "signals.txt"), "w") as f:
         f.write("\n".join(sig) + "\n")
+    with open(os.path.join(tmp, "version"), "w") as f:
+        f.write(current_sig())
     open(os.path.join(tmp, "complete"), "w").close()
     if os.path.isdir(bd):
         shutil.rmtree(bd)
@@ -744,19 +775,23 @@ def stage_bundle(sha):
             dst = os.path.join(HOME, os.path.relpath(src, root))
             if os.path.exists(dst) and sha1_file(dst) == sha1_file(src):
                 continue                                   # не изменился — не трогаем (меньше событий)
+            if not os.path.isdir(os.path.dirname(dst)) and any(
+                    x in dst for x in ("/.vscode/extensions/", "/.config/zen/")):
+                continue                                   # расширение/профиль удалены — не воскрешать одним файлом
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             shutil.copy2(src, dst + ".yumi-next")
             staged.append(dst)
     with open(STAGED, "w") as f:
         f.write("\n".join(staged))
+    if any("/icons/Yumi-Folders/" in x for x in staged):
+        # папки: хук yumi-folders-update идёт в фоне (&) и в signals.txt не попадает — сброс кэша значков KDE и
+        # сигнал Dolphin здесь, иначе из комплекта Dolphin показывал старые папки (19.10)
+        queue('rm -f "%s"; dbus-send --session --type=signal /KIconLoader org.kde.KIconLoader.iconChanged int32:0'
+              % os.path.join(XDG_CACHE, "icon-cache.kcache"))
     for line in open(os.path.join(bundle_dir(sha), "signals.txt")):
         if line.strip():
             queue(line.strip())
-    # прогрев не пишет в очередь перезапуск Waybar (yumi-accent его пропускает) — без этой строки бар из комплекта
-    # не перечитывал стили и перекрашивался последним; yumi-wallpaper выпускает его заранее (early waybar)
-    bar = os.path.join(XDG_CONFIG, "waybar") + "/"
-    if any(d.startswith(bar) or d == os.path.join(CACHE, "wallbash/gtk.css") for d in staged):
-        queue("/usr/bin/systemctl --user restart waybar.service")
+    # 3.1: панель — Quickshell (перекрашивается сама по colors.json/accent.txt); перезапуск Waybar больше не нужен
     return len(staged)
 
 
@@ -783,6 +818,21 @@ def link_dcol(dcol):
     os.replace(tmp, link)
 
 
+def link_wall(wall, sha):
+    """Ссылки wall.set и миниатюр на эти обои (как link_wall в yumi-wallpaper), если они смотрят не туда."""
+    pairs = [("wall.set", wall)] + [("wall." + e, os.path.join(THUMBS, "%s.%s" % (sha, e)))
+                                    for e in ("sqre", "thmb", "blur", "quad")]
+    for name, target in pairs:
+        link = os.path.join(CACHE, name)
+        if not os.path.exists(target) or (os.path.islink(link) and os.readlink(link) == target):
+            continue
+        tmp = link + ".yumi-tmp"
+        if os.path.lexists(tmp):
+            os.remove(tmp)
+        os.symlink(target, tmp)
+        os.replace(tmp, link)
+
+
 def prepare(args, defer=True, warm=False):
     """Возвращает "cached" (из комплекта) или "full" (хуки)."""
     os.makedirs(OWN, exist_ok=True)
@@ -805,6 +855,11 @@ def prepare(args, defer=True, warm=False):
         mode = "cached"
         log("из комплекта: %d файлов к подмене, %.3f с" % (n, time.time() - t0))
     else:
+        # хуки (yumi-accent, hyprtoolkit, тачбар…) читают обои по ссылке wall.set. yumi-wallpaper при «есть
+        # комплект» ставит её только после commit — а если комплект оказался негодным (сменилась версия
+        # скриптов, guard_ok сбросил всё), смена идёт полная, и хуки брали ПРОШЛЫЕ обои: акцент сакуры
+        # выходил зелёным от леса и попадал в её комплект (13.10). Поэтому перед хуками — ссылки на эти обои
+        link_wall(wall, sha)
         d = read_dcol(dcol)
         hooks = render_live(d)
         log("шаблоны: %.2f с" % (time.time() - t0))
@@ -842,6 +897,32 @@ def run_inplace(sha):
     return procs
 
 
+_PROCS = None
+
+
+def running(comm):
+    """Есть ли процесс с таким именем (/proc/*/comm, без запуска pgrep)."""
+    global _PROCS
+    if _PROCS is None:
+        _PROCS = set()
+        for pid in os.listdir("/proc"):
+            if pid.isdigit():
+                try:
+                    _PROCS.add(open("/proc/%s/comm" % pid).read().strip())
+                except OSError:
+                    pass
+    return comm in _PROCS
+
+
+def idle_target(cmd):
+    """Команда для программы, которая не запущена (Waybar и swaync замаскированы с 3.1) — не выпускать."""
+    if "swaync-client" in cmd:
+        return not running("swaync")
+    if "waybar" in cmd:
+        return not running("waybar")
+    return False
+
+
 def commit():
     """Подменить файлы комплекта разом, выпустить очередь толчков, затем — фоновое."""
     t0 = time.time()
@@ -860,6 +941,7 @@ def commit():
     except OSError:
         pass
     env = {k: v for k, v in os.environ.items() if k not in ("YUMI_COMMIT_QUEUE", "YUMI_COLORS_WARM")}
+    cmds = [c for c in cmds if not idle_target(c)]
     for c in cmds:
         subprocess.Popen(["bash", "-c", c], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          start_new_session=True)
@@ -984,26 +1066,29 @@ def cmd_early_apps(args):
 def cmd_snapshot_later(args):
     """Через ~4 с после полной смены: сохранить комплект, если обои всё ещё те же."""
     sha, q = args[0], args[1]
-    time.sleep(4)
-    if open(os.path.join(OWN, "applied")).read().strip() != sha:
-        return
-    lock = open(os.path.join(OWN, "apply.lock"), "w")
-    fcntl.flock(lock, fcntl.LOCK_EX)
-    if open(os.path.join(OWN, "applied")).read().strip() != sha:
-        return
-    if not os.path.isfile(VERSION):
-        drop_bundles("первый запуск")
-    snapshot(sha, q)
-    record_live()
     try:
-        os.remove(q)
-    except OSError:
-        pass
+        time.sleep(4)
+        if open(os.path.join(OWN, "applied")).read().strip() != sha:
+            return
+        lock = open(os.path.join(OWN, "apply.lock"), "w")
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if open(os.path.join(OWN, "applied")).read().strip() != sha:
+            return
+        os.makedirs(BUNDLES, exist_ok=True)
+        snapshot(sha, q)
+        record_live()
+    finally:                                           # обои сменили раньше — очередь тоже не нужна (были утечки)
+        try:
+            os.remove(q)
+        except OSError:
+            pass
 
 
 def cmd_apply(args):
-    prepare(args)
+    mode, sha = prepare(args)
     commit()
+    if mode == "cached":                               # полный путь ставит ссылки сам; yumi-wallpaper — тоже
+        link_wall(os.path.realpath(args[0]) if args else current_wall(), sha)
 
 
 def cmd_prepare(args):
@@ -1029,10 +1114,7 @@ def cmd_warm(args):
     yumi-wallpaper warm — обёртка (ставит wall.set на время, потом возвращает текущие обои)."""
     wall = os.path.realpath(args[0])
     sha = sha1_file(wall)
-    if not os.path.isfile(VERSION):
-        drop_bundles("первый запуск")
-    elif open(VERSION).read().strip() != version_sig():   # скрипты поменялись — иначе прогрев соберёт комплекты,
-        drop_bundles("поменялись шаблоны или хуки")         # которые следующая смена обоев сразу выбросит
+    os.makedirs(BUNDLES, exist_ok=True)
     mode, sha = prepare([wall], defer=True, warm=True)
     time.sleep(2.5)                                    # 75-vesktop дописывает quickCss через 2 с
     snapshot(sha, QUEUE)

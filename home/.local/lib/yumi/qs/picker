@@ -1,0 +1,117 @@
+#!/usr/bin/env -S python3 -I
+"""Бэкенд меню «Эмодзи / Символы» для Quickshell (menus/picker/PickerMenu.qml). Разовые вызовы, одна JSON-строка:
+  picker load emoji|glyph          {"type":"data","kind","path","items":[[символ, название, подпись, строка поиска]],"recent":[...]}
+                                   базы и разбор — как load()/load_recent() в ~/.local/bin/yumi-menu-picker
+  picker recent emoji|glyph JSON   сохранить недавние (список символов) в picker-recent-<вид>.json
+Данные: $YUMI_PICKER_DATA, ~/.local/share/yumi-panel/data; недавние: $YUMI_PICKER_CACHE или ~/.cache/yumi-panel.
+YP_DRYRUN=1 — недавние не пишутся (если не задан YUMI_PICKER_CACHE), только печатаются в stderr."""
+import json
+import os
+import sys
+import unicodedata
+
+DRY = os.environ.get("YP_DRYRUN") == "1"
+HOME = os.path.expanduser("~")
+DATA_DIR = os.path.join(HOME, ".local/share/yumi-panel/data")
+DATA_DIRS = [d for d in (os.environ.get("YUMI_PICKER_DATA"), DATA_DIR) if d]
+CACHE_DIR = os.environ.get("YUMI_PICKER_CACHE") or os.path.join(HOME, ".cache/yumi-panel")
+LEGACY_RECENT = os.path.join(HOME, ".cache/yumi/theme/landing/show_{}.recent")
+RECENT_MAX = 27
+FILES = {"emoji": "emoji.db", "glyph": "glyph.db"}
+
+
+def find_db(name):
+    for d in DATA_DIRS:
+        p = os.path.join(d, name)
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def emoji_name(ch, desc):
+    try:
+        nm = unicodedata.name(ch.replace("️", "")).lower()
+        if desc.lower().startswith(nm):
+            return desc[:len(nm)], desc[len(nm):].strip()
+    except (ValueError, TypeError):
+        pass
+    return desc, ""
+
+
+def load(kind):
+    path = find_db(FILES[kind])
+    res = []
+    if not path:
+        return res, None
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.rstrip("\n")
+            if kind == "emoji":
+                ch, _, desc = line.partition(" ")
+                if not ch:
+                    continue
+                name, rest = emoji_name(ch, desc)
+                res.append([ch, name, rest, desc.casefold()])
+            else:
+                ch, _, gname = line.partition("\t")
+                if not ch or not gname:
+                    continue
+                ch = ch.strip()
+                fam, _, base = gname.partition("-")
+                words = base.replace("_", " ").replace("-", " ")
+                res.append([ch, words, f"{fam} · {gname}", f"{gname} {words} {fam}".casefold()])
+    return res, path
+
+
+def recent_path(kind):
+    return os.path.join(CACHE_DIR, f"picker-recent-{kind}.json")
+
+
+def load_recent(kind, items):
+    try:
+        with open(recent_path(kind)) as f:
+            return [c for c in json.load(f) if isinstance(c, str)][:RECENT_MAX]
+    except (OSError, ValueError):
+        pass
+    known = {it[0] for it in items}
+    res = []
+    try:
+        with open(LEGACY_RECENT.format(kind), encoding="utf-8", errors="replace") as f:
+            for line in f:
+                ch = line.split("\t" if kind == "glyph" else " ", 1)[0].strip()
+                if ch in known and ch not in res:
+                    res.append(ch)
+    except OSError:
+        pass
+    return res[:RECENT_MAX]
+
+
+def save_recent(kind, recent):
+    recent = [c for c in recent if isinstance(c, str)][:RECENT_MAX]
+    if DRY and not os.environ.get("YUMI_PICKER_CACHE"):
+        print(f"[dry-run] недавние ({kind}):", "".join(recent[:9]), "->", recent_path(kind), file=sys.stderr, flush=True)
+        return
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        tmp = recent_path(kind) + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(recent, f, ensure_ascii=False)
+        os.replace(tmp, recent_path(kind))
+    except OSError:
+        pass
+
+
+if __name__ == "__main__":
+    a = sys.argv[1:]
+    if len(a) >= 2 and a[0] == "load" and a[1] in FILES:
+        items, path = load(a[1])
+        print(json.dumps({"type": "data", "kind": a[1], "path": path or "", "file": FILES[a[1]], "dir": DATA_DIRS[0],
+                          "dry": DRY, "items": items, "recent": load_recent(a[1], items)}, ensure_ascii=False), flush=True)
+    elif len(a) == 3 and a[0] == "recent" and a[1] in FILES:
+        try:
+            save_recent(a[1], json.loads(a[2]))
+        except ValueError:
+            sys.exit(2)
+    else:
+        print(__doc__, file=sys.stderr)
+        sys.exit(2)

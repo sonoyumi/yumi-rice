@@ -1,0 +1,4 @@
+PolkitPrompt 1.0 PolkitPrompt.qml
+PolkitService 1.0 PolkitService.qml
+PolkitPreview 1.0 PolkitPreview.qml
+PolkitStubFlow 1.0 PolkitStubFlow.qml

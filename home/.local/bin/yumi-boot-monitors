@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# yumi-boot-monitors — включить внешний монитор после загрузки (16.10). При загрузке hyprland.lua держит DP-1 (MSI)
+# выключенным, пока вход «из логотипа» не растворился: смена режима MSI останавливала Hyprland на ~0,5 с (рывок
+# полоски на 97 %, журнал 16.10: hotplug DP 7,16 с → пропуски кадров 338/496 мс). Правило — как в hyprland.lua:98
+# (менять вместе!). Вызывают: Quickshell (вход растворился), yumi-lock --boot (страховка). Повторный вызов — ничего.
+RUN=${XDG_RUNTIME_DIR:-/tmp}
+exec 9>"$RUN/yumi-boot-monitors.lock"; flock -n 9 || exit 0
+[[ -e $RUN/yumi-boot-monitors-done ]] && exit 0
+: > "$RUN/yumi-boot-monitors-done"
+hyprctl eval 'hl.monitor({ output = "DP-1", disabled = false, mode = "1920x1080@165", position = "1600x0", scale = 1, reserved = { top = 38 } })' >/dev/null

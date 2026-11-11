@@ -1,0 +1,304 @@
+#!/usr/bin/env -S python3 -I
+"""Бэкенд меню «Рабочие столы» для Quickshell (menus/workspaces/WorkspacesMenu.qml) — данные как у yumi-menu-workspaces.
+Запускается, пока меню открыто (и немного после). Поток JSON-строк в stdout:
+  {"t":"state","active":N,"free":N,"nwin":N,"busy":N,
+   "groups":[{"mon":"eDP-1","label":"НОУТБУК · eDP-1","ids":[1..5]}],   (пример)
+   "ws":{"N":{"mon","monLabel","visible","wins":[{"address","class","short","icon","title","pid","floating","fullscreen","xwayland","rect":[x,y,w,h] доли монитора}],"aspect":ш/в,
+              "classes":[{"class","short","icon"}]}}}
+  {"t":"done","ok":bool,"text":"…","quit":bool}       ответ на команду перехода
+Команды в stdin (по строке JSON):
+  {"cmd":"go","id":N}                 перейти на стол N        (hyprctl dispatch hl.dsp.focus({ workspace = N }))
+  {"cmd":"focus","address":"0x…"}     перейти к окну
+  {"cmd":"refresh"} | {"cmd":"titles","on":bool}   обновить / следить за заголовками (открыта подстраница)
+Обновляется само по событиям Hyprland (socket2). YP_DRYRUN=1 — переходы не выполняются, команда пишется в stderr.
+Выход — по EOF на stdin или со смертью Quickshell."""
+import json
+import os
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi/panel"))
+try:
+    import yumimon
+    MON_NAMES = yumimon.labels()      # ~/.config/yumi/monitors.conf
+except Exception:  # noqa: BLE001
+    MON_NAMES = {}
+# мониторы для столов без своего монитора (1–5 — первый, 6–10 — последний): из monitors.conf, а если там пусто —
+# подключённые сейчас, встроенный экран (eDP*) первым
+_MONS = list(MON_NAMES)
+
+
+def _internal_first(names):
+    return sorted(names, key=lambda n: not str(n).startswith("eDP"))   # как yumimon.internal_first
+try:
+    import gi
+    try:
+        gi.require_version("GioUnix", "2.0")
+        from gi.repository import GioUnix as DesktopNS
+    except (ValueError, ImportError):
+        from gi.repository import Gio as DesktopNS
+except Exception:  # noqa: BLE001
+    DesktopNS = None
+
+DRY = os.environ.get("YP_DRYRUN") == "1"
+LOCK = threading.Lock()
+EVENTS = ("workspace", "workspacev2", "focusedmon", "focusedmonv2", "openwindow", "closewindow",
+          "movewindow", "movewindowv2", "createworkspace", "createworkspacev2", "destroyworkspace",
+          "destroyworkspacev2", "moveworkspace", "moveworkspacev2")
+
+
+def die_with_parent():
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").prctl(1, signal.SIGTERM)       # PR_SET_PDEATHSIG
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def emit(**obj):
+    with LOCK:
+        try:
+            sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+            sys.stdout.flush()
+        except (BrokenPipeError, OSError):
+            os._exit(0)
+
+
+def hypr(*args):
+    try:
+        out = subprocess.run(["hyprctl", "-j", *args], capture_output=True, text=True, timeout=3).stdout
+        return json.loads(out or "null")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def short(cls):
+    """org.telegram.desktop → telegram, com.mitchellh.ghostty → ghostty (как в GTK-меню)."""
+    parts = (cls or "?").split(".")
+    name = parts[-2] if parts[-1] == "desktop" and len(parts) > 1 else parts[-1]
+    return name.lower()
+
+
+_icons = {}
+
+
+def icon_for(cls):
+    """Имя значка (или путь) из .desktop — как gicon_for в yumi-menu-workspaces; "" — QML покажет Nerd-глиф."""
+    key = (cls or "").lower()
+    if key in _icons:
+        return _icons[key]
+    gicon = None
+    if DesktopNS is not None:
+        for cand in (cls, key, short(cls)):
+            if not cand:
+                continue
+            try:
+                info = DesktopNS.DesktopAppInfo.new(cand + ".desktop")
+            except TypeError:
+                info = None
+            if info and info.get_icon():
+                gicon = info.get_icon()
+                break
+        if gicon is None and key:
+            try:
+                for group in DesktopNS.DesktopAppInfo.search(short(cls))[:1]:
+                    for did in group[:1]:
+                        info = DesktopNS.DesktopAppInfo.new(did)
+                        wm = (info.get_startup_wm_class() or "").lower() if info else ""
+                        if info and info.get_icon() and (wm == key or short(cls) in did.lower()):
+                            gicon = info.get_icon()
+            except Exception:  # noqa: BLE001
+                pass
+    icon = ""
+    if gicon is not None:
+        names = getattr(gicon, "get_names", None)
+        if names:
+            icon = (names() or [""])[0]
+        elif hasattr(gicon, "get_file") and gicon.get_file():
+            icon = gicon.get_file().get_path() or ""
+    _icons[key] = icon
+    return icon
+
+
+def state():
+    wss = hypr("workspaces") or []
+    clients = hypr("clients") or []
+    mons = hypr("monitors") or []
+    active = (hypr("activeworkspace") or {}).get("id")
+    visible = {m["activeWorkspace"]["id"]: m["name"] for m in mons if m.get("activeWorkspace")}
+    by_ws = {}
+    for c in clients:
+        wid = c.get("workspace", {}).get("id", 0)
+        if wid > 0 and c.get("mapped", True):
+            by_ws.setdefault(wid, []).append(c)
+    for wins in by_ws.values():       # порядок как на экране: слева направо, сверху вниз
+        wins.sort(key=lambda c: (c.get("at", [0, 0])[0], c.get("at", [0, 0])[1]))
+    ws = {w["id"]: w for w in wss if w["id"] > 0}
+    mon_order = [m["name"] for m in sorted(mons, key=lambda m: m["x"])]
+    # логическая геометрия мониторов (для мозаики окон): x, y, ширина, высота в координатах layout
+    geo = {}
+    for m in mons:
+        sc = m.get("scale") or 1
+        w, h = m.get("width", 1) / sc, m.get("height", 1) / sc
+        if m.get("transform", 0) % 2:
+            w, h = h, w
+        geo[m["name"]] = (m.get("x", 0), m.get("y", 0), max(w, 1), max(h, 1))
+
+    def rect(w, mon):
+        mx, my, mw, mh = geo.get(mon) or geo.get(w.get("monitor_name", ""), (0, 0, 1920, 1080))
+        at, sz = w.get("at") or [0, 0], w.get("size") or [0, 0]
+        cl = lambda v: round(min(1.0, max(0.0, v)), 4)
+        return [cl((at[0] - mx) / mw), cl((at[1] - my) / mh), cl(sz[0] / mw), cl(sz[1] / mh)]
+
+    mon_by_id = {m.get("id"): m["name"] for m in mons}
+    fallback = _MONS or _internal_first(mon_order) or ["?"]
+
+    # столы 1–10 по мониторам (обычно 1–5 — ноутбук, 6–10 — MSI)
+    groups = {}
+    for i in range(1, 11):
+        mon = ws.get(i, {}).get("monitor") or (fallback[0] if i <= 5 else fallback[-1])
+        groups.setdefault(mon, []).append(i)
+    order = [m for m in mon_order if m in groups] + [m for m in groups if m not in mon_order]
+    out_groups = [{"mon": m, "label": f"{MON_NAMES.get(m, m).upper()} · {m}", "ids": groups[m]} for m in order]
+
+    out_ws = {}
+    for i in set(range(1, 11)) | set(ws) | set(by_ws):
+        wins = by_ws.get(i, [])
+        seen = []
+        for w in wins:
+            if w["class"] not in seen:
+                seen.append(w["class"])
+        mon = ws.get(i, {}).get("monitor", "")
+        gmon = mon or (fallback[0] if i <= 5 else fallback[-1])
+        g = geo.get(gmon)
+        out_ws[str(i)] = {
+            "mon": mon, "monLabel": MON_NAMES.get(mon, mon), "visible": i in visible, "exists": i in ws,
+            "aspect": round(g[2] / g[3], 4) if g else 1.6,
+            "classes": [{"class": c, "short": short(c), "icon": icon_for(c)} for c in seen],
+            "wins": [{"address": w.get("address", ""), "class": w.get("class", ""), "short": short(w.get("class")),
+                      "icon": icon_for(w.get("class")), "title": w.get("title") or short(w.get("class")),
+                      "pid": w.get("pid") or 0, "floating": bool(w.get("floating")),
+                      "fullscreen": bool(w.get("fullscreen")), "xwayland": bool(w.get("xwayland")),
+                      "rect": rect(w, mon_by_id.get(w.get("monitor"), gmon))} for w in wins]}
+    free = 1
+    while free in ws:
+        free += 1
+    emit(t="state", active=active, free=free, groups=out_groups, ws=out_ws,
+         nwin=sum(len(v) for v in by_ws.values()), busy=sum(1 for v in by_ws.values() if v))
+
+
+class Debounce:
+    """Пачка событий Hyprland → одно обновление (150 мс; заголовки — 1 с)."""
+    def __init__(self):
+        self.cond = threading.Condition()
+        self.due = None
+        threading.Thread(target=self.loop, daemon=True).start()
+
+    def kick(self, delay):
+        with self.cond:
+            t = time.monotonic() + delay
+            if self.due is None or t < self.due:
+                self.due = t
+            self.cond.notify()
+
+    def loop(self):
+        while True:
+            with self.cond:
+                while self.due is None:
+                    self.cond.wait()
+                wait = self.due - time.monotonic()
+                if wait > 0:
+                    self.cond.wait(wait)
+                    continue
+                self.due = None
+            state()
+
+
+TITLES = {"on": False}
+
+
+def listen(deb):
+    sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
+    rt = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    if not sig:
+        return
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.connect(os.path.join(rt, "hypr", sig, ".socket2.sock"))
+        for line in s.makefile("r", encoding="utf-8", errors="replace"):
+            ev = line.split(">>", 1)[0]
+            if ev in EVENTS:
+                deb.kick(0.15)
+            elif ev == "windowtitlev2" and TITLES["on"]:
+                deb.kick(1.0)        # заголовки (терминал с анимацией) меняются часто — только для подстраницы, реже
+    except OSError:
+        pass
+
+
+def cursor_to_ws(i):
+    """Центр монитора стола i (логические px), если это не сфокусированный монитор; иначе None."""
+    mons = hypr("monitors") or []
+    wss = {w.get("id"): w for w in (hypr("workspaces") or [])}
+    target = (wss.get(i) or {}).get("monitor")
+    for m in mons:
+        if m.get("name") == target and not m.get("focused"):
+            sc = m.get("scale") or 1
+            return (round(m["x"] + m["width"] / sc / 2), round(m["y"] + m["height"] / sc / 2))
+    return None
+
+
+def dispatch(expr, done_text):
+    if DRY:
+        print(f"[dry-run] hyprctl dispatch {expr}", file=sys.stderr, flush=True)
+        emit(t="done", ok=True, text=f"{done_text} (dry-run)", quit=False)
+        return
+    try:
+        r = subprocess.run(["hyprctl", "dispatch", expr], capture_output=True, text=True, timeout=3)
+        msg = (r.stdout + r.stderr).strip()
+        ok = r.returncode == 0 and "error" not in msg.lower()
+    except Exception as e:  # noqa: BLE001
+        ok, msg = False, str(e)
+    emit(t="done", ok=ok, text=done_text if ok else f"Не удалось: {msg[:60]}", quit=ok)
+
+
+def main():
+    die_with_parent()
+    deb = Debounce()
+    state()
+    threading.Thread(target=listen, args=(deb,), daemon=True).start()
+    for line in sys.stdin:
+        try:
+            c = json.loads(line)
+        except ValueError:
+            continue
+        cmd = c.get("cmd")
+        if cmd == "go":
+            i = int(c.get("id", 0))
+            if 1 <= i <= 99:
+                # стол на ДРУГОМ экране (1–5 — MacBook, 6–10 — MSI): туда же и курсор — в центр того экрана (16.10),
+                # иначе переход случался на экране, куда пользователь не смотрит, и казалось, что его нет
+                warp = cursor_to_ws(i)
+                dispatch(f"hl.dsp.focus({{ workspace = {i} }})", f"Переход на стол {i}")
+                if warp:
+                    move = f"hl.dsp.cursor.move({{ x = {warp[0]}, y = {warp[1]} }})"
+                    if DRY:
+                        print(f"[dry-run] hyprctl dispatch {move}", file=sys.stderr, flush=True)
+                    else:
+                        subprocess.run(["hyprctl", "dispatch", move], capture_output=True, timeout=3)
+        elif cmd == "focus":
+            addr = str(c.get("address", ""))
+            if addr.startswith("0x") and all(ch in "0123456789abcdefx" for ch in addr.lower()):
+                dispatch(f'hl.dsp.focus({{ window = "address:{addr}" }})', f"Переход к окну {c.get('short', '')}".strip())
+        elif cmd == "titles":
+            TITLES["on"] = bool(c.get("on"))
+        elif cmd == "refresh":
+            deb.kick(0)
+    os._exit(0)
+
+
+if __name__ == "__main__":
+    main()

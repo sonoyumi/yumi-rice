@@ -17,6 +17,15 @@ for f in "$HOME"/.config/touchbar/styles/*.toml; do
     XDG_CONFIG_HOME="$W/$n" python3 "$SRC/agent/touchbar-agent" --dump-theme > "$W/$n/theme.json"
     "$BIN" --preview "$OUT/$n.png" "$W/$n/layout.json" "$W/$n/theme.json" "state=$W/state.json" "${ART[@]}" bars=48 && echo "✓ $n"
     "$BIN" --preview "$OUT/$n-apps.png" "$W/$n/layout.json" "$W/$n/theme.json" layer=apps >/dev/null 2>&1
+    if [[ $n == *yumi-boot* ]]; then                 # все состояния yumi-boot (координаты — из раскладки 6/7)
+        P=("$W/$n/layout.json" "$W/$n/theme.json" "state=$W/state.json" "${ART[@]}" bars=48)
+        "$BIN" --preview "$OUT/$n-fn.png" "${P[@]}" layer=function >/dev/null 2>&1
+        "$BIN" --preview "$OUT/$n-volume.png" "${P[@]}" tap=1756 >/dev/null 2>&1        # касание 🔊 — слайдер раскрыт
+        "$BIN" --preview "$OUT/$n-bright.png" "${P[@]}" tap=254 >/dev/null 2>&1         # касание ☀
+        "$BIN" --preview "$OUT/$n-viz.png" "${P[@]}" viz=bars mood=theme >/dev/null 2>&1 # касание «сейчас играет»
+        "$BIN" --preview "$OUT/$n-muted.png" "${P[@]}" muted=true playing=false >/dev/null 2>&1
+        echo "  + $n: fn, volume, bright, viz, muted"
+    fi
 done
-magick $(ls "$OUT"/[1-5]-*.png | grep -v -- -apps) "$OUT"/1-*-apps.png -background "#202020" -splice 0x14 -append "$OUT/all.png" 2>/dev/null && echo "лист: $OUT/all.png"
+magick $(ls "$OUT"/[1-9]-*.png | grep -vE -- "-(apps|fn|volume|bright|viz|muted)\.png") "$OUT"/1-*-apps.png -background "#202020" -splice 0x14 -append "$OUT/all.png" 2>/dev/null && echo "лист: $OUT/all.png"
 rm -rf "$W"

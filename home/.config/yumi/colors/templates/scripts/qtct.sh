@@ -16,3 +16,4 @@ for scheme in "${!color_scheme_target_paths[@]}"; do
     target_path="${color_scheme_target_paths[$scheme]}"
     [[ -f "${target_path}" ]] &&  cp "$wallbash_cache" "$target_path"
 done
+exit 0   # последняя проверка [[ -f ]] (нет legacy colors.conf) давала код 1 в журнале — ложная ошибка (19.10)

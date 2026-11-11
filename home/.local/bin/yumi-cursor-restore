@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# yumi-cursor-restore — страховка: вернуть обычный курсор Adwaita 20 (19.10; было Bibata-Modern-Ice 20) и его видимость.
+# Вызывают: Quickshell (вход растворился), yumi-lock --boot. С 18.10 курсор при загрузке прячет только сам
+# Hyprland (патч, HYPRLAND_HIDE_CURSOR_UNTIL_LOCK) до экрана блокировки; пустая тема yumi-empty и ожидание
+# движения мыши (yumi-cursor-wait) убраны — Quickshell запоминал пустую тему, курсора не было на блокировке.
+# Прежний вариант: yumi-cursor-restore.bak-cursor-20261018. Ключ --now оставлен для совместимости.
+hyprctl eval 'hl.env("XCURSOR_THEME", "Adwaita"); hl.env("HYPRCURSOR_THEME", "Adwaita")' >/dev/null
+hyprctl setcursor Adwaita 20 >/dev/null
+hyprctl eval 'hl.config({ cursor = { invisible = false } })' >/dev/null
+systemctl --user set-environment XCURSOR_THEME=Adwaita HYPRCURSOR_THEME=Adwaita XCURSOR_SIZE=20 HYPRCURSOR_SIZE=20
+dbus-update-activation-environment --systemd XCURSOR_THEME=Adwaita HYPRCURSOR_THEME=Adwaita XCURSOR_SIZE=20 HYPRCURSOR_SIZE=20
+gsettings set org.gnome.desktop.interface cursor-theme Adwaita

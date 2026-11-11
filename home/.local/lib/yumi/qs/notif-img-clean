@@ -1,0 +1,22 @@
+#!/usr/bin/env python3 -I
+"""notif-img-clean — убрать из ~/.cache/yumi-notify/img png, на которые больше не ссылается history.json.
+Вызывается из Quickshell (services/Notifs.qml) после записи журнала, не чаще раза в минуту.
+То же, что делал yumi-notify-log при сохранении. Ничего не печатает, ошибки — в stderr."""
+import json
+import os
+import sys
+
+hist = os.environ.get("YNL_HISTORY") or os.path.join(
+    os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "yumi-notify", "history.json")
+img_dir = os.path.join(os.path.dirname(hist), "img")
+try:
+    with open(hist, encoding="utf-8") as f:
+        used = {i.get("image") for i in json.load(f).get("items", [])}
+    for name in os.listdir(img_dir):
+        p = os.path.join(img_dir, name)
+        if name.endswith(".png") and p not in used:
+            os.unlink(p)
+except FileNotFoundError:
+    pass
+except Exception as e:
+    print("notif-img-clean:", e, file=sys.stderr)

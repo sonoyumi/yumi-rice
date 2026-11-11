@@ -1,0 +1,9 @@
+[Unit]
+Description=yumi: инкрементальный бэкап $HOME на LUKS-флешку (borg)
+Documentation=man:borg(1)
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/yumi-backup run
+Nice=10
+IOSchedulingClass=idle

@@ -3,8 +3,8 @@
 # ☕ включён: нет автоблокировки и сна; затемнение и выключение экрана — только если сессия заблокирована.
 # ☕ выключен: всё как в HyDE. DRY=1 — только напечатать, что было бы сделано (для проверки).
 # Откат: yumi-uninstall idle-fix
-caf()    { "$HOME/.local/bin/yumi-caffeine" state >/dev/null 2>&1; }
-locked() { pgrep -x hyprlock >/dev/null; }
+caf()    { [[ $("$HOME/.local/bin/yumi-caffeine" state 2>/dev/null) == true ]]; }   # 30.10: state всегда выходит с 0 — сравниваем текст
+locked() { "$HOME/.local/bin/yumi-lock" --status >/dev/null 2>&1; }   # Quickshell или запасной hyprlock
 FLAG="${XDG_RUNTIME_DIR:-/tmp}/yumi-idle-dimmed"
 run()    { if [[ -n $DRY ]]; then echo "DO: $*"; else "$@"; fi; }
 skip()   { [[ -n $DRY ]] && echo "SKIP: $1"; exit 0; }

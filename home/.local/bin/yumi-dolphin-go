@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# yumi-dolphin-go ПУТЬ — открыть папку в ТЕКУЩЕМ окне Dolphin (тачбар, слой Dolphin; 19.10.2026)
+# Как вручную: Ctrl+L (строка адреса) → путь → Enter. Окно Dolphin уже в фокусе — слой виден только при нём.
+p="${1:-$HOME}"; p="${p/#\~/$HOME}"
+wtype -M ctrl -k l -m ctrl && sleep 0.05 && wtype "$p" && wtype -k Return

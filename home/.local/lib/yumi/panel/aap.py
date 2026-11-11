@@ -128,6 +128,52 @@ MODELS = {0x2002: "AirPods", 0x200F: "AirPods 2", 0x2013: "AirPods 3", 0x200E: "
           0x201F: "AirPods Max (USB-C)", 0x2019: "AirPods 4", 0x201B: "AirPods 4 ANC"}
 
 
+CASE_DIR = os.path.join(os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")), "yumi-airpods")
+
+
+def remember_case(mac, battery):
+    """Запомнить заряд кейса, пока он на связи (крышка открыта, наушник внутри) — как айфон (18.10)."""
+    c = (battery or {}).get("case")
+    if not c or not c.get("available") or not 0 <= c.get("level", -1) <= 100:
+        return
+    try:
+        os.makedirs(CASE_DIR, exist_ok=True)
+        path = os.path.join(CASE_DIR, f"case-{mac.replace(':', '').upper()}.json")
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"level": c["level"], "status": c.get("status", "normal"), "seen": int(time.time())}, f)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def ago(sec):
+    sec = max(0, int(sec))
+    if sec < 90:
+        return "только что"
+    if sec < 3600:
+        return f"{sec // 60} мин назад"
+    if sec < 86400:
+        return f"{sec // 3600} ч назад"
+    return f"{sec // 86400} дн назад"
+
+
+def with_last_case(mac, battery):
+    """Кейс закрыт или далеко (status 04 / нет в пакете) — подставить последний известный заряд с пометкой last."""
+    battery = dict(battery or {})
+    c = battery.get("case")
+    if c and c.get("available"):
+        return battery
+    try:
+        with open(os.path.join(CASE_DIR, f"case-{mac.replace(':', '').upper()}.json")) as f:
+            saved = json.load(f)
+        battery["case"] = {"level": int(saved["level"]), "status": "last", "available": True, "last": True,
+                           "ago": ago(time.time() - int(saved.get("seen", 0)))}
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return battery
+
+
 class AAPError(Exception):
     pass
 
@@ -304,7 +350,7 @@ class Session(threading.Thread):
             settings = {k: list(v) for k, v in st.settings.items()}
             for ident, p in self.pending.items():     # показываем выбранное, пока наушники не подтвердят
                 settings[ident] = p["values"] + settings.get(ident, [0, 0, 0, 0])[len(p["values"]):]
-            return {"status": self.status, "message": self.message, "battery": dict(st.battery),
+            return {"status": self.status, "message": self.message, "battery": with_last_case(self.mac, st.battery),
                     "ear": dict(st.ear), "settings": settings, "model": st.model, "firmware": st.firmware,
                     "allowed": st.allowed_modes if S_ALLOWED in st.settings else list(MODES),
                     "pending": {k for k, p in self.pending.items() if not p["stale"]},
@@ -426,6 +472,8 @@ class Session(threading.Thread):
     def _feed(self, data):
         with self.lock:
             changed = self.state.handle(data)
+            if changed and data[4:6] == bytes([OP_BATTERY, 0]):
+                remember_case(self.mac, self.state.battery)
             for ident, p in list(self.pending.items()):     # эхо пришло — подтверждено
                 cur = self.state.settings.get(ident)
                 if p["sent"] and cur and all(cur[i] == v for i, v in enumerate(p["values"])):
@@ -494,6 +542,37 @@ def load_prefs():
         return {**{k: False for k in keys}, "iphone_mac": None}
 
 
+
+# ---------- Свои AirPods: ~/.config/yumi/airpods.conf (MAC=…) или первые сопряжённые «AirPods» ----------
+MAC_CONF = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")), "yumi", "airpods.conf")
+
+
+def _valid_mac(s):
+    s = s.strip().strip("\"'").upper()
+    return s if len(s) == 17 and s.count(":") == 5 else None
+
+
+def default_mac():
+    """MAC «своих» AirPods (19.10): строка MAC=… из ~/.config/yumi/airpods.conf, а без неё — первое сопряжённое
+    устройство, в имени которого есть «AirPods» (bluetoothctl devices Paired). Нет ни того, ни другого — None."""
+    try:
+        with open(MAC_CONF) as f:
+            for line in f:
+                k, _, v = line.partition("=")
+                if k.strip().upper() == "MAC" and _valid_mac(v):
+                    return _valid_mac(v)
+    except OSError:
+        pass
+    try:
+        out = subprocess.run(["bluetoothctl", "devices", "Paired"], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in out.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[0] == "Device" and "airpods" in parts[2].lower() and _valid_mac(parts[1]):
+            return _valid_mac(parts[1])
+    return None
+
 class EarPause:
     """Пауза плеера, когда наушник вынули, и продолжение, когда оба снова в ушах (как в zeffd).
     Работает только пока жива AAP-сессия — значит, для постоянной работы нужна фоновая служба
@@ -501,8 +580,9 @@ class EarPause:
 
     def __init__(self, dry=False):
         self.dry = dry
-        self.removed = None
+        self.worn = None             # сколько наушников в ушах (было)
         self.paused = None
+        self.paused_worn = 0
 
     def _ctl(self, *args):
         if self.dry:
@@ -512,18 +592,20 @@ class EarPause:
         return r.returncode == 0, r.stdout.strip()
 
     def update(self, ear):
+        """18.10: считаем наушники В УШАХ, а не «все ли в ушах». Раньше при одном наушнике в кейсе состояние
+        с самого начала было «вынут» — вынимание второго паузу не ставило."""
         if not ear or not shutil.which("playerctl"):
             return
-        removed = any(v != 0x00 for v in ear.values())
-        prev, self.removed = self.removed, removed
-        if prev is False and removed:
+        worn = sum(1 for v in ear.values() if v == 0x00)
+        prev, self.worn = self.worn, worn
+        if prev is not None and worn < prev and not self.paused:
             ok, players = self._ctl("--list-all")
             for p in players.splitlines() if ok else []:
                 if self._ctl("--player", p, "status")[1] == "Playing":
                     if self._ctl("--player", p, "pause")[0]:
-                        self.paused = p
+                        self.paused, self.paused_worn = p, prev
                     break
-        elif prev and not removed and self.paused:
+        elif self.paused and worn >= self.paused_worn:
             time.sleep(1.5)          # дать наушникам вернуть шумоподавление
             self._ctl("--player", self.paused, "play")
             self.paused = None

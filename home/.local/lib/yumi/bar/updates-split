@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# updates-split — текст пилюли обновлений с разбивкой по источникам: значок + число на каждый.
+# НЕ меняет yumi-update: вызывает его `check` (как и раньше — обновить кеш + взять class/tooltip),
+# затем читает разбивку из кеша $XDG_RUNTIME_DIR/yumi/update_info.json.
+# Значки (nf-md, легко поменять): pacman 󰣇 · AUR 󰆧 · flatpak 󰏖.
+set -uo pipefail
+INFO="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/yumi/update_info.json"
+BORG=~/.local/bin/yumi-update
+
+orig=$("$BORG" check 2>/dev/null)            # обновить кеш + получить class/tooltip
+cls=$(jq -r '.class // "updates"' <<<"$orig" 2>/dev/null)
+tip=$(jq -r '.tooltip // ""'     <<<"$orig" 2>/dev/null)
+
+glyph() {
+    case "$1" in
+        pacman)   printf '󰣇' ;;   # Arch (репозитории)
+        paru|yay) printf '󰆧' ;;   # AUR (собрано из исходников)
+        flatpak)  printf '󰏖' ;;   # flatpak (песочница)
+        *)        printf '󰏗' ;;
+    esac
+}
+
+text=""; total=0
+while read -r name count; do
+    [ -n "$name" ] || continue
+    total=$(( total + ${count:-0} ))
+    text+="$(glyph "$name") ${count:-0}  "
+done < <(jq -r '.managers[]? | "\(.name) \(.count)"' "$INFO" 2>/dev/null)
+text="${text%%  }"                            # убрать хвостовой отступ
+# когда обновлений нет — пусто (как у оригинала: пилюля прячется), иначе показываем все источники
+[ "$total" -eq 0 ] 2>/dev/null && text=""
+
+printf '{"text": %s, "tooltip": %s, "class": %s}\n' \
+    "$(jq -Rn --arg t "$text" '$t')" \
+    "$(jq -Rn --arg t "$tip"  '$t')" \
+    "$(jq -Rn --arg c "$cls"  '$c')"

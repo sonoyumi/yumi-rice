@@ -1,0 +1,391 @@
+#!/usr/bin/env -S python3 -I
+"""vpn — бэкенд меню VPN для Quickshell (yumi-rice 3.1). Логика и подписи — как у ~/.local/bin/yumi-menu-vpn
+(WireGuard-локации Cloudflare WARP / Proton Free через ~/.local/bin/yumi-vpn + Tailscale), только без GTK:
+процесс печатает JSON-строки состояния в stdout и читает команды JSON-строками из stdin.
+
+stdout (по строке на событие):
+  {"type":"state", ok, state:"Connected"|"Disconnected", region, regionName, regions:[{code, service, where, name}],
+                   ts: null | {installed, running, backend, self:{name, dns, ip4, ip6, os}, online, total,
+                               peers:[{name, os, icon, online, ip4, ip6, dns, link, ago, traffic, exitNode, ping}]}, dry}
+  {"type":"busy", on, region}      {"type":"toast", text, error}      {"type":"result", cmd, ok, msg}
+  {"type":"ping", ip, text}        (задержка до устройства: «38 мс · через DERP (fra)» — только чтение)
+stdin:
+  {"cmd":"up","region":"VPN WARP"}  {"cmd":"down"}  {"cmd":"ts","on":bool}  {"cmd":"ping","ip":…}
+  {"cmd":"active","on":bool} (опрос раз в 4 с только пока меню открыто)  {"cmd":"refresh"}  {"cmd":"quit"}
+Проверка: YP_DRYRUN=1 — подключение/отключение VPN и Tailscale только печатаются в stderr и имитируются;
+YP_FAKE_NET=1 — выдуманные состояние и устройства (включает и dry-run); YP_FAKE_VPN=on — VPN «подключён».
+Откат: yumi-uninstall quickshell"""
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import threading
+import time
+from datetime import datetime, timezone
+
+HOME = os.path.expanduser("~")
+VPN = os.path.join(HOME, ".local/bin/yumi-vpn")
+FAKE = os.environ.get("YP_FAKE_NET") == "1"
+DRYRUN = os.environ.get("YP_DRYRUN") == "1" or FAKE
+OUT_LOCK = threading.Lock()
+
+LOC_INFO = {"WARP": ("Cloudflare WARP", "")}
+PROTON_CC = {"NL": "Нидерланды", "JP": "Япония", "US": "США", "PL": "Польша", "RO": "Румыния", "CH": "Швейцария",
+             "NO": "Норвегия", "SG": "Сингапур", "MX": "Мексика", "CA": "Канада", "DE": "Германия"}
+OS_ICON = {"linux": "󰌽", "macos": "󰀵", "ios": "󰀷", "android": "󰀲", "windows": "󰖳"}
+
+FAKE_STATE = {"state": "Connected" if os.environ.get("YP_FAKE_VPN") == "on" else "Disconnected", "region": "VPN WARP"}
+FAKE_TS = {
+    "BackendState": "Running",
+    "Self": {"HostName": "laptop", "DNSName": "laptop.example.ts.net.", "OS": "linux", "Online": True,
+             "TailscaleIPs": ["100.64.0.10", "fd7a:115c:a1e0::a"]},
+    "Peer": {
+        "a": {"HostName": "localhost", "DNSName": "phone.example.ts.net.", "OS": "iOS", "Online": True,
+              "TailscaleIPs": ["100.64.0.21", "fd7a:115c:a1e0::21"], "Relay": "fra", "CurAddr": "",
+              "RxBytes": 1162412, "TxBytes": 1165364, "LastSeen": "0001-01-01T00:00:00Z", "_ping": "38 мс · через DERP (fra)"},
+        "b": {"HostName": "desktop", "DNSName": "desktop.example.ts.net.", "OS": "windows", "Online": True,
+              "TailscaleIPs": ["100.64.0.22"], "Relay": "ams", "CurAddr": "192.168.1.20:41641",
+              "RxBytes": 52_400_000, "TxBytes": 8_100_000, "LastSeen": "0001-01-01T00:00:00Z", "_ping": "4 мс · напрямую"},
+        "c": {"HostName": "tablet", "DNSName": "tablet.example.ts.net.", "OS": "android", "Online": False,
+              "TailscaleIPs": ["100.64.0.23"], "Relay": "fra", "CurAddr": "", "RxBytes": 0, "TxBytes": 0,
+              "LastSeen": "2026-10-05T18:20:00Z"},
+    },
+}
+
+
+def die_with_parent():
+    """Если Quickshell умер (SIGKILL, падение) — выйти вместе с ним, не висеть сиротой."""
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").prctl(1, signal.SIGTERM)       # PR_SET_PDEATHSIG
+    except Exception:
+        pass
+
+
+def emit(**obj):
+    with OUT_LOCK:
+        try:
+            sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+            sys.stdout.flush()
+        except (BrokenPipeError, OSError):
+            os._exit(0)
+
+
+def log(*a):
+    print(*a, file=sys.stderr, flush=True)
+
+
+def run(*cmd, timeout=5):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout
+    except Exception:
+        return ""
+
+
+def do(*cmd, timeout=30):
+    """Команда, меняющая сеть. В dry-run — только печать и имитация. → (успех, вывод)."""
+    if DRYRUN:
+        log("[dry-run] " + " ".join(repr(c) if (" " in c or not c) else c for c in cmd))
+        return True, ""
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return p.returncode == 0, (p.stderr or p.stdout).strip()
+    except Exception as e:
+        return False, str(e)
+
+
+# ---------- локации (как region_parts в yumi-menu-vpn) ----------
+def region_parts(name):
+    """'VPN WARP' → ('Cloudflare WARP', ''); 'VPN Proton NL' → ('Proton Free', 'Нидерланды')."""
+    short = name[4:] if name.startswith("VPN ") else name
+    if short in LOC_INFO:
+        return LOC_INFO[short]
+    if short.lower().startswith("proton"):
+        rest = short[6:].strip(" -")
+        cc = re.split(r"[-# ]", rest)[0].upper() if rest else ""
+        return "Proton Free", PROTON_CC.get(cc, rest)
+    return short, ""
+
+
+def region_name(name):
+    c, city = region_parts(name)
+    return f"{c} · {city}" if city else c
+
+
+def region_obj(code):
+    service, where = region_parts(code)
+    return {"code": code, "service": service, "where": where, "name": region_name(code)}
+
+
+def last_region():
+    try:
+        with open(os.path.join(HOME, ".local/state/yumi-vpn-last")) as f:
+            return f.read().strip() or "VPN WARP"
+    except OSError:
+        return "VPN WARP"
+
+
+def vpn_snapshot():
+    if FAKE:
+        return dict(FAKE_STATE, ok=True, regions=["VPN WARP", "VPN Proton NL", "VPN Proton JP"])
+    regions = [r for r in run(VPN, "list").splitlines() if r.strip()]
+    cur = run(VPN, "state").strip()
+    return {"ok": bool(regions), "state": "Connected" if cur else "Disconnected",
+            "region": cur or last_region(), "regions": regions}
+
+
+# ---------- Tailscale (только чтение) ----------
+def ts_snapshot():
+    if FAKE:
+        return FAKE_TS
+    if not shutil.which("tailscale"):
+        return None
+    try:
+        return json.loads(run("tailscale", "status", "--json", timeout=4) or "null")
+    except ValueError:
+        return None
+
+
+def ts_ping(ip):
+    """'pong from x (ip) via DERP(fra) in 45ms' → '45 мс · через DERP (fra)'."""
+    out = run("tailscale", "ping", "-c", "1", "--timeout", "3s", ip, timeout=5)
+    m = re.search(r"via (.+?) in ([\d.]+)ms", out)
+    if not m:
+        return "нет ответа" if out else "—"
+    via = m.group(1)
+    via = f"через DERP ({via[5:-1]})" if via.startswith("DERP(") else "напрямую"
+    return f"{round(float(m.group(2)))} мс · {via}"
+
+
+def peer_name(p):
+    dns = (p.get("DNSName") or "").split(".")[0]
+    return dns or p.get("HostName") or "?"
+
+
+def human_bytes(n):
+    for unit in ("Б", "КБ", "МБ", "ГБ"):
+        if n < 1024 or unit == "ГБ":
+            return f"{n:.0f} {unit}" if unit == "Б" else f"{n:.1f} {unit}".replace(".", ",")
+        n /= 1024
+    return str(n)
+
+
+def ago(iso):
+    try:
+        t = datetime.fromisoformat((iso or "").replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return ""
+    if t.year < 2000:
+        return ""
+    s = (datetime.now(timezone.utc) - t).total_seconds()
+    if s < 3600:
+        return f"{max(int(s // 60), 1)} мин назад"
+    if s < 86400:
+        return f"{int(s // 3600)} ч назад"
+    return f"{int(s // 86400)} д назад"
+
+
+def ts_obj(t, pings):
+    if t is None:
+        return None
+    running = t.get("BackendState") == "Running"
+    me = t.get("Self") or {}
+    ips = me.get("TailscaleIPs") or []
+    peers = sorted((t.get("Peer") or {}).values(), key=lambda p: (not p.get("Online"), peer_name(p).lower()))
+    out = []
+    for p in peers:
+        pips = p.get("TailscaleIPs") or []
+        v4 = next((i for i in pips if ":" not in i), "")
+        online = bool(p.get("Online"))
+        ping = pings.get(v4) or p.get("_ping") or ""
+        if online:
+            link = f"напрямую · {p['CurAddr']}" if p.get("CurAddr") else f"через DERP ({p.get('Relay') or '?'})"
+        else:
+            link = ""
+        out.append({"name": peer_name(p), "os": p.get("OS") or "—",
+                    "icon": OS_ICON.get((p.get("OS") or "").lower(), "󰟀"), "online": online,
+                    "ip4": v4, "ip6": next((i for i in pips if ":" in i), ""),
+                    "dns": (p.get("DNSName") or "").rstrip("."), "link": link, "ago": ago(p.get("LastSeen", "")),
+                    "traffic": f"↓ {human_bytes(p.get('RxBytes') or 0)} · ↑ {human_bytes(p.get('TxBytes') or 0)}",
+                    "exitNode": bool(p.get("ExitNodeOption")), "ping": ping})
+    return {"installed": True, "running": running, "backend": t.get("BackendState", "?"),
+            "self": {"name": me.get("HostName") or "", "dns": (me.get("DNSName") or "").rstrip("."),
+                     "ip4": next((i for i in ips if ":" not in i), ""), "ip6": next((i for i in ips if ":" in i), ""),
+                     "os": me.get("OS") or ""},
+            "online": sum(1 for p in peers if p.get("Online")), "total": len(peers), "peers": out}
+
+
+# ---------- служба ----------
+class Backend:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.vpn = {}
+        self.ts = None
+        self.pings = {}
+        self.connecting = False
+        self.active = True
+        self.pinged = False
+        self.stopping = False
+
+    def refresh(self):
+        threading.Thread(target=self._refresh_work, daemon=True).start()
+
+    def _refresh_work(self):
+        v, t = vpn_snapshot(), ts_snapshot()
+        with self.lock:
+            self.vpn, self.ts = v, t
+        self.send_state()
+        if not self.pinged:
+            self.pinged = True
+            self.ping_all()
+
+    def send_state(self):
+        v = self.vpn
+        if self.connecting:                     # во время подключения состояние не перекрывать
+            return
+        emit(type="state", ok=bool(v.get("ok")), state=v.get("state", "Disconnected"), region=v.get("region", ""),
+             regionName=region_name(v.get("region") or ""), regions=[region_obj(c) for c in v.get("regions") or []], ts=ts_obj(self.ts, self.pings), dry=DRYRUN)
+
+    def toast(self, text, error=False):
+        emit(type="toast", text=text, error=error)
+
+    def ping_all(self):
+        if FAKE or not self.ts:
+            return
+        for p in (self.ts.get("Peer") or {}).values():
+            ip = next((i for i in p.get("TailscaleIPs") or [] if ":" not in i), "")
+            if ip and p.get("Online"):
+                self.cmd_ping(ip, quiet=True)
+
+    def cmd_ping(self, ip, quiet=False):
+        if not ip:
+            return
+
+        def work():
+            if FAKE:
+                time.sleep(0.6)
+                text = next((p.get("_ping", "—") for p in FAKE_TS["Peer"].values() if ip in p["TailscaleIPs"]), "—")
+            else:
+                text = ts_ping(ip)
+            self.pings[ip] = text
+            emit(type="ping", ip=ip, text=text)
+        threading.Thread(target=work, daemon=True).start()
+
+    # -- VPN --
+    def cmd_up(self, region):
+        if self.connecting:
+            return
+        region = region or self.vpn.get("region") or "VPN WARP"
+        self.connecting = True
+        emit(type="busy", on=True, region=region)
+        self.toast(f"Подключаюсь: {region_name(region)}…")
+
+        def work():
+            ok, out = do(VPN, "up", region, timeout=30)
+            if DRYRUN:
+                time.sleep(2)
+                FAKE_STATE.update(state="Connected", region=region)
+                ok = True
+            else:
+                ok = run(VPN, "state").strip() == region
+            self.connecting = False
+            emit(type="busy", on=False, region=region)
+            if ok:
+                self.toast(f"VPN подключён: {region_name(region)}" + (" (проверка)" if DRYRUN else ""))
+            else:
+                self.toast("Не удалось подключиться" + (f": {out[:60]}" if out else ""), error=True)
+            emit(type="result", cmd="up", ok=ok, msg=out[:60])
+            if DRYRUN and not FAKE:
+                self.vpn.update(state="Connected" if ok else self.vpn.get("state"), region=region)
+                self.send_state()
+            else:
+                self.refresh()
+        threading.Thread(target=work, daemon=True).start()
+
+    def cmd_down(self):
+        def work():
+            ok, out = do(VPN, "down")
+            if DRYRUN:
+                FAKE_STATE.update(state="Disconnected")
+                self.toast("VPN отключён (проверка)")
+                if not FAKE:
+                    self.vpn.update(state="Disconnected")
+                    self.send_state()
+                    return
+            else:
+                self.toast("VPN отключён" if ok else f"Ошибка: {out[:60]}", error=not ok)
+            emit(type="result", cmd="down", ok=ok, msg=out[:60])
+            self.refresh()
+        threading.Thread(target=work, daemon=True).start()
+
+    # -- Tailscale --
+    def cmd_ts(self, on):
+        def work():
+            if on:
+                ok, out = do("tailscale", "up")
+                self.toast("Tailscale включается…" + (" (проверка)" if DRYRUN else ""), error=not ok)
+                if not DRYRUN:
+                    time.sleep(2)
+            else:
+                ok, out = do("tailscale", "down")
+                if DRYRUN:
+                    self.toast("Tailscale отключён (проверка)")
+                elif not ok:
+                    self.toast(f"Ошибка: {out[:60]}", error=True)
+                else:
+                    time.sleep(1)
+            emit(type="result", cmd="ts", ok=ok, msg=out[:60])
+            self.refresh()
+        threading.Thread(target=work, daemon=True).start()
+
+    # -- цикл --
+    def handle(self, line):
+        try:
+            c = json.loads(line)
+        except ValueError:
+            log("плохая команда:", line.strip())
+            return
+        cmd = c.get("cmd")
+        if cmd == "up":
+            self.cmd_up(str(c.get("region") or ""))
+        elif cmd == "down":
+            self.cmd_down()
+        elif cmd == "ts":
+            self.cmd_ts(bool(c.get("on")))
+        elif cmd == "ping":
+            self.cmd_ping(str(c.get("ip") or ""))
+        elif cmd == "active":
+            was, self.active = self.active, bool(c.get("on"))
+            if self.active and not was:
+                self.refresh()
+        elif cmd == "refresh":
+            self.refresh()
+        elif cmd == "quit":
+            self.stop()
+
+    def ticker(self):
+        while not self.stopping:
+            time.sleep(4)
+            if self.active and not self.connecting:
+                self.refresh()
+
+    def stop(self):
+        self.stopping = True
+        os._exit(0)
+
+    def main(self):
+        signal.signal(signal.SIGTERM, lambda *_: self.stop())
+        self.refresh()
+        threading.Thread(target=self.ticker, daemon=True).start()
+        for line in sys.stdin:
+            if line.strip():
+                self.handle(line)
+        self.stop()
+
+
+if __name__ == "__main__":
+    die_with_parent()
+    Backend().main()

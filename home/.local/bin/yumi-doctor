@@ -14,7 +14,7 @@
   -v, --verbose          показывать подробности и у проверок «в порядке»
 
 Что проверяется:
-  службы    ключевые службы systemd --user (Waybar, swaync, hypridle, hyprsunset, yumi-*) и всё, что включено
+  службы    ключевые службы systemd --user (Quickshell, hypridle, hyprsunset, yumi-*) и всё, что включено
             в graphical-session/default.target; таймеры из timers.target; `systemctl --user --failed`
   hyprland  `hyprctl configerrors` (только чтение; Hyprland --verify-config НЕ запускается — он выполняет
             exec-команды конфига)
@@ -23,17 +23,25 @@
   цвета     журнал последней смены ~/.cache/yumi/colors/apply.log: хуки с ошибкой (qtct «код 1» — норма);
             цвета от текущих обоев (applied = sha1 обоев); готовые комплекты цветов (как yumi-colors is-cached)
   обои      копии под экраны ~/.cache/yumi/theme/scaled/<sha1>-ШxВ.jpg для всех обоев `yumi-wallpaper list`
-  waybar    память (RSS всех процессов waybar; норма ~70–150 МБ)
+  quickshell бар, меню и уведомления: пакет qs, конфиг ~/.config/quickshell/yumi, экземпляр `qs -c yumi` жив,
+            colors.json не старше текущих обоев, в журнале экземпляра нет WARN/ошибок QML, память (предупреждение с 350 МБ),
+            Waybar не запущен вторым баром
   диск      свободное место на / и /home
   обновления `yumi-update check` (берёт кеш, если ему < 30 мин), сбой последней проверки
   снимки    snapper: последний снимок / и /home, snap-pac (снимок до/после pacman), таймер timeline
   pacman    забытая блокировка /var/lib/pacman/db.lck
+  тачбар    демон touchbard и агент touchbar-agent (только если есть Touch Bar)
+  touch id  fprintd, модули датчика, включён ли sudo по пальцу (только если установлен yumi-touchid)
+  заморозка yumi-freeze-check: закреплённые пакеты ядра, графики, Hyprland (только чтение)
+  защита    экран входа greetd и earlyoom
+  свет      yumi-light: служба, датчик света, подсветка клавиш
 НИКОГДА не запускает: Hyprland --verify-config, hyprlock, sudo.
 
 Отладка:
   YUMI_DOCTOR_DRY=1      --fix только печатает команды починки
   YUMI_DOCTOR_SKIP=a,b   пропустить проверки (id: services timers failed hyprland links colors bundles
-                         scaled waybar disk updates snapshots pacman)
+                         scaled quickshell disk updates snapshots pacman
+                         touchbar touchid freeze guards light)
 Код выхода: 0 — всё хорошо, 1 — есть предупреждения, 2 — есть проблемы.
 Откат: rm ~/.local/bin/yumi-doctor"""
 import hashlib
@@ -54,12 +62,14 @@ DRY = bool(os.environ.get("YUMI_DOCTOR_DRY"))
 SKIP = set(filter(None, os.environ.get("YUMI_DOCTOR_SKIP", "").split(",")))
 
 UNIT_DIR = os.path.join(CONFIG, "systemd/user")
-KEY_UNITS = ["waybar.service", "swaync.service", "hypridle.service", "hyprsunset.service",
-             "yumi-awww.service", "yumi-hyprlock-bg.service", "yumi-tray.service", "yumi-notify-log.service",
+# бар, меню, уведомления, трей и журнал уведомлений — всё в Quickshell (Waybar и swaync выключены с 3.1)
+BAR_UNITS = ["yumi-quickshell.service"]
+KEY_UNITS = BAR_UNITS + ["hypridle.service", "hyprsunset.service",
+             "yumi-awww.service",
              "yumi-airpods.service", "yumi-mouse-notify.service", "yumi-battery-notify.service"]
-UNIT_NAMES = {"waybar.service": "панель Waybar", "swaync.service": "уведомления (swaync)",
+UNIT_NAMES = {"yumi-quickshell.service": "бар, уведомления и меню (Quickshell)",
               "hypridle.service": "засыпание экрана (hypridle)", "hyprsunset.service": "ночной свет (hyprsunset)",
-              "yumi-awww.service": "демон обоев awww", "yumi-hyprlock-bg.service": "фон экрана блокировки",
+              "yumi-awww.service": "демон обоев awww",
               "yumi-tray.service": "трей", "yumi-notify-log.service": "журнал уведомлений",
               "yumi-airpods.service": "AirPods (нажатия, пауза, заряд)",
               "yumi-mouse-notify.service": "заряд мыши", "yumi-battery-notify.service": "заряд батареи",
@@ -77,7 +87,9 @@ SCALED = os.path.join(THEME, "scaled")
 UPDATE_INFO = os.path.join(RUNTIME, "yumi/update_info.json")
 NORMAL_HOOK_FAIL = {("qtct", 1)}           # qtct выходит с 1, когда Qt-программ нет — это норма
 LINK_OK = {"lock", ".parentlock", "SingletonLock", "SingletonCookie", "SingletonSocket"}
-WAYBAR_WARN_MB, WAYBAR_FAIL_MB = 220, 400
+QS_WARN_MB, QS_FAIL_MB = 350, 600               # Quickshell: QML-сцена + Qt
+QS_DIR = os.path.join(CONFIG, "quickshell/yumi")
+QS_COLORS = os.path.join(CONFIG, "yumi/quickshell/colors.json")
 HOME_SNAP_MAX_H = 3                        # /home снимается каждый час — старше 3 ч значит таймер стоит
 
 OK, INFO, WARN, FAIL = "ok", "info", "warn", "fail"
@@ -186,6 +198,11 @@ def c_services():
             continue
         if p.get("ActiveState") == "active":
             continue
+        # 29.10: разовая (oneshot) без RemainAfterExit после успешного запуска — inactive, это норма
+        # (yumi-greeter-sync: запускается по .path при правках lock/); activating — выполняется сейчас
+        if p.get("Type") == "oneshot" and (p.get("ActiveState") == "activating"
+                                           or (p.get("ActiveState") == "inactive" and p.get("Result") == "success")):
+            continue
         bad.append(u)
         st = p.get("ActiveState", "?")
         why = {"failed": "упала", "inactive": "остановлена", "activating": "запускается",
@@ -228,7 +245,13 @@ def c_failed():
     if rc != 0:
         return res(WARN, "systemd --user не отвечает — не проверено")
     units = [ln.split()[0] for ln in out.splitlines() if ln.strip()]
+    # разовые команды systemd-run (run-p123-i456.service, run-r….scope) — не службы стола: их только убрать из списка
+    runs = [u for u in units if re.match(r"run-[a-z]?[0-9a-f]", u)]
+    units = [u for u in units if u not in runs]
     if not units:
+        if runs:
+            return res(INFO, f"нет (разовых команд с ошибкой: {len(runs)} — это не службы)", runs,
+                       fix=[["systemctl", "--user", "reset-failed", u] for u in runs])
         return res(OK, "нет")
     props = unit_props(units)
     fix, details = [], []
@@ -417,31 +440,89 @@ def c_scaled():
                [[os.path.join(BIN, "yumi-wallpaper"), "scan"]])
 
 
-# ---------------- Waybar ----------------
-@check("waybar", "Память Waybar")
-def c_waybar():
-    rss, n = 0, 0
-    for pid in filter(str.isdigit, os.listdir("/proc")):
+# ---------------- Quickshell ----------------
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+@check("quickshell", "Quickshell")
+def c_quickshell():
+    if not shutil.which("qs"):
+        return res(FAIL, "пакет quickshell не установлен — бара нет", hint="sudo pacman -S quickshell")
+    if not os.path.isfile(os.path.join(QS_DIR, "shell.qml")):
+        return res(FAIL, "нет конфига ~/.config/quickshell/yumi/shell.qml — бара нет",
+                   hint="Восстановить из закрытого репо yumi-quickshell")
+    details, worst = [], OK
+    def note(st, text):
+        nonlocal worst
+        details.append(text)
+        if RANK[st] > RANK[worst]:
+            worst = st
+    # экземпляр: `qs list -c yumi -j` — живые процессы этого конфига
+    rc, out = sh("qs", "list", "-c", "yumi", "-j", timeout=5)
+    inst = []
+    try:
+        inst = json.loads(out) if rc == 0 and out.strip() else []
+    except ValueError:
+        inst = []
+    if isinstance(inst, dict):
+        inst = inst.get("instances", [])
+    if not inst:
+        return res(FAIL, "экземпляр qs -c yumi не запущен — бара нет", details,
+                   "systemctl --user restart yumi-quickshell.service; журнал: journalctl --user -u yumi-quickshell -n 50",
+                   [["systemctl", "--user", "start", "yumi-quickshell.service"]])
+    if len(inst) > 1:
+        note(WARN, f"запущено {len(inst)} экземпляра qs -c yumi — лишние: qs kill --pid PID")
+    pid = str(inst[0].get("pid", "")) if isinstance(inst[0], dict) else ""
+    # журнал экземпляра: WARN и ошибки QML
+    rc, log = sh("qs", "log", "-c", "yumi", "-t", "400", timeout=5)
+    bad = [ANSI.sub("", ln).strip() for ln in log.splitlines()
+           if re.search(r"\bWARN\b|ReferenceError|TypeError|SyntaxError", ln)
+           and "qt.qpa.wayland.textinput" not in ln       # шум Qt при потере фокуса окном меню — не ошибка QML
+           and "qt.qpa.services" not in ln                # портал при старте: app ID уже занят сеансом — не ошибка QML
+           and "quickshell.dbus.properties" not in ln     # пропал объект D-Bus (плеер/трей закрылся) — не ошибка QML
+           and "quickshell.service.notifications" not in ln   # сервер уведомлений ждёт имя на шине при старте
+           and "invalid StatusNotifierItem registration" not in ln]   # приложение криво регистрирует значок трея — не ошибка QML
+    if bad:
+        note(WARN, f"в журнале {len(bad)} WARN/ошибок QML, последняя: {bad[-1][:140]}")
+    # Waybar вторым баром поверх — клики уходят в старые меню
+    def comm(pid):
         try:
             with open(f"/proc/{pid}/comm") as f:
-                if f.read().strip() != "waybar":
-                    continue
-            with open(f"/proc/{pid}/status") as f:
-                for ln in f:
-                    if ln.startswith("VmRSS:"):
-                        rss += int(ln.split()[1]) * 1024
-                        n += 1
-        except (OSError, ValueError):
+                return f.read().strip()
+        except OSError:
+            return ""
+    if any(comm(p) == "waybar" for p in filter(str.isdigit, os.listdir("/proc"))):
+        note(FAIL, "Waybar запущен вторым баром — systemctl --user stop waybar.service; systemctl --user mask waybar.service")
+    # colors.json не старше текущей палитры (wall.dcol пишет yumi-colors при каждой смене обоев)
+    try:
+        cj = os.stat(QS_COLORS).st_mtime
+    except OSError:
+        cj = None
+        note(WARN, "нет ~/.config/yumi/quickshell/colors.json — yumi-colors render --only quickshell")
+    try:
+        pal = os.stat(os.path.join(THEME, "wall.dcol")).st_mtime   # палитру пишет yumi-colors при смене обоев
+    except OSError:
+        pal = None
+    if cj and pal and cj + 60 < pal:
+        note(WARN, f"colors.json старее палитры ({ago(cj)}) — yumi-colors render --only quickshell")
+    # память — только экземпляры этого конфига (dev-экземпляры qs -p … не считаем)
+    rss, n = 0, 0
+    for i in inst:
+        try:
+            with open(f"/proc/{i.get('pid')}/status") as f:
+                rss += next(int(ln.split()[1]) * 1024 for ln in f if ln.startswith("VmRSS:"))
+                n += 1
+        except (OSError, StopIteration, ValueError):
             pass
-    if not n:
-        return res(FAIL, "Waybar не запущен", hint="systemctl --user restart waybar.service")
     mb = rss / 1024 ** 2
-    text = f"{mb:.0f} МБ" + (f" ({n} процесса)" if n > 1 else "")
-    if mb >= WAYBAR_FAIL_MB:
-        return res(FAIL, f"{text} — сильно больше нормы (70–150 МБ)", hint="Похоже на утечку памяти. Перезапуск: yumi-waybar-restart")
-    if mb >= WAYBAR_WARN_MB:
-        return res(WARN, f"{text} — больше нормы (70–150 МБ)", hint="Если растёт и дальше — yumi-waybar-restart")
-    return res(OK, f"{text} — в норме (обычно 70–150 МБ)")
+    mem = f"{mb:.0f} МБ" + (f" ({n} процесса)" if n > 1 else "")
+    if mb >= QS_FAIL_MB:
+        note(FAIL, f"память {mem} — сильно больше нормы (120–250 МБ): утечка? yumi-bar-restart")
+    elif mb >= QS_WARN_MB:
+        note(WARN, f"память {mem} — больше нормы (120–250 МБ); если растёт — yumi-bar-restart")
+    summary = f"qs -c yumi работает (pid {pid}), память {mem}" if worst == OK else details[0]
+    return res(worst, summary, details if worst != OK else [],
+               "" if worst == OK else "Журнал: qs log -c yumi -t 100; перезапуск: yumi-bar-restart")
 
 
 # ---------------- диск ----------------
@@ -581,6 +662,120 @@ def c_pacman():
         return res(INFO, "идёт установка/проверка пакетов — это нормально")
     return res(WARN, f"забытая блокировка ({ago(os.path.getmtime(lck))}) — pacman не запустится",
                hint="Если pacman точно не работает: sudo rm /var/lib/pacman/db.lck")
+
+
+# ---------------- железо MacBook и защита (11.11.2026) ----------------
+def sys_active(unit, user=False):
+    """(есть ли такая служба, работает ли)."""
+    base = ["systemctl"] + (["--user"] if user else [])
+    rc, out = sh(*base, "show", unit, "-p", "LoadState", "-p", "ActiveState")
+    p = dict(ln.split("=", 1) for ln in out.splitlines() if "=" in ln)
+    return p.get("LoadState") == "loaded", p.get("ActiveState") == "active"
+
+
+@check("touchbar", "Тачбар")
+def c_touchbar():
+    try:
+        has_bar = "Touch Bar" in open("/proc/bus/input/devices").read()
+    except OSError:
+        has_bar = False
+    d_has, d_on = sys_active("touchbard.service")
+    a_has, a_on = sys_active("touchbar-agent.service", user=True)
+    if not has_bar and not d_has:
+        return res(INFO, "на этом компьютере нет Touch Bar")
+    if not d_has:
+        return res(INFO, "touchbard не установлен (полосой управляет другая программа)")
+    bad, fix = [], []
+    if not d_on:
+        bad.append("демон touchbard не работает (полоса пустая)")
+    if not a_has:
+        bad.append("агент touchbar-agent не установлен")
+    elif not a_on:
+        bad.append("агент touchbar-agent не работает (кнопки не обновляются)")
+        fix = [["systemctl", "--user", "reset-failed", "touchbar-agent.service"],
+               ["systemctl", "--user", "start", "touchbar-agent.service"]]
+    if bad:
+        return res(FAIL, "; ".join(bad),
+                   hint="Демон: sudo systemctl restart touchbard · журнал: journalctl -u touchbard -n 30", fix=fix)
+    rc, out = sh("journalctl", "--user", "-u", "touchbar-agent", "--since", "-10min", "-o", "cat", "--no-pager")
+    if "config error" in out:
+        return res(WARN, "работает, но в конфиге ошибка", [ln for ln in out.splitlines() if "config error" in ln][-2:],
+                   "Проверить ~/.config/touchbar/config.toml")
+    return res(OK, "демон и агент работают")
+
+
+@check("touchid", "Touch ID")
+def c_touchid():
+    if not os.path.isdir(os.path.join(HOME, ".local/src/yumi-touchid")) and not os.path.isdir("/run/yumi-touchid"):
+        return res(INFO, "не установлен")
+    if shutil.which("fprintd-verify") is None:
+        return res(FAIL, "нет fprintd — отпечаток не проверить",
+                   hint="Пакет fprintd закреплён в pacman.conf — вернуть из кэша или снимка")
+    missing = [m for m in ("apple_sep", "yumi_spi_hwcs") if not os.path.isdir(f"/sys/module/{m}")]
+    armed = os.path.exists("/run/yumi-touchid/armed")
+    details = ["sudo по пальцу: " + ("включён" if armed else "выключен (нет /run/yumi-touchid/armed)")]
+    if missing:
+        details.insert(0, "не загружены модули ядра: " + ", ".join(missing))
+        return res(WARN, "датчик не виден ядру — вход по пальцу не сработает", details,
+                   "Обычно лечит холодный старт (полное выключение и включение)")
+    return res(OK, "датчик на месте" + ("" if armed else ", sudo по пальцу выключен"), details)
+
+
+@check("freeze", "Замороженные пакеты")
+def c_freeze():
+    tool = os.path.join(BIN, "yumi-freeze-check")
+    if not os.path.exists(tool):
+        return res(INFO, "заморозка не настроена")
+    rc, out = sh(tool, timeout=40)
+    clean = [re.sub(r"\x1b\[[0-9;]*m", "", ln).strip() for ln in out.splitlines()]
+    bad = [ln for ln in clean if ln.startswith("✘")]
+    notes = [ln for ln in clean if ln.startswith("‣")]
+    if rc == 0 and not bad:
+        return res(OK, "ядро, графика, Hyprland и отпечаток закреплены"
+                   + (f" ({len(notes)} {plural(len(notes), 'примечание', 'примечания', 'примечаний')})" if notes else ""), notes)
+    n = len(bad) or 1
+    return res(FAIL, f"{n} {plural(n, 'проблема', 'проблемы', 'проблем')} с заморозкой", bad or clean[-5:],
+               "Подробно: yumi-freeze-check")
+
+
+@check("guards", "Вход и защита памяти")
+def c_guards():
+    bad, details = [], []
+    for unit, name, why in (("greetd.service", "экран входа greetd", "после выхода из сеанса будет чёрный экран"),
+                            ("earlyoom.service", "earlyoom", "при нехватке памяти система зависнет, а не закроет вкладку")):
+        has, on = sys_active(unit)
+        if not has:
+            details.append(f"{name}: не установлен")
+        elif not on:
+            bad.append(f"{name} не работает — {why}")
+        else:
+            details.append(f"{name}: работает")
+    if bad:
+        return res(WARN, "; ".join(bad), details, "Запустить: sudo systemctl start <служба>")
+    return res(OK, "экран входа и защита от нехватки памяти работают", details)
+
+
+@check("light", "Свет клавиш")
+def c_light():
+    if not os.path.isdir("/sys/class/leds/kbd_backlight"):
+        return res(INFO, "у клавиатуры нет подсветки")
+    tool = os.path.join(BIN, "yumi-light")
+    if not os.path.exists(tool):
+        return res(INFO, "yumi-light не установлен (подсветка только вручную)")
+    has, on = sys_active("yumi-light.service", user=True)
+    if not on:
+        return res(WARN, "служба yumi-light не работает — нет автояркости и вспышек",
+                   fix=[["systemctl", "--user", "reset-failed", "yumi-light.service"],
+                        ["systemctl", "--user", "start", "yumi-light.service"]])
+    rc, out = sh(tool, "status", timeout=5)
+    try:
+        st = json.loads(out)
+    except ValueError:
+        return res(WARN, "служба работает, но не отвечает", hint="journalctl --user -u yumi-light -n 20")
+    if st.get("lux") is None:
+        return res(WARN, "датчик света не читается — автояркость не работает",
+                   hint="Проверить /sys/bus/iio/devices/*/in_illuminance_input")
+    return res(OK, f"автояркость {'включена' if st.get('auto') else 'выключена'}, свет {st['lux']} лк, клавиши {st.get('kbd')} %")
 
 
 # ---------------- запуск ----------------

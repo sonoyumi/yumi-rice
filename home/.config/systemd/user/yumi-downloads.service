@@ -1,0 +1,14 @@
+[Unit]
+Description=yumi: готовые загрузки — остров «Загружено», раскладка ~/Downloads (выкл. по умолч.), стопка последних
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/python3 -I %h/.local/lib/yumi/qs/downloads run
+Restart=on-failure
+RestartSec=3
+Slice=app-graphical.slice
+
+[Install]
+WantedBy=graphical-session.target

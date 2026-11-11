@@ -1,0 +1,8 @@
+CalendarMenu 1.0 CalendarMenu.qml
+CalData 1.0 CalData.qml
+MonthGrid 1.0 MonthGrid.qml
+EventRow 1.0 EventRow.qml
+IconBtn 1.0 IconBtn.qml
+SpinField 1.0 SpinField.qml
+RemindSeg 1.0 RemindSeg.qml
+Cal 1.0 Cal.js

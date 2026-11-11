@@ -1,0 +1,787 @@
+#!/usr/bin/env -S python3 -I
+"""wifi — бэкенд меню Wi-Fi для Quickshell (yumi-rice 3.1). Логика та же, что у ~/.local/bin/yumi-menu-wifi
+(разбор nmcli, nmcli monitor, тексты ошибок), только без GTK: процесс печатает JSON-строки состояния в stdout
+и читает команды JSON-строками из stdin.
+
+stdout (по строке на событие):
+  {"type":"state", radio, dev, cur, active:[имя,uuid], nets:[{ssid,signal,security,band,saved,inuse,…}], hidden, saved, dry}
+  {"type":"details", ip4, gw, dns, mac, ts:{state,ip}, conf:{autoconnect, metered}, rate, band, chan, freq, security}
+  {"type":"busy", ssid|null}   {"type":"scanning", on}   {"type":"result", cmd, ssid, ok, msg}
+  {"type":"toast", text, error}   {"type":"password", text}
+stdin:
+  {"cmd":"connect","ssid":…,"password":…}  {"cmd":"disconnect"}  {"cmd":"forget"[,"uuid":…]}  {"cmd":"radio","on":bool}
+  {"cmd":"scan"}  {"cmd":"details"}  {"cmd":"refresh"}  {"cmd":"modify","key":"autoconnect|metered","value":bool}
+  {"cmd":"show_password"}  {"cmd":"quit"}
+Проверка: YP_DRYRUN=1 — команды, меняющие сеть, только печатаются в stderr и имитируются;
+YP_DRYRUN_FAIL=1 — имитация «неверный пароль»; YP_FAKE_NETS=a,open:b — выдуманные сети.
+Откат: yumi-uninstall quickshell"""
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import threading
+import time
+
+DRYRUN = os.environ.get("YP_DRYRUN") == "1"
+DRYRUN_FAIL = DRYRUN and os.environ.get("YP_DRYRUN_FAIL") == "1"
+FAKE_NETS = [s for s in os.environ.get("YP_FAKE_NETS", "").split(",") if s] if DRYRUN else []
+OUT_LOCK = threading.Lock()
+
+
+def die_with_parent():
+    """Если Quickshell умер (SIGKILL, падение) — выйти вместе с ним, не висеть сиротой."""
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").prctl(1, signal.SIGTERM)       # PR_SET_PDEATHSIG
+    except Exception:
+        pass
+
+
+def emit(**obj):
+    with OUT_LOCK:
+        try:
+            sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+            sys.stdout.flush()
+        except (BrokenPipeError, OSError):          # QML закрыл канал — выходим
+            os._exit(0)
+
+
+def log(*a):
+    print(*a, file=sys.stderr, flush=True)
+
+
+# ---------- nmcli: разбор и чтение (как в yumi-menu-wifi) ----------
+def split_terse(line):
+    out, cur, esc = [], [], False
+    for ch in line:
+        if esc:
+            cur.append(ch)
+            esc = False
+        elif ch == "\\":
+            esc = True
+        elif ch == ":":
+            out.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+    out.append("".join(cur))
+    return out
+
+
+def run(*cmd, timeout=5):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout
+    except Exception:
+        return ""
+
+
+def nm(*args, timeout=5):
+    return run("nmcli", *args, timeout=timeout)
+
+
+def band_of(freq):
+    try:
+        f = int(str(freq).split()[0])
+    except (ValueError, IndexError):
+        return "", 0
+    return ("2.4 ГГц" if f < 3000 else "5 ГГц" if f < 5925 else "6 ГГц"), f
+
+
+def security_text(sec):
+    sec = (sec or "").strip()
+    if not sec or sec == "--":
+        return "Открытая"
+    return sec.replace(" ", " / ")
+
+
+def wifi_device():
+    for line in nm("-t", "-f", "DEVICE,TYPE", "dev").splitlines():
+        f = split_terse(line)
+        if len(f) >= 2 and f[1] == "wifi":
+            return f[0]
+    return "wlan0"
+
+
+PROFILE_SSID = {}
+
+
+def saved_profiles():
+    """ssid → (имя профиля, uuid) самого свежего сохранённого профиля Wi-Fi."""
+    best = {}
+    for line in nm("-t", "-f", "NAME,UUID,TYPE,TIMESTAMP", "connection", "show").splitlines():
+        f = split_terse(line)
+        if len(f) < 4 or f[2] != "802-11-wireless":
+            continue
+        name, uuid, ts = f[0], f[1], int(f[3] or 0)
+        if uuid not in PROFILE_SSID:
+            PROFILE_SSID[uuid] = nm("-g", "802-11-wireless.ssid", "connection", "show", "uuid", uuid).strip()
+        ssid = PROFILE_SSID[uuid] or name
+        if ssid not in best or ts > best[ssid][2]:
+            best[ssid] = (name, uuid, ts)
+    return {s: (n, u) for s, (n, u, _t) in best.items()}
+
+
+def snapshot(dev):
+    radio = nm("radio", "wifi").strip() == "enabled"
+    saved = saved_profiles()
+    active = None
+    for line in nm("-t", "-f", "NAME,UUID,TYPE,DEVICE", "connection", "show", "--active").splitlines():
+        f = split_terse(line)
+        if len(f) >= 4 and f[2] == "802-11-wireless" and f[3] == dev:
+            active = (f[0], f[1])
+    nets, hidden, cur = {}, 0, None
+    if radio:
+        out = nm("-t", "-f", "IN-USE,SSID,SIGNAL,SECURITY,CHAN,FREQ,RATE,BSSID", "dev", "wifi", "list",
+                 "--rescan", "no", "ifname", dev)
+        for line in out.splitlines():
+            f = split_terse(line)
+            if len(f) < 8:
+                continue
+            inuse, ssid, sig, sec, chan, freq, rate, bssid = f[:8]
+            ap = {"ssid": ssid, "signal": int(sig or 0), "security": sec if sec != "--" else "",
+                  "chan": chan, "freq": freq, "rate": rate, "bssid": bssid, "inuse": inuse.strip() == "*"}
+            if not ssid:
+                hidden += 1
+                continue
+            if ap["inuse"]:
+                cur = ap
+            old = nets.get(ssid)
+            if old is None or (ap["inuse"] and not old["inuse"]) or \
+                    (not old["inuse"] and ap["signal"] > old["signal"]):
+                nets[ssid] = ap
+        for i, name in enumerate(FAKE_NETS):
+            sec = "WPA2"
+            if name.startswith("open:"):
+                name, sec = name[5:], ""
+            nets.setdefault(name, {"ssid": name, "signal": 70 - i * 15, "security": sec, "chan": "36",
+                                   "freq": "5180 MHz", "rate": "540 Mbit/s", "bssid": "", "inuse": False})
+    if active and cur is None:
+        ssid = next((s for s, (_n, u) in saved.items() if u == active[1]), active[0])
+        cur = {"ssid": ssid, "signal": 0, "security": "", "chan": "", "freq": "", "rate": "", "bssid": "",
+               "inuse": True}
+    if not active:
+        cur = None
+    for ap in nets.values():
+        ap["saved"] = bool(saved.get(ap["ssid"]))
+        ap["band"] = band_of(ap["freq"])[0]
+        ap["secText"] = security_text(ap["security"])
+    if cur:
+        cur["saved"] = True
+        cur["band"] = band_of(cur["freq"])[0]
+        cur["secText"] = security_text(cur["security"])
+    order = sorted(nets.values(), key=lambda a: (not a["inuse"], -a["signal"], a["ssid"].lower()))
+    return {"radio": radio, "active": active, "cur": cur, "nets": order, "hidden": hidden,
+            "saved": len(saved), "savedMap": saved}
+
+
+def device_details(dev):
+    info = {}
+    for line in nm("-t", "-f", "GENERAL.HWADDR,IP4.ADDRESS,IP4.GATEWAY,IP4.DNS", "dev", "show", dev).splitlines():
+        k, _, v = line.partition(":")
+        info.setdefault(k.split("[")[0], []).append(v.replace("\\:", ":"))
+    ts = {"state": False, "ip": ""}
+    if shutil.which("tailscale"):
+        try:
+            st = json.loads(run("tailscale", "status", "--json", timeout=3) or "{}")
+            ts["state"] = st.get("BackendState") == "Running"
+        except ValueError:
+            pass
+        ips = run("tailscale", "ip", "-4", timeout=3).strip().splitlines()
+        ts["ip"] = ips[0] if ips else ""
+    return {"mac": (info.get("GENERAL.HWADDR") or [""])[0], "ip4": ", ".join(info.get("IP4.ADDRESS", [])),
+            "gw": (info.get("IP4.GATEWAY") or [""])[0], "dns": ", ".join(info.get("IP4.DNS", [])), "ts": ts}
+
+
+def profile_conf(uuid):
+    conf = {}
+    for line in nm("-t", "-f", "connection.autoconnect,connection.metered,connection.autoconnect-priority",
+                   "connection", "show", "uuid", uuid).splitlines():
+        k, _, v = line.partition(":")
+        conf[k] = v.strip()
+    return {"autoconnect": conf.get("connection.autoconnect", "yes") == "yes",
+            "metered": conf.get("connection.metered") == "yes"}
+
+
+# ---------- сохранённые профили (как в yumi-menu-wifi: list_profiles, profile_settings, ago, validate_ip) ----------
+PROFILE_FIELDS = ("connection.autoconnect", "connection.autoconnect-priority", "connection.metered",
+                  "ipv4.method", "ipv4.addresses", "ipv4.gateway", "ipv4.dns",
+                  "802-11-wireless.cloned-mac-address", "802-11-wireless-security.key-mgmt")
+
+
+def list_profiles():
+    """Все сохранённые Wi-Fi профили: [{name, uuid, ts, ssid, auto}] — и сети, которых сейчас нет рядом."""
+    out = []
+    for line in nm("-t", "-f", "NAME,UUID,TYPE,TIMESTAMP,AUTOCONNECT", "connection", "show").splitlines():
+        f = split_terse(line)
+        if len(f) < 5 or f[2] != "802-11-wireless":
+            continue
+        if f[1] not in PROFILE_SSID:
+            PROFILE_SSID[f[1]] = nm("-g", "802-11-wireless.ssid", "connection", "show", "uuid", f[1]).strip()
+        out.append({"name": f[0], "uuid": f[1], "ts": int(f[3] or 0), "ssid": PROFILE_SSID[f[1]] or f[0],
+                    "auto": f[4] == "yes"})
+    if DRYRUN:
+        for i in range(int(os.environ.get("YP_FAKE_PROFILES", "0") or 0)):
+            out.append({"name": f"Тест-сеть {i + 1}", "uuid": f"fake-{i}", "ts": int(time.time()) - 3600 * 7 * (i + 1),
+                        "ssid": f"Тест-сеть {i + 1}", "auto": i % 3 != 0})
+    return out
+
+
+def profile_settings(uuid):
+    if uuid.startswith("fake-"):
+        return {"connection.autoconnect": "yes", "ipv4.method": "auto",
+                "802-11-wireless-security.key-mgmt": "wpa-psk"}
+    conf = {}
+    for line in nm("-t", "-f", ",".join(PROFILE_FIELDS), "connection", "show", "uuid", uuid).splitlines():
+        k, _, v = line.partition(":")
+        conf[k] = v.replace("\\:", ":").strip()
+    return conf
+
+
+def plural(n, one, few, many):
+    n = abs(n)
+    if n % 10 == 1 and n % 100 != 11:
+        return one
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return few
+    return many
+
+
+def ago(ts):
+    if not ts:
+        return "ещё не подключались"
+    s = max(time.time() - ts, 0)
+    if s < 90:
+        t = "только что"
+    elif s < 3600:
+        t = f"{int(s // 60)} мин назад"
+    elif s < 86400:
+        t = f"{int(s // 3600)} ч назад"
+    elif s < 30 * 86400:
+        d = int(s // 86400)
+        t = f"{d} {plural(d, 'день', 'дня', 'дней')} назад"
+    elif s < 365 * 86400:
+        t = f"{int(s // (30 * 86400))} мес. назад"
+    else:
+        y = int(s // (365 * 86400))
+        t = f"{y} {plural(y, 'год', 'года', 'лет')} назад"
+    return "подключались " + t
+
+
+def validate_ip(addr, gw, dns):
+    """Проверка полей «IP вручную». → {addr, gw, dns} или {error, bad}."""
+    import ipaddress
+    addr = addr.strip()
+    if not addr:
+        return {"error": "Укажите адрес", "bad": "addr"}
+    if "/" not in addr:
+        addr += "/24"
+    try:
+        iface = ipaddress.IPv4Interface(addr)
+    except ValueError:
+        return {"error": "Адрес — вида 192.168.1.50/24", "bad": "addr"}
+    net = iface.network
+    if net.prefixlen < 31 and iface.ip in (net.network_address, net.broadcast_address):
+        return {"error": "Это адрес сети или широковещательный — выберите другой", "bad": "addr"}
+    gw = gw.strip()
+    if gw:
+        try:
+            g = ipaddress.IPv4Address(gw)
+        except ValueError:
+            return {"error": "Шлюз — вида 192.168.1.1", "bad": "gw"}
+        if g not in net:
+            return {"error": f"Шлюз не из сети {net}", "bad": "gw"}
+        if g == iface.ip:
+            return {"error": "Шлюз совпадает с адресом", "bad": "gw"}
+    servers = [x for x in re.split(r"[,\s]+", dns.strip()) if x]
+    for x in servers:
+        try:
+            ipaddress.IPv4Address(x)
+        except ValueError:
+            return {"error": f"DNS «{x}» — не IPv4-адрес", "bad": "dns"}
+    return {"addr": str(iface), "gw": gw, "dns": ",".join(servers)}
+
+
+def change(cmd, fake_ok=True, fake_err=""):
+    """Команда, меняющая сеть. В YP_DRYRUN=1 — только печать в stderr и имитация. → (успех, ошибка)."""
+    if DRYRUN:
+        shown = ["•••" if i and cmd[i - 1] == "password" else c for i, c in enumerate(cmd)]
+        log("[dry-run] " + " ".join(repr(c) if (" " in c or not c) else c for c in shown))
+        time.sleep(1.2)
+        if DRYRUN_FAIL and not fake_err:
+            return False, "Error: Connection activation failed: Secrets were required, but not provided."
+        return fake_ok, fake_err
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        return p.returncode == 0, (p.stderr or p.stdout).strip()
+    except Exception as e:
+        return False, str(e)
+
+
+def human_error(err):
+    e = err.lower()
+    if "secrets were required" in e or "802-11-wireless-security.psk" in e or "no secrets" in e:
+        return "Неверный пароль"
+    if "no network with ssid" in e:
+        return "Сеть не найдена — обновите список"
+    if "timeout" in e or "timed out" in e:
+        return "Сеть не ответила вовремя"
+    m = re.search(r"Error:\s*(.+)", err)
+    return (m.group(1) if m else err or "Не удалось").strip()[:90]
+
+
+# ---------- служба ----------
+class Backend:
+    def __init__(self):
+        self.dev = wifi_device()
+        self.data = None
+        self.lock = threading.Lock()
+        self.refreshing = False
+        self.again = False
+        self.timer = None
+        self.scanning = False
+        self.busy = None
+        self.sim_radio = None                # dry-run: имитация положения радио
+        self.monitor_proc = None
+        self.stopping = False
+        self.want_details = False
+        self.sim_conf = {}                   # dry-run: имитация настроек профилей (uuid → {поле nmcli: значение})
+        self.sim_prof = {}                   # dry-run: имитация полей списка профилей
+        self.sim_removed = set()             # dry-run: «забытые» профили
+
+    # -- состояние --
+    def request_refresh(self):
+        with self.lock:
+            if self.refreshing:
+                self.again = True
+                return
+            self.refreshing = True
+        threading.Thread(target=self._refresh_work, daemon=True).start()
+
+    def _refresh_work(self):
+        data = snapshot(self.dev)
+        if self.sim_radio is not None:
+            data["radio"] = self.sim_radio
+            if not self.sim_radio:
+                data.update(cur=None, active=None, nets=[], hidden=0)
+        self.data = data
+        self.send_state()
+        if self.want_details:
+            self.want_details = False
+            self.cmd_details()
+        with self.lock:
+            self.refreshing = False
+            again, self.again = self.again, False
+        if again:
+            self.schedule_refresh(0.1)
+
+    def schedule_refresh(self, delay=0.4):
+        """Дебаунс: пачка событий nmcli monitor → одно обновление."""
+        with self.lock:
+            if self.timer is not None:
+                return
+            self.timer = threading.Timer(delay, self._fire)
+            self.timer.daemon = True
+            self.timer.start()
+
+    def _fire(self):
+        with self.lock:
+            self.timer = None
+        self.request_refresh()
+
+    def send_state(self):
+        d = self.data
+        nets = [{k: v for k, v in ap.items()} for ap in d["nets"]]
+        emit(type="state", radio=d["radio"], dev=self.dev, cur=d["cur"], active=d["active"], nets=nets,
+             hidden=d["hidden"], saved=d["saved"], busy=self.busy, dry=DRYRUN)
+
+    def monitor(self):
+        try:
+            self.monitor_proc = subprocess.Popen(["nmcli", "monitor"], stdout=subprocess.PIPE, text=True,
+                                                 stderr=subprocess.DEVNULL)
+            for _line in self.monitor_proc.stdout:
+                if self.stopping:
+                    break
+                self.schedule_refresh()
+        except Exception as e:
+            log("nmcli monitor:", e)
+
+    def set_busy(self, ssid):
+        self.busy = ssid
+        emit(type="busy", ssid=ssid)
+
+    def toast(self, text, error=False):
+        emit(type="toast", text=text, error=error)
+
+    # -- команды --
+    def cmd_scan(self):
+        if self.scanning or not (self.data and self.data["radio"]):
+            return
+        self.scanning = True
+        emit(type="scanning", on=True)
+
+        def work():
+            ok, err = True, ""
+            try:
+                p = subprocess.run(["nmcli", "dev", "wifi", "rescan", "ifname", self.dev],
+                                   capture_output=True, text=True, timeout=15)
+                ok, err = p.returncode == 0, p.stderr.strip()
+            except Exception as e:
+                ok, err = False, str(e)
+            time.sleep(3.5)              # rescan только запускает поиск; результаты приходят за пару секунд
+            self.scanning = False
+            emit(type="scanning", on=False)
+            if not ok and "not allowed" not in err.lower():
+                self.toast(human_error(err), error=True)
+            self.schedule_refresh(0.05)
+        threading.Thread(target=work, daemon=True).start()
+
+    def cmd_radio(self, on):
+        self.toast("Включаю Wi-Fi…" if on else "Выключаю Wi-Fi…")
+
+        def work():
+            ok, err = change(["nmcli", "radio", "wifi", "on" if on else "off"])
+            if ok and DRYRUN:
+                self.sim_radio = on
+                self.toast(("Wi-Fi включён" if on else "Wi-Fi выключен") + " (проверка)")
+            elif not ok:
+                self.toast(human_error(err), error=True)
+            emit(type="result", cmd="radio", ok=ok, msg="" if ok else human_error(err), ssid="")
+            self.request_refresh()
+        threading.Thread(target=work, daemon=True).start()
+
+    def cmd_connect(self, ssid, password):
+        if self.busy or not self.data:
+            return
+        saved = self.data.get("savedMap", {}).get(ssid)
+        ap = next((a for a in self.data["nets"] if a["ssid"] == ssid), None)
+        if saved and password is None:
+            self.connect_saved(ssid, saved[1])
+        elif ap and ap["security"] and password is None:
+            emit(type="result", cmd="connect", ssid=ssid, ok=False, msg="need_password")
+        else:
+            self.connect_new(ssid, password)
+
+    def connect_saved(self, ssid, uuid):
+        self.set_busy(ssid)
+        self.toast(f"Подключаюсь к {ssid}…")
+
+        def work():
+            ok, err = change(["nmcli", "-w", "40", "connection", "up", "uuid", uuid, "ifname", self.dev])
+            self.finish_connect("connect", ssid, ok, err)
+        threading.Thread(target=work, daemon=True).start()
+
+    def connect_new(self, ssid, password):
+        if password is not None and not 8 <= len(password) <= 63:
+            emit(type="result", cmd="connect", ssid=ssid, ok=False, msg="Пароль WPA — от 8 до 63 символов")
+            return
+        self.set_busy(ssid)
+        self.toast(f"Подключаюсь к {ssid}…")
+        before = set(PROFILE_SSID)
+
+        def work():
+            cmd = ["nmcli", "-w", "40", "dev", "wifi", "connect", ssid, "ifname", self.dev]
+            if password is not None:
+                cmd[7:7] = ["password", password]
+            ok, err = change(cmd)
+            if not ok and not DRYRUN:            # неудачная попытка оставляет «битый» профиль — убрать только его
+                saved_profiles()
+                for uuid in set(PROFILE_SSID) - before:
+                    if PROFILE_SSID.get(uuid) == ssid:
+                        subprocess.run(["nmcli", "connection", "delete", "uuid", uuid], capture_output=True)
+            self.finish_connect("connect", ssid, ok, err)
+        threading.Thread(target=work, daemon=True).start()
+
+    def finish_connect(self, cmd, ssid, ok, err):
+        self.set_busy(None)
+        msg = human_error(err) if not ok else ""
+        if ok:
+            self.toast(f"Подключено: {ssid}" + (" (проверка)" if DRYRUN else ""))
+        else:
+            self.toast(f"{ssid}: {msg}", error=True)
+        emit(type="result", cmd=cmd, ssid=ssid, ok=ok, msg=msg)
+        self.request_refresh()
+
+    def cmd_disconnect(self):
+        d = self.data
+        if not d or not d["active"]:
+            return
+        uuid = d["active"][1]
+        self.toast("Отключаюсь…")
+
+        def work():
+            ok, err = change(["nmcli", "connection", "down", "uuid", uuid])
+            self.toast("Отключено" + (" (проверка)" if DRYRUN else "") if ok else human_error(err), error=not ok)
+            emit(type="result", cmd="disconnect", ssid="", ok=ok, msg="" if ok else human_error(err))
+            self.request_refresh()
+        threading.Thread(target=work, daemon=True).start()
+
+    def cmd_forget(self, uuid=None):
+        d = self.data
+        if uuid is None:
+            if not d or not d["active"]:
+                return
+            uuid = d["active"][1]
+        ssid = PROFILE_SSID.get(uuid) or (d["cur"]["ssid"] if d and d["cur"] else "")
+        self.toast("Забываю сеть…")
+
+        def work():
+            ok, err = change(["nmcli", "connection", "delete", "uuid", uuid])
+            if ok:
+                PROFILE_SSID.pop(uuid, None)
+                self.toast(f"Сеть «{ssid}» забыта" + (" (проверка)" if DRYRUN else ""))
+            else:
+                self.toast(human_error(err), error=True)
+            emit(type="result", cmd="forget", ssid=ssid, ok=ok, msg="" if ok else human_error(err))
+            self.request_refresh()
+        threading.Thread(target=work, daemon=True).start()
+
+    def cmd_details(self):
+        d = self.data
+        if d is None:                        # состояние ещё не прочитано — ответить после первого снимка
+            self.want_details = True
+            return
+        if not d["cur"]:
+            return
+
+        def work():
+            det = device_details(self.dev)
+            uuid = d["active"][1] if d["active"] else None
+            conf = profile_conf(uuid) if uuid else {"autoconnect": True, "metered": False}
+            sim = self.sim_conf.get(uuid, {})            # dry-run: те же поля nmcli, что на странице профиля
+            if "connection.autoconnect" in sim:
+                conf["autoconnect"] = sim["connection.autoconnect"] == "yes"
+            if "connection.metered" in sim:
+                conf["metered"] = sim["connection.metered"] == "yes"
+            c = d["cur"]
+            band, f = band_of(c["freq"])
+            emit(type="details", uuid=uuid, conf=conf, rate=c["rate"].replace("Mbit/s", "Мбит/с"),
+                 band=band, chan=c["chan"], freq=f, security=security_text(c["security"]), **det)
+        threading.Thread(target=work, daemon=True).start()
+
+    def cmd_modify(self, key, value):
+        d = self.data
+        if not d or not d["active"]:
+            return
+        uuid = d["active"][1]
+        if key == "autoconnect":
+            args, text = ["connection.autoconnect", "yes" if value else "no"], \
+                "Автоподключение " + ("включено" if value else "выключено")
+        elif key == "metered":
+            args, text = ["connection.metered", "yes" if value else "unknown"], \
+                "Лимитное подключение " + ("включено" if value else "выключено")
+        else:
+            return
+
+        def work():
+            ok, err = change(["nmcli", "connection", "modify", "uuid", uuid, *args])
+            if ok and DRYRUN:
+                self.sim_conf.setdefault(uuid, {})[args[0]] = args[1]
+            self.toast(text + (" (проверка)" if DRYRUN else "") if ok else human_error(err), error=not ok)
+            emit(type="result", cmd="modify", ssid=key, ok=ok, msg="" if ok else human_error(err))
+            self.cmd_details()
+        threading.Thread(target=work, daemon=True).start()
+
+    # -- сохранённые сети --
+    def current_uuid(self):
+        d = self.data
+        return d["active"][1] if d and d["active"] else None
+
+    def cmd_profiles(self):
+        def work():
+            cur = self.current_uuid()
+            profs = [p for p in list_profiles() if p["uuid"] not in self.sim_removed]
+            for p in profs:
+                p.update(self.sim_prof.get(p["uuid"], {}))
+                p["current"] = p["uuid"] == cur
+                sub = "подключено сейчас" if p["current"] else ago(p["ts"])
+                if p["name"] != p["ssid"]:
+                    sub = f"{p['name']} · {sub}"
+                if not p["auto"]:
+                    sub += " · вручную"
+                p["sub"] = sub
+            profs.sort(key=lambda p: (not p["current"], -p["ts"], p["ssid"].lower()))
+            emit(type="profiles", items=profs, count=len(profs),
+                 countText=f"{len(profs)} {plural(len(profs), 'сеть', 'сети', 'сетей')}")
+        threading.Thread(target=work, daemon=True).start()
+
+    def cmd_profile(self, uuid):
+        def work():
+            prof = next((p for p in list_profiles() if p["uuid"] == uuid), None)
+            if not prof or uuid in self.sim_removed:
+                emit(type="profile", uuid=uuid, missing=True)
+                return
+            conf = profile_settings(uuid)
+            conf.update(self.sim_conf.get(uuid, {}))
+            current = uuid == self.current_uuid()
+            det = device_details(self.dev) if current else None
+            manual = conf.get("ipv4.method") == "manual"
+            addr = conf.get("ipv4.addresses", "").split(",")[0].strip()
+            gw, dns = conf.get("ipv4.gateway", ""), conf.get("ipv4.dns", "")
+            if gw == "--":
+                gw = ""
+            if dns == "--":
+                dns = ""
+            if addr == "--":
+                addr = ""
+            if not manual and det:                    # подсказать текущие значения от DHCP
+                addr = addr or det["ip4"].split(",")[0].strip()
+                gw, dns = gw or det["gw"], dns or det["dns"]
+            try:
+                prio = int(conf.get("connection.autoconnect-priority") or 0)
+            except ValueError:
+                prio = 0
+            mac = conf.get("802-11-wireless.cloned-mac-address", "")
+            mac_key = "random" if mac == "random" else "stable" if mac == "stable" else "permanent"
+            emit(type="profile", uuid=uuid, missing=False, name=prof["name"], ssid=prof["ssid"], current=current,
+                 sub=f"Профиль «{prof['name']}» · " + ("подключено сейчас" if current else ago(prof["ts"])),
+                 secured=bool(conf.get("802-11-wireless-security.key-mgmt")),
+                 autoconnect=conf.get("connection.autoconnect") == "yes",
+                 prio="low" if prio < 0 else "high" if prio > 0 else "normal",
+                 metered=conf.get("connection.metered") == "yes",
+                 ip="manual" if manual else "auto", addr=addr, gw=gw, dns=dns.replace(",", ", "),
+                 mac=mac_key, macManual=mac if mac and mac not in ("random", "stable", "permanent", "preserve") else "")
+        threading.Thread(target=work, daemon=True).start()
+
+    def cmd_pmodify(self, uuid, what, value, extra):
+        """Настройка сохранённого профиля (nmcli connection modify). В YP_DRYRUN — только печать и имитация."""
+        prio_val = {"low": "-10", "normal": "0", "high": "10"}
+        prio_name = {"low": "низкий", "normal": "обычный", "high": "высокий"}
+        mac_name = {"permanent": "постоянный", "random": "случайный", "stable": "стабильный"}
+        sim = {}
+        if what == "autoconnect":
+            args, text = ["connection.autoconnect", "yes" if value else "no"], "Автоподключение " + ("включено" if value else "выключено")
+            sim = {"connection.autoconnect": "yes" if value else "no"}
+        elif what == "metered":
+            args, text = ["connection.metered", "yes" if value else "unknown"], "Лимитное подключение " + ("включено" if value else "выключено")
+            sim = {"connection.metered": "yes" if value else "unknown"}
+        elif what == "prio" and value in prio_val:
+            args, text = ["connection.autoconnect-priority", prio_val[value]], f"Приоритет: {prio_name[value]}"
+            sim = {"connection.autoconnect-priority": prio_val[value]}
+        elif what == "mac" and value in mac_name:
+            args, text = ["802-11-wireless.cloned-mac-address", value], f"MAC: {mac_name[value]}"
+            sim = {"802-11-wireless.cloned-mac-address": value}
+        elif what == "ip_auto":
+            args, text = ["ipv4.method", "auto", "ipv4.addresses", "", "ipv4.gateway", ""], "IP: автоматически (DHCP)"
+            sim = {"ipv4.method": "auto", "ipv4.addresses": "", "ipv4.gateway": ""}
+        elif what == "ip_manual":
+            res = validate_ip(extra.get("addr", ""), extra.get("gw", ""), extra.get("dns", ""))
+            if "error" in res:
+                emit(type="result", cmd="ip", ssid=res["bad"], ok=False, msg=res["error"])
+                return
+            args = ["ipv4.method", "manual", "ipv4.addresses", res["addr"], "ipv4.gateway", res["gw"], "ipv4.dns", res["dns"]]
+            text = "IP вручную сохранён"
+            sim = {"ipv4.method": "manual", "ipv4.addresses": res["addr"], "ipv4.gateway": res["gw"], "ipv4.dns": res["dns"]}
+        else:
+            return
+
+        def work():
+            ok, err = change(["nmcli", "connection", "modify", "uuid", uuid, *args])
+            if ok and DRYRUN:
+                self.sim_conf.setdefault(uuid, {}).update(sim)
+                if what == "autoconnect":
+                    self.sim_prof.setdefault(uuid, {})["auto"] = bool(value)
+            self.toast(text + (" (проверка)" if DRYRUN else "") if ok else human_error(err), error=not ok)
+            emit(type="result", cmd="pmodify", ssid=what, ok=ok, msg="" if ok else human_error(err))
+            self.cmd_profile(uuid)
+        threading.Thread(target=work, daemon=True).start()
+
+    def cmd_pforget(self, uuid):
+        ssid = PROFILE_SSID.get(uuid, "")
+        self.toast("Забываю сеть…")
+
+        def work():
+            ok, err = change(["nmcli", "connection", "delete", "uuid", uuid])
+            if ok:
+                PROFILE_SSID.pop(uuid, None)
+                if DRYRUN:
+                    self.sim_removed.add(uuid)
+                self.toast(f"Сеть «{ssid}» забыта" + (" (проверка)" if DRYRUN else ""))
+            else:
+                self.toast(human_error(err), error=True)
+            emit(type="result", cmd="pforget", ssid=uuid, ok=ok, msg="" if ok else human_error(err))
+            self.cmd_profiles()
+            self.request_refresh()
+        threading.Thread(target=work, daemon=True).start()
+
+    def cmd_pconnect(self, uuid):
+        if self.busy:
+            return
+        ssid = PROFILE_SSID.get(uuid) or next((p["ssid"] for p in list_profiles() if p["uuid"] == uuid), "")
+        self.connect_saved(ssid, uuid)
+
+    def cmd_show_password(self, uuid=None):
+        d = self.data
+        if uuid is None:
+            if not d or not d["active"]:
+                return
+            uuid = d["active"][1]
+
+        def work():
+            pw = run("nmcli", "-s", "-g", "802-11-wireless-security.psk", "connection", "show", "uuid", uuid,
+                     timeout=10).strip()
+            emit(type="password", text=pw, ok=bool(pw), uuid=uuid)
+        threading.Thread(target=work, daemon=True).start()
+
+    # -- цикл --
+    def handle(self, line):
+        try:
+            c = json.loads(line)
+        except ValueError:
+            log("плохая команда:", line.strip())
+            return
+        cmd = c.get("cmd")
+        if cmd == "connect":
+            self.cmd_connect(str(c.get("ssid", "")), c.get("password"))
+        elif cmd == "disconnect":
+            self.cmd_disconnect()
+        elif cmd == "forget":
+            self.cmd_forget(c.get("uuid"))
+        elif cmd == "radio":
+            self.cmd_radio(bool(c.get("on")))
+        elif cmd == "scan":
+            self.cmd_scan()
+        elif cmd == "details":
+            self.cmd_details()
+        elif cmd == "modify":
+            self.cmd_modify(c.get("key"), c.get("value"))
+        elif cmd == "show_password":
+            self.cmd_show_password(c.get("uuid"))
+        elif cmd == "profiles":
+            self.cmd_profiles()
+        elif cmd == "profile":
+            self.cmd_profile(str(c.get("uuid", "")))
+        elif cmd == "pmodify":
+            self.cmd_pmodify(str(c.get("uuid", "")), c.get("what"), c.get("value"), c)
+        elif cmd == "pforget":
+            self.cmd_pforget(str(c.get("uuid", "")))
+        elif cmd == "pconnect":
+            self.cmd_pconnect(str(c.get("uuid", "")))
+        elif cmd == "refresh":
+            self.request_refresh()
+        elif cmd == "quit":
+            self.stop()
+
+    def stop(self):
+        self.stopping = True
+        if self.monitor_proc and self.monitor_proc.poll() is None:
+            self.monitor_proc.terminate()
+        os._exit(0)
+
+    def main(self):
+        signal.signal(signal.SIGTERM, lambda *_: self.stop())
+        threading.Thread(target=self.monitor, daemon=True).start()
+        self.request_refresh()
+        # кэш NetworkManager бывает старым — тихо досканировать (скан ничего не меняет, безопасен)
+        threading.Timer(0.8, lambda: self.data and self.data["radio"] and self.cmd_scan()).start()
+        for line in sys.stdin:
+            if line.strip():
+                self.handle(line)
+        self.stop()
+
+
+if __name__ == "__main__":
+    die_with_parent()
+    Backend().main()

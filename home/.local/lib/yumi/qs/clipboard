@@ -1,0 +1,370 @@
+#!/usr/bin/env -S python3 -I
+"""clipboard — бэкенд меню «Буфер обмена» для Quickshell (yumi-rice 3.1). Логика и подписи — как у
+~/.local/bin/yumi-menu-clipboard (хранилище cliphist, закреплённые — файл избранного HyDE cliphist.sh), без GTK:
+процесс печатает JSON-строки в stdout и читает команды JSON-строками из stdin.
+
+stdout:
+  {"type":"list", items:[{id, prev, kind:"text"|"img", text, meta}], favs:[{text, meta}], images:n, dry}
+  {"type":"thumb", id, path}      миниатюра картинки готова (файл в ~/.cache/yumi/qs-clip/<id>.png)
+  {"type":"toast", text, error}   {"type":"result", cmd, ok}
+stdin:
+  {"cmd":"list"}  {"cmd":"thumb","id":…}  {"cmd":"copy","id":…}  {"cmd":"copy_text","text":…}
+  {"cmd":"delete","id":…}  {"cmd":"pin","id":…}  {"cmd":"unpin","text":…}  {"cmd":"wipe"}  {"cmd":"quit"}
+Проверка: YP_DRYRUN=1 — копирование, удаление, очистка, закрепление только печатаются в stderr (список имитируется);
+YP_FAKE_CLIP=1 — выдуманные записи вместо настоящей истории (включает и dry-run).
+Откат: yumi-uninstall quickshell"""
+import base64
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import threading
+
+HOME = os.path.expanduser("~")
+FAKE = os.environ.get("YP_FAKE_CLIP") == "1"
+DRYRUN = os.environ.get("YP_DRYRUN") == "1" or FAKE
+CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.join(HOME, ".cache")), "yumi/qs-clip")
+THUMB_W = 720                                   # ширина миниатюры в файле (карточка стопки ~440 логических px, scale 1.6)
+FAV_FILE = os.path.join(HOME, ".cliphist_favorites")
+if not os.path.exists(FAV_FILE):
+    FAV_FILE = os.path.join(HOME, ".cache/yumi/theme/landing/cliphist_favorites")
+OUT_LOCK = threading.Lock()
+
+FAKE_ITEMS = [
+    ("text", "git commit -m \"Пилюли Waybar: новые цвета\""),
+    ("text", "https://github.com/sonoyumi/yumi-rice"),
+    ("img", "png 1920x1080"),
+    ("text", "Привет! Встречаемся завтра в 10:30 у входа в библиотеку, не забудь ноутбук и зарядку."),
+    ("text", "def greet(name):\n    return f\"Привет, {name}!\""),
+    ("text", "yay -S gtk4-layer-shell"),
+    ("img", "png 2560x1600"),
+    ("text", "Открыть в 9:00: конспект лекции и список литературы"),
+    ("text", "sudo systemctl restart bluetooth"),
+    ("text", "#a6da95"),
+    ("text", "Список покупок: молоко, хлеб, яблоки, кофе"),
+    ("img", "jpeg 800x600"),
+    ("text", "hyprctl dispatch 'hl.dsp.exec_cmd([[kitty]])'"),
+]
+FAKE_FAVS = ["ssh yumi@laptop", "Мой адрес для доставки: ул. Примерная, 1"]
+
+
+def die_with_parent():
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").prctl(1, signal.SIGTERM)       # PR_SET_PDEATHSIG
+    except Exception:
+        pass
+
+
+def emit(**obj):
+    with OUT_LOCK:
+        try:
+            sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+            sys.stdout.flush()
+        except (BrokenPipeError, OSError):
+            os._exit(0)
+
+
+def log(*a):
+    print(*a, file=sys.stderr, flush=True)
+
+
+def run(*cmd, timeout=5, inp=None):
+    try:
+        return subprocess.run(cmd, capture_output=True, timeout=timeout, input=inp).stdout
+    except Exception:
+        return b""
+
+
+# ---------- данные (как в yumi-menu-clipboard) ----------
+def load_history():
+    """[(id, превью, вид)]; вид: text | img."""
+    if FAKE:
+        return [(str(900 - i), body if kind == "text" else f"[[ binary data 512 KiB {body} ]]", kind)
+                for i, (kind, body) in enumerate(FAKE_ITEMS)]
+    out = []
+    for line in run("cliphist", "list").decode("utf-8", "replace").splitlines():
+        cid, _, prev = line.partition("\t")
+        if cid:
+            out.append((cid, prev, "img" if prev.startswith("[[ binary data") else "text"))
+    return out
+
+
+def load_favs():
+    if FAKE:
+        return list(FAKE_FAVS)
+    favs = []
+    try:
+        with open(FAV_FILE) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        favs.append(base64.b64decode(line).decode("utf-8", "replace").rstrip("\n"))
+                    except Exception:
+                        pass
+    except OSError:
+        pass
+    return favs
+
+
+def save_favs(favs):
+    """Формат HyDE cliphist.sh: строка = base64(текст + перевод строки)."""
+    if DRYRUN:
+        log("[dry-run] save favorites:", len(favs), "записей ->", FAV_FILE)
+        return
+    os.makedirs(os.path.dirname(FAV_FILE), exist_ok=True)
+    tmp = FAV_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        for t in favs:
+            f.write(base64.b64encode((t + "\n").encode()).decode() + "\n")
+    os.replace(tmp, FAV_FILE)
+
+
+def decode(cid):
+    return run("cliphist", "decode", cid)
+
+
+def img_meta(prev):
+    """'[[ binary data 944 KiB png 1920x1080 ]]' → 'PNG · 1920×1080 · 944 КБ'."""
+    parts = prev.strip("[] ").split()
+    try:
+        size, unit, fmt = parts[2], parts[3], parts[4]
+        dims = parts[5].replace("x", "×") if len(parts) > 5 else ""
+        unit = {"KiB": "КБ", "MiB": "МБ", "B": "Б"}.get(unit, unit)
+        return " · ".join(x for x in (fmt.upper(), dims, f"{size} {unit}") if x)
+    except IndexError:
+        return "Картинка"
+
+
+def text_meta(prev):
+    n = len(prev)
+    if prev.startswith(("http://", "https://")):
+        return "Ссылка"
+    if "\n" in prev or n > 90:
+        return f"Текст · {n}{'+' if n >= 100 else ''} симв."
+    return "Текст"
+
+
+def item_obj(cid, prev, kind):
+    if kind == "img":
+        text, meta = "Картинка", img_meta(prev)
+    else:
+        text, meta = " ".join(prev.split()), text_meta(prev)
+    return {"id": cid, "prev": prev, "kind": kind, "text": text, "meta": f"{meta} · №{cid}"}
+
+
+# ---------- служба ----------
+class Backend:
+    def __init__(self):
+        self.history = []
+        self.favs = []
+        self.thumbs = {}                 # id → путь готовой миниатюры
+        self.queue = []
+        self.busy = False
+        self.lock = threading.Lock()
+        self.stopping = False
+        os.makedirs(CACHE, exist_ok=True)
+
+    def send_list(self):
+        emit(type="list", items=[item_obj(*h) for h in self.history],
+             favs=[{"text": t, "meta": "Закреплено"} for t in self.favs],
+             images=sum(1 for h in self.history if h[2] == "img"), dry=DRYRUN)
+        for cid, path in self.thumbs.items():
+            emit(type="thumb", id=cid, path=path)
+
+    def cmd_list(self):
+        def work():
+            self.history = load_history()
+            self.favs = load_favs()
+            self.send_list()
+            self.clean_cache()
+        threading.Thread(target=work, daemon=True).start()
+
+    def clean_cache(self):
+        """Миниатюры записей, которых больше нет в истории, — удалить."""
+        ids = {h[0] for h in self.history if h[2] == "img"}
+        try:
+            for name in os.listdir(CACHE):
+                cid = name.split(".")[0]
+                if cid not in ids:
+                    os.remove(os.path.join(CACHE, name))
+                    self.thumbs.pop(cid, None)
+        except OSError:
+            pass
+
+    # -- миниатюры: по одной, в фоне (как pump_thumbs) --
+    def cmd_thumb(self, cid):
+        if cid in self.thumbs:
+            emit(type="thumb", id=cid, path=self.thumbs[cid])
+            return
+        path = os.path.join(CACHE, f"{cid}-w{THUMB_W}.png")   # ширина в имени — старые маленькие не берутся
+        if os.path.exists(path):
+            self.thumbs[cid] = path
+            emit(type="thumb", id=cid, path=path)
+            return
+        with self.lock:
+            if cid not in self.queue:
+                self.queue.append(cid)
+        self.pump()
+
+    def pump(self):
+        with self.lock:
+            if self.busy or not self.queue:
+                return
+            cid = self.queue.pop(0)
+            self.busy = True
+        threading.Thread(target=self.make_thumb, args=(cid,), daemon=True).start()
+
+    def make_thumb(self, cid):
+        path = os.path.join(CACHE, f"{cid}-w{THUMB_W}.png")   # ширина в имени — старые маленькие не берутся
+        try:
+            data = self.fake_png() if FAKE else decode(cid)
+            ok = False
+            if data:
+                tmp = path + ".tmp.png"
+                if shutil.which("magick"):   # уменьшенная копия — меню читает маленький файл, а не 1 МБ png
+                    p = subprocess.run(["magick", "-", "-thumbnail", f"{THUMB_W}x", tmp], input=data,
+                                       capture_output=True, timeout=10)
+                    ok = p.returncode == 0 and os.path.exists(tmp)
+                if not ok:
+                    with open(tmp, "wb") as f:
+                        f.write(data)
+                    ok = True
+                os.replace(tmp, path)
+            if ok:
+                self.thumbs[cid] = path
+                emit(type="thumb", id=cid, path=path)
+        except Exception as e:
+            log("thumb:", cid, e)
+        with self.lock:
+            self.busy = False
+        self.pump()
+
+    def fake_png(self):
+        """Картинка для выдуманных записей — обои (не личные данные)."""
+        try:
+            with open(os.path.realpath(os.path.join(HOME, ".cache/yumi/theme/wall.thmb")), "rb") as f:
+                return f.read()
+        except OSError:
+            return b""
+
+    # -- действия --
+    def wl_copy(self, data):
+        if DRYRUN:
+            log("[dry-run] wl-copy <", len(data), "байт>")
+            return True
+        try:
+            p = subprocess.Popen(["wl-copy"], stdin=subprocess.PIPE, start_new_session=True)
+            p.stdin.write(data)
+            p.stdin.close()
+            return True
+        except Exception as e:
+            log("wl-copy:", e)
+            return False
+
+    def cmd_copy(self, cid):
+        def work():
+            if DRYRUN:
+                log(f"[dry-run] cliphist decode {cid} | wl-copy")
+                ok = True
+            else:
+                data = decode(cid)
+                if not data:
+                    emit(type="toast", text="Запись не найдена", error=True)
+                    emit(type="result", cmd="copy", ok=False)
+                    return
+                ok = self.wl_copy(data)
+            emit(type="toast", text="Скопировано" if ok else "Не удалось скопировать", error=not ok)
+            emit(type="result", cmd="copy", ok=ok)
+        threading.Thread(target=work, daemon=True).start()
+
+    def cmd_copy_text(self, text):
+        ok = self.wl_copy(text.encode())
+        emit(type="toast", text="Скопировано" if ok else "Не удалось скопировать", error=not ok)
+        emit(type="result", cmd="copy", ok=ok)
+
+    def cmd_delete(self, cid):
+        prev = next((h[1] for h in self.history if h[0] == cid), None)
+        if prev is None:
+            return
+        if DRYRUN:
+            log(f"[dry-run] cliphist delete <{cid}>")
+        else:
+            run("cliphist", "delete", inp=f"{cid}\t{prev}\n".encode())
+        self.history = [h for h in self.history if h[0] != cid]
+        emit(type="toast", text="Удалено из истории", error=False)
+        self.send_list()
+
+    def cmd_pin(self, cid):
+        prev = next((h[1] for h in self.history if h[0] == cid), "")
+        text = prev if FAKE else decode(cid).decode("utf-8", "replace").rstrip("\n")
+        if text in self.favs:
+            emit(type="toast", text="Уже закреплено", error=False)
+            return
+        self.favs.append(text)
+        save_favs(self.favs)
+        emit(type="toast", text="Закреплено", error=False)
+        self.send_list()
+
+    def cmd_unpin(self, text):
+        self.favs = [t for t in self.favs if t != text]
+        save_favs(self.favs)
+        emit(type="toast", text="Откреплено", error=False)
+        self.send_list()
+
+    def cmd_wipe(self):
+        if DRYRUN:
+            log("[dry-run] cliphist wipe")
+        else:
+            run("cliphist", "wipe")
+        self.history = []
+        emit(type="toast", text="История очищена", error=False)
+        self.send_list()
+        self.clean_cache()
+
+    # -- цикл --
+    def handle(self, line):
+        try:
+            c = json.loads(line)
+        except ValueError:
+            log("плохая команда:", line.strip())
+            return
+        cmd = c.get("cmd")
+        if cmd == "list":
+            self.cmd_list()
+        elif cmd == "thumb":
+            self.cmd_thumb(str(c.get("id") or ""))
+        elif cmd == "copy":
+            self.cmd_copy(str(c.get("id") or ""))
+        elif cmd == "copy_text":
+            self.cmd_copy_text(str(c.get("text") or ""))
+        elif cmd == "delete":
+            self.cmd_delete(str(c.get("id") or ""))
+        elif cmd == "pin":
+            self.cmd_pin(str(c.get("id") or ""))
+        elif cmd == "unpin":
+            self.cmd_unpin(str(c.get("text") or ""))
+        elif cmd == "wipe":
+            self.cmd_wipe()
+        elif cmd == "quit":
+            self.stop()
+
+    def stop(self):
+        self.stopping = True
+        os._exit(0)
+
+    def main(self):
+        signal.signal(signal.SIGTERM, lambda *_: self.stop())
+        self.cmd_list()
+        for line in sys.stdin:
+            if line.strip():
+                self.handle(line)
+        self.stop()
+
+
+if __name__ == "__main__":
+    die_with_parent()
+    Backend().main()

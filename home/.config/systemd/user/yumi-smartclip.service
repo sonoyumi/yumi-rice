@@ -1,0 +1,15 @@
+[Unit]
+Description=yumi: умный буфер обмена — подсказки на острове (ссылки, цвета, примеры, почта)
+PartOf=graphical-session.target
+After=graphical-session.target
+Requisite=graphical-session.target
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/python3 -I %h/.local/lib/yumi/qs/smartclip run
+Restart=on-failure
+RestartSec=3
+Slice=app-graphical.slice
+
+[Install]
+WantedBy=graphical-session.target

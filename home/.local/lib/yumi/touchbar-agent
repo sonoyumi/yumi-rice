@@ -1,0 +1,2012 @@
+#!/usr/bin/env python3
+# yumi: копия /usr/local/bin/touchbar-agent + apps_fullscreen_only (16.10). Подключена drop-in'ом
+# ~/.config/systemd/user/touchbar-agent.service.d/10-yumi.conf; откат — удалить drop-in и перезапустить службу.
+"""touchbar-agent: the session half of the Omarchy Touch Bar.
+
+touchbard (a system service) owns the Touch Bar hardware. This agent runs in
+your Hyprland session and feeds it everything that lives there:
+
+  * colours from the current Omarchy theme (live, follows `omarchy theme set`)
+  * the layout from ~/.config/touchbar/config.toml (live, applies on save)
+  * volume, mute, screen and keyboard brightness, now playing
+  * Touch ID prompts, from fprintd on the system bus
+
+and it runs the commands behind buttons and applies slider changes.
+
+Usage:
+  touchbar-agent                  run (normally via the systemd user service)
+  touchbar-agent --dump-layout    print the expanded layout as JSON
+  touchbar-agent --dump-theme     print the theme message as JSON
+  touchbar-agent --layer NAME     switch the bar to a layer
+  touchbar-agent record [SECS] [-o FILE] [--no-audio]
+                                  record the bar (and what's playing) to an
+                                  MP4 in ~/Videos; run it again to stop
+"""
+
+import json
+import os
+import re
+import shlex
+import signal
+import socket
+import subprocess
+import sys
+import time
+import tomllib
+from pathlib import Path
+
+SOCKET = os.environ.get("TOUCHBARD_SOCKET", "/run/touchbard/touchbard.sock")
+CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "touchbar" / "config.toml"
+THEME = Path.home() / ".local/state/omarchy/current/theme/colors.toml"
+_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_CONFIG = _ROOT / "share/touchbar/config.toml"
+# Plugins: yours first, then the bundled ones (repo checkout or /usr/local/share).
+PLUGIN_DIRS = [CONFIG.parent / "plugins", _ROOT / "plugins", _ROOT / "share/touchbar/plugins"]
+if not DEFAULT_CONFIG.exists():
+    DEFAULT_CONFIG = Path("/usr/local/share/touchbar/config.toml")
+
+# ---------------------------------------------------------------------------
+# Presets: the names you can drop into a layer's `items` list.
+# Icons are Nerd Font (Material Design) glyphs.
+# ---------------------------------------------------------------------------
+
+G = {
+    "esc": "esc",
+    "fn": "fn",
+    "back": "\U000F004D",  # arrow-left
+    "apps": "\U000F003B",  # apps
+    "menu": "\U000F035C",  # menu
+    "overview": "\U000F0570",  # view-grid? (overview)
+    "screenshot": "\U000F0E51",  # monitor-screenshot
+    "record": "\U000F044A",  # record-rec
+    "lock": "\U000F033E",  # lock
+    "bright_lo": "\U000F00DE",  # brightness-5
+    "bright_mid": "\U000F00DF",  # brightness-6
+    "bright_hi": "\U000F00E0",  # brightness-7
+    "kbd_off": "\U000F097B",  # keyboard-outline
+    "kbd": "\U000F030C",  # keyboard
+    "vol_off": "\U000F0581",  # volume-off
+    "vol_mute": "\U000F075F",  # volume-mute
+    "vol_lo": "\U000F057F",  # volume-low
+    "vol_mid": "\U000F0580",  # volume-medium
+    "vol_hi": "\U000F057E",  # volume-high
+    "mic": "\U000F036C",  # microphone
+    "mic_off": "\U000F036D",  # microphone-off
+    "night": "\U000F0594",  # weather-night
+    "emoji": "\U000F0C68",  # emoticon-outline
+    "clipboard": "\U000F0147",  # clipboard-text
+    "palette": "\U000F03D8",  # palette
+    "search": "\U000F0349",  # magnify
+}
+
+
+def btn(icon=None, label=None, w=84, **kw):
+    item = {"kind": "button", "w": w}
+    if icon:
+        item["icon"] = icon
+    if label:
+        item["label"] = label
+    item.update(kw)
+    return item
+
+
+def cmd(icon, command, w=84, **kw):
+    return btn(icon, w=w, act={"cmd": command}, **kw)
+
+
+def key(k, label=None, icon=None, w=None, **kw):
+    item = btn(icon, label, w=w, act={"key": k if isinstance(k, list) else [k]}, **kw)
+    if w is None:
+        item.pop("w")
+    return item
+
+
+PRESETS = {
+    "esc": key("Esc", label="esc", w=96, pin=True, role="esc"),
+    "fn": btn(label="fn", w=80, style="subtle", act={"toggle_layer": "function"},
+              toggle="layer:function", style_on="accent"),
+    "back": btn(G["back"], w=80, style="subtle", act={"layer": "control"}),
+    "brightness": {"kind": "slider", "target": "brightness", "w": 100,
+                   "icons": [G["bright_lo"], G["bright_mid"], G["bright_hi"]]},
+    # The Touch Bar's own LED backlight: sets the brightness ceiling (it still
+    # follows the screen, dims when idle and sleeps).
+    "touchbar": {"kind": "slider", "target": "tb_level", "w": 100, "icons": ["\U000F0330"]},
+    "keyboard": {"kind": "slider", "target": "keyboard", "w": 100,
+                 "icons": [G["kbd_off"], G["kbd"]]},
+    "volume": {"kind": "slider", "target": "volume", "w": 100,
+               "icons": [G["vol_lo"], G["vol_mid"], G["vol_hi"]],
+               "mute_key": "muted", "mute_icon": G["vol_off"]},
+    "mute": key("Mute", icon=G["vol_mute"], w=84, toggle="muted", icon_on=G["vol_off"], style_on="danger"),
+    "mic": key("MicMute", icon=G["mic"], w=84, toggle="mic_muted", icon_on=G["mic_off"], style_on="danger"),
+    "media": {"kind": "media", "w": 250},
+    "nowplaying": {"kind": "nowplaying", "act": "visualizer"},
+    "visualizer": btn("󰺢", w=84, act="visualizer"),
+    "weather": {"kind": "weather", "w": 290, "act": "weather"},
+    "karaoke": btn("\U000F036C", w=84, style="plain", act={"toggle_flag": "karaoke"}, toggle="karaoke",
+                   style_on="subtle"),
+    "eq": btn("󰺢", w=72, style="plain", act={"toggle_flag": "eq"}, toggle="eq", style_on="subtle"),
+    "workspaces": {"kind": "workspaces", "w": 300, "style": "plain",
+                   "act": {"cmd": "hyprctl eval 'hl.dispatch(hl.dsp.focus({ workspace = \"{id}\" }))'"}},
+    "clock": {"kind": "clock", "w": 190, "style": "plain", "format": "%a %-d %b  %H:%M"},
+    "battery": {"kind": "battery", "w": 130, "style": "plain"},
+    # yumi (19.10.2026): команды Omarchy → свои; overview/record/nightlight (Omarchy-only) убраны — у yumi их нет
+    "apps": cmd(G["apps"], "qs -c yumi ipc call launcher apps"),
+    "menu": cmd(G["menu"], "qs -c yumi ipc call control toggle"),
+    "screenshot": cmd(G["screenshot"], "yumi-screenshot s"),
+    "lock": cmd(G["lock"], "yumi-lock"),
+    "emoji": key(["LeftMeta", "LeftCtrl", "E"], icon=G["emoji"], w=84),
+    "flex": {"kind": "flex"},
+    "gap": {"kind": "gap", "w": 14},
+}
+for n in range(1, 13):
+    PRESETS[f"F{n}"] = key(f"F{n}", label=f"F{n}")
+
+PRESETS_DOC = """Presets: """ + ", ".join(sorted(PRESETS, key=lambda s: (len(s) > 3, s)))
+
+
+def expand_item(entry):
+    """A preset name, `gap:N`, or a table (optionally based on a preset)."""
+    if isinstance(entry, str):
+        if entry.startswith("gap:"):
+            return {"kind": "gap", "w": float(entry[4:])}
+        if entry not in PRESETS:
+            raise ValueError(f"unknown preset {entry!r}. {PRESETS_DOC}")
+        return json.loads(json.dumps(PRESETS[entry]))
+    if not isinstance(entry, dict):
+        raise ValueError(f"bad item {entry!r}")
+    e = dict(entry)
+    base = {}
+    if "preset" in e:
+        base = expand_item(e.pop("preset"))
+    # Friendly spellings for actions.
+    if "command" in e:
+        e["act"] = {"cmd": e.pop("command")}
+    if "keys" in e:
+        k = e.pop("keys")
+        e["act"] = {"key": k if isinstance(k, list) else [k]}
+    if "layer" in e:
+        e["act"] = {"layer": e.pop("layer")}
+    if "toggle_layer" in e:
+        e["act"] = {"toggle_layer": e.pop("toggle_layer")}
+    if "width" in e:
+        e["w"] = e.pop("width")
+    if "plugin" in e:
+        e.setdefault("kind", "plugin")
+    base.update(e)
+    base.setdefault("kind", "button")
+    return base
+
+
+# Touch Bar MacBook Pros without a physical Escape key (2016-2019); every
+# later Touch Bar model (16" 2019, 13" 2020 Intel, M1, M2) has one.
+NO_PHYSICAL_ESC = {"MacBookPro13,2", "MacBookPro13,3", "MacBookPro14,2", "MacBookPro14,3",
+                   "MacBookPro15,1", "MacBookPro15,2", "MacBookPro15,3", "MacBookPro15,4"}
+
+
+def has_physical_esc():
+    """True when this Mac has a real Esc key, so the Touch Bar needn't show one.
+    Unknown machines get the on-bar Esc, so nobody is ever left without it."""
+    try:
+        model = Path("/sys/class/dmi/id/product_name").read_text().strip()
+    except OSError:
+        model = ""
+    if not model:
+        try:
+            compat = Path("/sys/firmware/devicetree/base/compatible").read_bytes()
+            return b"apple,t8103" in compat or b"apple,t8112" in compat  # M1 / M2 MacBook Pro 13"
+        except OSError:
+            return False
+    return model.startswith(("MacBookPro", "Mac1")) and model not in NO_PHYSICAL_ESC
+
+
+def load_config():
+    path = CONFIG if CONFIG.exists() else DEFAULT_CONFIG
+    with open(path, "rb") as f:
+        return tomllib.load(f)
+
+
+def build_layout(cfg):
+    layers_cfg = cfg.get("layers", {})
+    layers = {}
+    for name, spec in layers_cfg.items():
+        if isinstance(spec, dict) and "items" in spec:
+            layers[name] = [expand_item(i) for i in spec["items"]]
+    if not layers:
+        raise ValueError("config has no [layers.<name>] with items")
+    s = cfg.get("settings", {})
+    # The on-bar Esc only where there's no physical one: esc = "auto" | "show" | "hide".
+    esc = s.get("esc", "auto")
+    if esc == "hide" or (esc == "auto" and has_physical_esc()):
+        for name in layers:
+            layers[name] = [it for it in layers[name] if it.get("role") != "esc"]
+    if s.get("nowplaying") == "off":
+        # No equaliser to expand into, so tapping the title plays/pauses.
+        for items in layers.values():
+            for it in items:
+                if it.get("kind") == "nowplaying" and it.get("act") == "visualizer":
+                    it["act"] = {"key": ["PlayPause"]}
+    default = s.get("default_layer", "control")
+    if default not in layers:
+        default = next(iter(layers))
+    fn_layer = s.get("fn_key_layer", "function")
+    settings = {k: s[k] for k in ("dim_after", "off_after", "max_brightness", "slider_timeout",
+                                  "fingerprint_width", "dim_while_scanning", "visualizers", "nowplaying",
+                                  "viz_colors",
+                                  # yumi (19.10): свайп между слоями
+                                  "swipe_layers", "swipe_min", "swipe_start", "swipe_anim_ms", "layer_names",
+                                  "fps", "fps_log", "touchid_style", "touchid_seal")   # yumi (19.10): предел кадров/с, счётчик кадров в журнал
+                if k in s}
+    return {"t": "layout", "layers": layers, "default": default,
+            "fn_layer": fn_layer if fn_layer in layers else None, "settings": settings}
+
+
+def build_theme(cfg):
+    colors = {}
+    try:
+        with open(THEME, "rb") as f:
+            colors = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError):
+        pass
+
+    def c(*names, default):
+        for n in names:
+            v = colors.get(n)
+            if isinstance(v, str) and v.startswith("#"):
+                return v
+        return default
+
+    light = colors.get("mode") == "light"
+    theme = {
+        "t": "theme",
+        "bg": c("darker_background", "dark_background", "background", default="#000000"),
+        # Dark themes: lighter pills on a near-black bar. Light themes: the
+        # page colour as pills on a slightly darker bar.
+        "surface": c("background", default="#e0e0e0") if light
+        else c("lighter_background", "selection", default="#2a2a2a"),
+        "surface_hi": c("muted", "selection", default="#555555"),
+        "fg": c("bright_foreground", "foreground", default="#ffffff"),
+        "fg_dim": c("dark_foreground", "muted", default="#888888"),
+        "accent": c("accent", "blue", default="#7aa2f7"),
+        "red": c("red", default="#f7768e"),
+        "green": c("green", default="#9ece6a"),
+        "yellow": c("yellow", default="#e0af68"),
+        "accent2": c("bright_magenta", "magenta", default="#bb9af7"),
+        "font": "JetBrainsMono Nerd Font",
+    }
+    try:
+        out = subprocess.run(["omarchy-font-current"], capture_output=True, text=True, timeout=2)
+        if out.returncode == 0 and out.stdout.strip():
+            font = out.stdout.strip()
+            # Icons need a Nerd Font; keep the default if the chosen one isn't one.
+            if "Nerd" in font or "NF" in font:
+                theme["font"] = font
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    overrides = cfg.get("theme", {})
+    for role, key_ in (("background", "bg"), ("button", "surface"), ("track", "surface_hi"),
+                       ("foreground", "fg"), ("dim", "fg_dim"), ("accent", "accent"),
+                       ("red", "red"), ("green", "green"), ("yellow", "yellow"), ("font", "font"),
+                       ("pill_style", "pill_style")):   # yumi (19.10): "outline" — капсулы рамкой
+        v = overrides.get(role)
+        if isinstance(v, str) and v:
+            # A role can name another theme colour, e.g. accent = "magenta".
+            theme[key_] = colors.get(v, v) if not v.startswith("#") and key_ not in ("font", "pill_style") else v
+    return theme
+
+
+# ---------------------------------------------------------------------------
+# Plugins
+#
+# A plugin is a folder with plugin.toml (name, description, exec, optional
+# background = "playing") and an executable. It talks JSON lines:
+#   in  (stdin):  {"t":"size","w","h","options"} {"t":"theme",...} {"t":"media",...}
+#                 {"t":"cmd","cmd":"next"|"tap","x"}
+#   out (stdout): {"t":"frame","w","h","len"} + len bytes BGRA
+#                 {"t":"bars","v":[0..1,...]} {"t":"state",...} {"t":"log","msg"}
+# ---------------------------------------------------------------------------
+
+def find_plugins():
+    found = {}
+    for d in PLUGIN_DIRS:
+        if not d.is_dir():
+            continue
+        for manifest in sorted(d.glob("*/plugin.toml")):
+            try:
+                with open(manifest, "rb") as f:
+                    meta = tomllib.load(f)
+            except (OSError, tomllib.TOMLDecodeError):
+                continue
+            name = meta.get("name") or manifest.parent.name
+            found.setdefault(name, (manifest.parent, meta))
+    return found
+
+
+class Plugin:
+    def __init__(self, agent, name, folder, meta):
+        self.agent, self.name = agent, name
+        self.buf = bytearray()
+        self.pending = None
+        self.size = None
+        self.unwanted_since = None
+        self.background = bool(meta.get("background"))
+        exe = folder / meta.get("exec", "plugin.py")
+        cmd = [str(exe)]
+        # a rewritten plugin.py easily loses its exec bit; run a Python plugin through python then
+        if exe.suffix == ".py" and not os.access(exe, os.X_OK):
+            cmd = [sys.executable, str(exe)]
+        self.proc = subprocess.Popen(cmd, cwd=folder, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     start_new_session=True)
+        fd = self.proc.stdout.fileno()
+        os.set_blocking(fd, False)
+        self.watch = GLib.io_add_watch(fd, GLib.PRIORITY_DEFAULT,
+                                       GLib.IOCondition.IN | GLib.IOCondition.HUP | GLib.IOCondition.ERR, self.on_out)
+        log(f"plugin {name} started")
+
+    def alive(self):
+        return self.proc.poll() is None
+
+    def send(self, msg):
+        try:
+            self.proc.stdin.write((json.dumps(msg, ensure_ascii=False) + "\n").encode())
+            self.proc.stdin.flush()
+        except (BrokenPipeError, ValueError, OSError):
+            pass
+
+    def on_out(self, fd, cond):
+        eof = False
+        while True:
+            try:
+                chunk = os.read(fd, 1 << 20)
+            except BlockingIOError:
+                break
+            except OSError:
+                chunk = b""
+            if not chunk:
+                eof = True
+                break
+            self.buf += chunk
+        frame = None
+        while True:
+            if self.pending:
+                n = self.pending["len"]
+                if len(self.buf) < n:
+                    break
+                # Keep only the newest frame from this batch.
+                frame = (self.pending, bytes(self.buf[:n]))
+                del self.buf[:n]
+                self.pending = None
+                continue
+            i = self.buf.find(b"\n")
+            if i < 0:
+                break
+            line = bytes(self.buf[:i])
+            del self.buf[:i + 1]
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue
+            t = msg.get("t")
+            if t == "frame":
+                self.pending = msg
+            elif t == "bars":
+                self.agent.send({"t": "bars", "v": msg.get("v", [])}, droppable=True)
+            elif t == "state":
+                msg.pop("t")
+                self.agent.push_state(**msg)
+            elif t == "log":
+                log(f"[{self.name}] {msg.get('msg')}")
+        if frame:
+            hdr, data = frame
+            self.agent.send_frame(self.name, hdr["w"], hdr["h"], data)
+        if eof:
+            log(f"plugin {self.name} exited")
+            return False
+        return True
+
+    def stop(self):
+        if self.alive():
+            GLib.source_remove(self.watch)
+        try:
+            self.proc.stdin.close()
+        except OSError:
+            pass
+        proc = self.proc
+
+        def signal_group(sig):
+            # The plugin runs in its own session, so its children (cava, ffmpeg,
+            # ...) share its process group: signal them all, never leak one.
+            try:
+                os.killpg(proc.pid, sig)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+        def reap():
+            signal_group(signal.SIGTERM)
+            GLib.timeout_add(1500, lambda: (signal_group(signal.SIGKILL), proc.poll(), False)[2])
+            return False
+        GLib.timeout_add(800, reap)
+
+
+# ---------------------------------------------------------------------------
+# Weather (Open-Meteo, no key needed)
+# ---------------------------------------------------------------------------
+
+# WMO weather code -> (description, day icon, night icon, kind); icons are
+# Nerd Font Material Design glyphs, kind picks the colour.
+WMO = {
+    0: ("Clear", "\U000F0599", "\U000F0594", "sun"),
+    1: ("Mostly clear", "\U000F0595", "\U000F0F31", "sun"),
+    2: ("Partly cloudy", "\U000F0595", "\U000F0F31", "cloud"),
+    3: ("Overcast", "\U000F0590", "\U000F0590", "cloud"),
+    45: ("Fog", "\U000F0591", "\U000F0591", "cloud"),
+    48: ("Freezing fog", "\U000F0591", "\U000F0591", "cloud"),
+    51: ("Light drizzle", "\U000F0597", "\U000F0597", "rain"),
+    53: ("Drizzle", "\U000F0597", "\U000F0597", "rain"),
+    55: ("Heavy drizzle", "\U000F0597", "\U000F0597", "rain"),
+    56: ("Freezing drizzle", "\U000F067F", "\U000F067F", "snow"),
+    57: ("Freezing drizzle", "\U000F067F", "\U000F067F", "snow"),
+    61: ("Light rain", "\U000F0597", "\U000F0597", "rain"),
+    63: ("Rain", "\U000F0597", "\U000F0597", "rain"),
+    65: ("Heavy rain", "\U000F0596", "\U000F0596", "rain"),
+    66: ("Freezing rain", "\U000F067F", "\U000F067F", "snow"),
+    67: ("Freezing rain", "\U000F067F", "\U000F067F", "snow"),
+    71: ("Light snow", "\U000F0598", "\U000F0598", "snow"),
+    73: ("Snow", "\U000F0598", "\U000F0598", "snow"),
+    75: ("Heavy snow", "\U000F0F36", "\U000F0F36", "snow"),
+    77: ("Snow grains", "\U000F0598", "\U000F0598", "snow"),
+    80: ("Showers", "\U000F0597", "\U000F0597", "rain"),
+    81: ("Showers", "\U000F0597", "\U000F0597", "rain"),
+    82: ("Heavy showers", "\U000F0596", "\U000F0596", "rain"),
+    85: ("Snow showers", "\U000F0598", "\U000F0598", "snow"),
+    86: ("Heavy snow showers", "\U000F0F36", "\U000F0F36", "snow"),
+    95: ("Thunderstorm", "\U000F067E", "\U000F067E", "storm"),
+    96: ("Thunderstorm, hail", "\U000F0592", "\U000F0592", "storm"),
+    99: ("Thunderstorm, hail", "\U000F0592", "\U000F0592", "storm"),
+}
+WINDY_ICON = "\U000F059D"
+WIND_UNITS = {"kmh": ("kmh", "km/h", 1.0), "kn": ("kn", "kn", 1.852), "knots": ("kn", "kn", 1.852),
+              "mph": ("mph", "mph", 1.609), "ms": ("ms", "m/s", 3.6)}
+
+
+def weather_units(wcfg, country=None):
+    """(temperature_unit, wind key) from [weather] config, else by country.
+
+    Not the locale: plenty of systems outside the US run en_US."""
+    units = wcfg.get("units", "auto")
+    imperial = units == "imperial" or (units == "auto" and (country or "").upper() in ("US", "LR", "MM"))
+    temp = str(wcfg.get("temperature", "f" if imperial else "c")).lower()[:1]
+    wind = str(wcfg.get("wind", "mph" if imperial else "kmh")).lower().replace("/", "").replace(" ", "")
+    return ("fahrenheit" if temp == "f" else "celsius"), (wind if wind in WIND_UNITS else "kmh")
+
+
+def http_json(url, timeout=8, method="GET", headers=None, body=None):
+    import urllib.request
+    hdrs = {"User-Agent": "touchbard (github.com/0800tim/touchbard)", **(headers or {})}
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode()
+        hdrs["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, headers=hdrs, method=method)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        raw = r.read(2 << 20)
+        return json.loads(raw) if raw.strip() else {}
+
+
+def weather_location(wcfg):
+    """(lat, lon, name, country): config, then Omarchy's weather location, then IP."""
+    from urllib.parse import quote
+    loc = str(wcfg.get("location", "")).strip()
+    name = None
+    if not loc:
+        try:
+            om = json.loads((Path.home() / ".local/state/omarchy/settings/weather.json").read_text())
+            if "latitude" in om and "longitude" in om:
+                return float(om["latitude"]), float(om["longitude"]), om.get("name"), None
+            loc = om.get("name", "")
+        except (OSError, ValueError):
+            pass
+    if loc:
+        m = re.match(r"^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$", loc)
+        if m:
+            return float(m.group(1)), float(m.group(2)), None, None
+        res = http_json(f"https://geocoding-api.open-meteo.com/v1/search?name={quote(loc)}&count=1")
+        hit = (res.get("results") or [None])[0]
+        if hit:
+            return hit["latitude"], hit["longitude"], hit.get("name"), hit.get("country_code")
+    ip = http_json("https://ipapi.co/json/")
+    return float(ip["latitude"]), float(ip["longitude"]), ip.get("city") or name, ip.get("country_code")
+
+
+WEATHER_MEM = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "yumi" / "touchbar-weather.json"
+
+
+def fetch_weather(wcfg, where):
+    """Everything the widget and the expanded view need, as state keys."""
+    import datetime
+    lat, lon, place, country = where
+    temp_unit, wind_key = weather_units(wcfg, country)
+    api_wind, wind_label, to_kmh = WIND_UNITS[wind_key]
+    d = http_json(
+        "https://api.open-meteo.com/v1/forecast"
+        f"?latitude={lat:.4f}&longitude={lon:.4f}&timezone=auto&forecast_days=13"
+        "&current=temperature_2m,apparent_temperature,weather_code,is_day,wind_speed_10m,wind_direction_10m,wind_gusts_10m"
+        "&hourly=temperature_2m,weather_code,precipitation_probability,is_day"
+        "&daily=temperature_2m_max,temperature_2m_min,weather_code,precipitation_probability_max"
+        f"&temperature_unit={temp_unit}&wind_speed_unit={api_wind}")
+    cur = d["current"]
+
+    def look(code, day):
+        desc, di, ni, kind = WMO.get(int(code), ("—", "\U000F0590", "\U000F0590", "cloud"))
+        if not day:
+            kind = "moon" if kind == "sun" else kind
+        return desc, (di if day else ni), kind
+
+    desc, icon, kind = look(cur["weather_code"], cur.get("is_day", 1))
+    wind = cur.get("wind_speed_10m")
+    gust = cur.get("wind_gusts_10m") or wind or 0
+    windy_above = float(wcfg.get("windy_above_kmh", 40))
+    if gust and gust * to_kmh >= windy_above:
+        icon, kind, desc = WINDY_ICON, "wind", f"Windy · {desc.lower()}"
+    # The next 12 hours, starting from the coming hour.
+    h = d["hourly"]
+    now = datetime.datetime.fromisoformat(cur["time"])
+    twelve = str(wcfg.get("clock", "12h")) != "24h"
+    hours = []
+    for i, t in enumerate(h["time"]):
+        ts = datetime.datetime.fromisoformat(t)
+        if ts <= now:
+            continue
+        _, hicon, hkind = look(h["weather_code"][i], h["is_day"][i])
+        label = ts.strftime("%-I%p").lower() if twelve else ts.strftime("%H:%M")
+        hours.append([label, hicon, h["temperature_2m"][i], h["precipitation_probability"][i] or 0, hkind])
+        if len(hours) == 12:
+            break
+    # yumi (16.10): 12 дней для свайпа в развёрнутой погоде — [подпись, значок, макс, мин, осадки %, вид]
+    days = []
+    dd = d.get("daily", {})
+    wd = ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
+    for i, t in enumerate(dd.get("time", [])[:12]):
+        ds = datetime.date.fromisoformat(t)
+        _, dicon, dkind = look(dd["weather_code"][i], 1)
+        label = "Сегодня" if i == 0 else f"{wd[ds.weekday()]} {ds.day}"
+        days.append([label, dicon, dd["temperature_2m_max"][i], dd["temperature_2m_min"][i],
+                     (dd.get("precipitation_probability_max") or [0] * 13)[i] or 0, dkind])
+    state = {
+        "weather_days": days,
+        "weather_icon": icon, "weather_kind": kind, "weather_desc": desc,
+        "weather_temp": cur["temperature_2m"], "weather_feels": cur.get("apparent_temperature"),
+        "weather_hi": d["daily"]["temperature_2m_max"][0], "weather_lo": d["daily"]["temperature_2m_min"][0],
+        "weather_hours": hours, "weather_place": place or "", "weather_stale": False,
+    }
+    if wcfg.get("show_wind", True) and wind is not None:
+        state.update(weather_wind=wind, weather_wind_unit=wind_label, weather_wind_dir=cur.get("wind_direction_10m"))
+    else:
+        state.update(weather_wind=None)
+    return state
+
+
+def art_palette(pb, count=5):
+    """A few vivid colours that carry an image's look, as hex strings."""
+    from gi.repository import GdkPixbuf
+    w = 48
+    small = pb.scale_simple(w, max(1, round(pb.get_height() * w / pb.get_width())), GdkPixbuf.InterpType.BILINEAR)
+    data, stride, nch = small.get_pixels(), small.get_rowstride(), small.get_n_channels()
+    pixels = [tuple(data[y * stride + x * nch + k] for k in range(3)) + (1.0,)
+              for y in range(small.get_height()) for x in range(small.get_width())]
+    return palette_from_pixels(pixels, count)
+
+
+def palette_from_pixels(pixels, count=5):
+    """Palette from (r, g, b, weight) pixels, 0-255 channels.
+
+    Hue buckets weighted by saturation x brightness x the pixel's own weight;
+    each chosen bucket gives its weighted mean colour, pushed bright enough to
+    glow on the Touch Bar. Mostly-one-hue images get tonal variations so the
+    palette still moves. Sorted by hue, so successive palettes blend calmly."""
+    import colorsys
+    bins = [[0.0, 0.0, 0.0, 0.0] for _ in range(24)]  # weight, r, g, b
+    for r8, g8, b8, pw in pixels:
+        if pw <= 0:
+            continue
+        r, g, b = r8 / 255, g8 / 255, b8 / 255
+        hh, ss, vv = colorsys.rgb_to_hsv(r, g, b)
+        if vv < 0.18 or ss < 0.12:
+            continue  # near-black and greys say little about the colour
+        wgt = ss * vv * pw
+        bn = bins[int(hh * 24) % 24]
+        bn[0] += wgt
+        bn[1] += r * wgt
+        bn[2] += g * wgt
+        bn[3] += b * wgt
+    ranked = sorted(range(24), key=lambda i: -bins[i][0])
+    picked = []
+    for i in ranked:
+        if bins[i][0] <= 0 or len(picked) >= count:
+            break
+        if all(min(abs(i - j), 24 - abs(i - j)) >= 2 for j in picked):
+            picked.append(i)
+    total = sum(bins[i][0] for i in range(24)) or 1
+    picked = [i for i in picked if bins[i][0] / total > 0.03] or picked[:1]
+    colours = []
+    for i in picked:
+        wgt, r, g, b = bins[i]
+        hh, ss, vv = colorsys.rgb_to_hsv(r / wgt, g / wgt, b / wgt)
+        colours.append((hh, max(ss, 0.55), max(vv, 0.85)))
+    if not colours:
+        return []
+    # One dominant hue: widen it into neighbouring tones so there's movement.
+    if len(colours) < 3:
+        h0, s0, v0 = colours[0]
+        colours += [((h0 + 0.05) % 1, s0 * 0.8, 1.0), ((h0 - 0.06) % 1, min(1, s0 * 1.15), v0 * 0.85),
+                    ((h0 + 0.1) % 1, s0 * 0.6, 1.0)][:4 - len(colours)]
+    colours.sort(key=lambda c: c[0])
+    return ["#%02x%02x%02x" % tuple(round(c * 255) for c in colorsys.hsv_to_rgb(*hsv)) for hsv in colours]
+
+
+def read_ppm(data):
+    """(width, height, rgb bytes) from a binary PPM, as grim writes it."""
+    parts, pos = [], 0
+    while len(parts) < 4:
+        while data[pos:pos + 1].isspace():
+            pos += 1
+        if data[pos:pos + 1] == b"#":
+            pos = data.index(b"\n", pos) + 1
+            continue
+        end = pos
+        while not data[end:end + 1].isspace():
+            end += 1
+        parts.append(data[pos:end])
+        pos = end
+    if parts[0] != b"P6":
+        raise ValueError("not a binary PPM")
+    w, h = int(parts[1]), int(parts[2])
+    return w, h, data[pos + 1:pos + 1 + w * h * 3]
+
+
+# ---------------------------------------------------------------------------
+# Lyrics (LRCLIB, the same free source fm.video uses)
+# ---------------------------------------------------------------------------
+
+LRCLIB = "https://lrclib.net/api"
+LYRICS_CACHE = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "touchbar" / "lyrics"
+
+
+def parse_lrc(lrc):
+    """[[seconds, line], ...] from LRC text, sorted; skips tags and empty lines."""
+    out = []
+    stamp = re.compile(r"\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]")
+    for raw in (lrc or "").splitlines():
+        times, end = [], 0
+        for mt in stamp.finditer(raw):
+            if mt.start() != end:
+                break
+            frac = mt.group(3) or ""
+            times.append(int(mt.group(1)) * 60 + int(mt.group(2)) + (int(frac) / 10 ** len(frac) if frac else 0))
+            end = mt.end()
+        line = raw[end:].strip()
+        if times and line:
+            out += [[round(t, 2), line] for t in times]
+    return sorted(out, key=lambda x: x[0])
+
+
+def clean_track(title, artist):
+    """YouTube-style titles to what a lyrics database knows: drop '(Official
+    Video)', '[Lyrics]', 'feat. X' and friends, and split 'Artist - Title'."""
+    t = re.sub(r"\s*[\(\[][^\)\]]*(official|video|audio|lyric|visuali[sz]er|remaster|hd|4k|live|mv|feat|ft\.|prod)"
+               r"[^\)\]]*[\)\]]", "", title or "", flags=re.I)
+    t = re.sub(r"\s+(ft\.?|feat\.?|featuring)\s+.*$", "", t, flags=re.I).strip(" -|")
+    a = re.sub(r"\s*-\s*topic$|VEVO$", "", artist or "", flags=re.I).strip()
+    # Unbracketed trailers, quotes around the song, and the artist's name in front.
+    t = re.sub(r"\s*[-|]?\s*(official( music)? video|official audio|lyric video|lyrics|visuali[sz]er)\s*$", "", t, flags=re.I)
+    quoted = re.search(r"[\"'\u2018\u201c]([^\"'\u2019\u201d]+)[\"'\u2019\u201d]", t)
+    if quoted and a and re.sub(r"[^a-z0-9]", "", a.lower()) in re.sub(r"[^a-z0-9]", "", t.lower()):
+        t = quoted.group(1)
+    if " - " in t:
+        left, right = t.split(" - ", 1)
+        squash = lambda x: re.sub(r"[^a-z0-9]", "", x.lower())
+        if not a or squash(a) in squash(left) or squash(left) in squash(a):
+            a, t = left.strip(), right.strip()
+    return t.strip(), a
+
+
+def fetch_lyrics_yumi(m):
+    """yumi (16.10): тот же текст, что у плеера Quickshell — yumilyrics (YouTube Music → Apple → LRCLIB, свой кэш).
+    Раньше Touch Bar искал только в LRCLIB (и ловил 429) — к части песен текста не было, хотя в плеере он есть.
+    Только с таймингами; сдвиг как у плеера (LYRICS_LEAD 0,2 с — строка чуть раньше). Нет/ошибка — [] (дальше LRCLIB)."""
+    try:
+        sys.path.insert(0, str(Path.home() / ".local/lib/yumi/panel"))
+        import yumilyrics
+        res = yumilyrics.fetch(m.get("title"), m.get("artist"), m.get("length"), m.get("url") or "")
+    except Exception as e:
+        log(f"yumilyrics: {e}")
+        return []
+    if not res or not res.get("synced") or not res.get("lines"):
+        return []
+    return [[max(0.0, round(float(t) - 0.2, 2)), s or ""] for t, s in res["lines"]]
+
+
+def fetch_lyrics(title, artist, length):
+    """Timed lyric lines for a track: [] if it has none, None if LRCLIB
+    couldn't be reached (try again later). Cached on disk per track."""
+    import hashlib
+    from urllib.parse import urlencode
+    t, a = clean_track(title, artist)
+    if not t:
+        return []
+    key = lyrics_key(title, artist, length)
+    cache = LYRICS_CACHE / f"{key}.json"
+    try:
+        return json.loads(cache.read_text())
+    except (OSError, ValueError):
+        pass
+    found = None
+    try:
+        if length:
+            try:
+                found = http_json(f"{LRCLIB}/get?" + urlencode({"artist_name": a, "track_name": t,
+                                                                "duration": round(length)}))
+            except Exception:
+                found = None
+        if not found or not (found.get("syncedLyrics") or found.get("plainLyrics")):
+            hits = http_json(f"{LRCLIB}/search?" + urlencode({"track_name": t, "artist_name": a})) or []
+            if not hits:
+                hits = http_json(f"{LRCLIB}/search?" + urlencode({"q": f"{a} {t}".strip()})) or []
+            # Prefer synced lyrics, then the closest duration.
+            hits.sort(key=lambda h: (not h.get("syncedLyrics"), abs((h.get("duration") or 0) - (length or 0))))
+            found = hits[0] if hits else None
+    except Exception as e:
+        log(f"lyrics: {e}")
+        return None  # don't cache a network failure
+    lines = parse_lrc(found.get("syncedLyrics")) if found else []
+    if not lines and found and found.get("plainLyrics") and length:
+        # Unsynced: spread the lines evenly over the song, a best effort.
+        plain = [l.strip() for l in found["plainLyrics"].splitlines() if l.strip()]
+        start, span = length * 0.08, length * 0.86
+        lines = [[round(start + span * i / max(1, len(plain)), 2), l] for i, l in enumerate(plain)]
+    try:
+        LYRICS_CACHE.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps(lines))
+        if found:
+            # What LRCLIB needs to take a timing fix back: the track as it knows it.
+            meta = {k: found.get(k) for k in ("trackName", "artistName", "albumName", "duration")}
+            meta["synced"] = bool(found.get("syncedLyrics"))
+            (LYRICS_CACHE / f"{key}.meta.json").write_text(json.dumps(meta))
+    except OSError:
+        pass
+    return lines
+
+
+def lyrics_key(title, artist, length):
+    import hashlib
+    t, a = clean_track(title, artist)
+    return hashlib.sha1(f"{a}|{t}|{round(length or 0)}".encode()).hexdigest()[:20]
+
+
+OFFSETS = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "touchbar" / "lyric-offsets.json"
+
+
+def load_offsets():
+    try:
+        return json.loads(OFFSETS.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def save_offset(key, offset):
+    offsets = load_offsets()
+    if abs(offset) < 0.05:
+        offsets.pop(key, None)
+    else:
+        offsets[key] = round(offset, 2)
+    OFFSETS.parent.mkdir(parents=True, exist_ok=True)
+    OFFSETS.write_text(json.dumps(offsets, indent=0))
+
+
+def lrc_time(t):
+    t = max(0.0, t)
+    return f"[{int(t // 60):02d}:{t % 60:05.2f}]"
+
+
+def share_lyrics_fix(key, lines, offset):
+    """Publish corrected timing to LRCLIB, the community database the lyrics
+    came from (and fm.video reads), so the fix reaches everyone. Only ever
+    called from an explicit Share tap. Returns a message for the bubble."""
+    import hashlib
+    try:
+        meta = json.loads((LYRICS_CACHE / f"{key}.meta.json").read_text())
+    except (OSError, ValueError):
+        return "Can't share: re-open the song first"
+    if not meta.get("synced"):
+        return "Can't share: these lyrics weren't synced"
+    if not all(meta.get(k) for k in ("trackName", "artistName", "albumName", "duration")):
+        return "Can't share: LRCLIB's track details are incomplete"
+    # The daemon shows a line when position + offset reaches its time, so the
+    # corrected timestamp is the old one minus the offset.
+    synced = "\n".join(f"{lrc_time(t - offset)} {line}" for t, line in lines)
+    plain = "\n".join(line for _, line in lines)
+    try:
+        ch = http_json(f"{LRCLIB}/request-challenge", method="POST")
+        prefix, target = ch["prefix"], bytes.fromhex(ch["target"])
+        nonce = 0
+        while hashlib.sha256(f"{prefix}{nonce}".encode()).digest() > target:  # proof of work
+            nonce += 1
+        http_json(f"{LRCLIB}/publish", method="POST", headers={"X-Publish-Token": f"{prefix}:{nonce}"},
+                  body={"trackName": meta["trackName"], "artistName": meta["artistName"],
+                        "albumName": meta["albumName"], "duration": meta["duration"],
+                        "plainLyrics": plain, "syncedLyrics": synced})
+    except Exception as e:
+        log(f"lyrics share: {e}")
+        return "Couldn't share just now"
+    return "Thanks, synced lyrics shared"
+
+
+PREFS = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "touchbar" / "prefs.json"
+
+
+def load_prefs():
+    try:
+        return json.loads(PREFS.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def save_prefs(changes):
+    prefs = {**load_prefs(), **changes}
+    PREFS.parent.mkdir(parents=True, exist_ok=True)
+    PREFS.write_text(json.dumps(prefs))
+
+
+def daemon_peer_ok(sock):
+    import pwd
+    import struct
+    try:
+        creds = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+        _, uid, _ = struct.unpack("3i", creds)
+    except OSError:
+        return False
+    try:
+        nobody = pwd.getpwnam("nobody").pw_uid
+    except KeyError:
+        nobody = None
+    return uid == 0 or uid == nobody
+
+
+def one_shot(msg):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.connect(SOCKET)
+    s.sendall((json.dumps(msg) + "\n").encode())
+    s.close()
+
+
+def record(argv):
+    """Record the Touch Bar to an MP4. It isn't a Wayland output, so screen
+    recorders can't see it: touchbard shares its latest frame in a memfd
+    (see daemon/src/record.rs) and we sample it at 30 fps into ffmpeg, with
+    the desktop audio and a dot under each finger."""
+    import mmap
+    import struct
+    import time
+
+    pidfile = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "touchbar-record.pid"
+    quiet = not sys.stdout.isatty()
+
+    def say(msg):
+        print(msg)
+        if quiet:
+            subprocess.run(["notify-send", "-a", "Touch Bar", msg], stderr=subprocess.DEVNULL)
+
+    # A second run stops the first, so one key or button toggles recording.
+    try:
+        os.kill(int(pidfile.read_text()), signal.SIGINT)
+        say("Stopping the Touch Bar recording")
+        return
+    except (OSError, ValueError):
+        pass
+
+    secs, out, audio = None, None, True
+    args = list(argv)
+    while args:
+        a = args.pop(0)
+        if a == "-o" and args:
+            out = args.pop(0)
+        elif a == "--no-audio":
+            audio = False
+        elif re.fullmatch(r"\d+(\.\d+)?", a):
+            secs = float(a)
+        else:
+            sys.exit("usage: touchbar-agent record [SECS] [-o FILE] [--no-audio]")
+    out = Path(out or Path.home() / "Videos" / time.strftime("touchbar-%Y%m%d-%H%M%S.mp4"))
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.connect(SOCKET)
+    s.sendall(b'{"t":"record"}\n')
+    s.settimeout(3)
+    buf, fd, info = b"", None, None
+    try:
+        while info is None:
+            data, fds, _, _ = socket.recv_fds(s, 65536, 1)
+            if not data:
+                sys.exit("touchbard closed the connection")
+            fd = fds[0] if fds else fd
+            buf += data
+            while b"\n" in buf and info is None:
+                line, buf = buf.split(b"\n", 1)
+                try:
+                    m = json.loads(line)
+                except ValueError:
+                    continue
+                if m.get("t") == "record":
+                    info = m
+    except TimeoutError:
+        sys.exit("touchbard didn't answer; it may predate recording (reinstall it)")
+    if fd is None:
+        sys.exit("touchbard sent no frame buffer")
+    w, h, off, stride = info["w"], info["h"], info["offset"], info["stride"]
+    size = stride * h
+    shm = mmap.mmap(fd, off + size, prot=mmap.PROT_READ)
+    os.close(fd)
+
+    # Keep reading the socket (the daemon also broadcasts state to us) so it
+    # never backs up; the daemon going away ends the recording.
+    import threading
+    gone = threading.Event()
+
+    def drain():
+        s.settimeout(None)
+        try:
+            while s.recv(65536):
+                pass
+        except OSError:
+            pass
+        gone.set()
+    threading.Thread(target=drain, daemon=True).start()
+
+    def grab():
+        # Seqlock: odd while touchbard is writing a frame.
+        while True:
+            a = struct.unpack_from("<Q", shm, 16)[0]
+            if not a & 1:
+                f = shm[off:off + size]
+                if struct.unpack_from("<Q", shm, 16)[0] == a:
+                    return f
+            time.sleep(0.001)
+
+    cmd = ["ffmpeg", "-loglevel", "error", "-y",
+           "-f", "rawvideo", "-pix_fmt", "bgra", "-s", f"{stride // 4}x{h}", "-framerate", "30", "-i", "-"]
+    if audio:
+        cmd += ["-thread_queue_size", "1024", "-f", "pulse", "-i", "@DEFAULT_MONITOR@", "-c:a", "aac", "-b:a", "192k"]
+    cmd += ["-vf", f"crop={w}:{h}:0:0,format=yuv420p", "-c:v", "libx264", "-preset", "veryfast",
+            "-crf", "16", "-shortest", "-movflags", "+faststart", str(out)]
+    # Its own session, so Ctrl-C reaches only us and we finish the file cleanly.
+    ff = subprocess.Popen(cmd, stdin=subprocess.PIPE, start_new_session=True)
+
+    pidfile.write_text(str(os.getpid()))
+    say("Recording the Touch Bar" + (f" for {secs:g} s" if secs else "; run it again or Ctrl-C to stop"))
+    t0, n = time.monotonic(), 0
+    try:
+        while (secs is None or n < secs * 30) and not gone.is_set() and ff.poll() is None:
+            wait = t0 + n / 30 - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+            ff.stdin.write(grab())
+            n += 1
+    except (KeyboardInterrupt, BrokenPipeError):
+        pass
+    finally:
+        pidfile.unlink(missing_ok=True)
+    try:
+        ff.stdin.close()
+    except BrokenPipeError:
+        pass
+    if ff.wait() == 0:
+        say(f"Saved {out} ({n / 30:.1f} s)")
+    else:
+        sys.exit("ffmpeg failed")
+
+
+if __name__ == "__main__" and len(sys.argv) > 1:
+    arg = sys.argv[1]
+    if arg == "--dump-layout":
+        print(json.dumps(build_layout(load_config()), indent=1, ensure_ascii=False))
+    elif arg == "--dump-theme":
+        print(json.dumps(build_theme(load_config()), indent=1))
+    elif arg == "plugin":
+        sub = sys.argv[2] if len(sys.argv) > 2 else "list"
+        user_dir = CONFIG.parent / "plugins"
+        if sub == "list":
+            for name, (folder, meta) in find_plugins().items():
+                print(f"{name:12} {meta.get('description', '')}\n{'':12} {folder}")
+        elif sub == "add" and len(sys.argv) > 4:
+            # Plugins run as you, so they're pinned: an exact commit, checked out detached.
+            url, rev = sys.argv[3], sys.argv[4]
+            if not re.fullmatch(r"[0-9a-f]{40}", rev):
+                sys.exit("give the full 40-character commit to install, e.g. from the plugin's GitHub page")
+            user_dir.mkdir(parents=True, exist_ok=True)
+            dest = user_dir / Path(url.rstrip("/")).stem
+            subprocess.run(["git", "clone", "--no-checkout", url, str(dest)], check=True)
+            subprocess.run(["git", "-C", str(dest), "checkout", "--detach", rev], check=True)
+            print(f"Installed {dest.name} at {rev[:12]}. Use it with {{ plugin = \"{dest.name}\" }} in a layer.")
+        elif sub == "remove" and len(sys.argv) > 3:
+            import shutil
+            shutil.rmtree(user_dir / sys.argv[3])
+        else:
+            print("touchbar-agent plugin [list | add <git-url> <commit-sha> | remove <name>]")
+    elif arg == "eq":
+        # touchbar-agent eq [on|off|toggle]: the equaliser behind the track title.
+        want = sys.argv[2] if len(sys.argv) > 2 else "toggle"
+        import time
+        prefs = load_prefs()
+        # A click can arrive more than once (e.g. duplicated widgets); a second
+        # toggle within half a second would undo the first.
+        if want == "toggle" and time.time() - prefs.get("eq_at", 0) < 0.5:
+            sys.exit(0)
+        save_prefs({"eq_at": time.time()})
+        cur = prefs.get("eq", True)
+        on = {"on": True, "off": False}.get(want, not cur)
+        save_prefs({"eq": on})
+        subprocess.run(["systemctl", "--user", "kill", "--signal=USR1", "touchbar-agent.service"],
+                       stderr=subprocess.DEVNULL)
+        print(f"equaliser {'on' if on else 'off'}")
+    elif arg == "record":
+        record(sys.argv[2:])
+    elif arg == "--layer" and len(sys.argv) > 2:
+        one_shot({"t": "layer", "name": sys.argv[2]})
+    else:
+        print(__doc__)
+        sys.exit(0 if arg in ("-h", "--help") else 2)
+    sys.exit(0)
+
+# ---------------------------------------------------------------------------
+# The running agent
+# ---------------------------------------------------------------------------
+
+import gi  # noqa: E402
+
+gi.require_version("Gio", "2.0")
+from gi.repository import Gio, GLib  # noqa: E402
+
+
+def log(*a):
+    print(*a, file=sys.stderr, flush=True)
+
+
+class Agent:
+    def __init__(self):
+        self.sock = None
+        self.rbuf = b""
+        self.state = {}
+        self.sent_state = {}
+        self.layout_msg = None
+        self.theme_msg = None
+        self.config_sig = None
+        self.theme_sig = None
+        self.pending_set = {}
+        self.setter_busy = False
+        self.set_timer = None
+        self.vol_timer = None
+        self.plugins = {}
+        self.surfaces = {}
+        self.power_on = True
+        self.media = {}
+        self.art_url = None
+        prefs = load_prefs()
+        self.state["eq"] = prefs.get("eq", True)
+        self.state["karaoke"] = bool(prefs.get("karaoke", False))
+        # Touch Bar backlight ceiling, 0..1; defaults to the configured max_brightness.
+        try:
+            default_tb = float(load_config().get("settings", {}).get("max_brightness", 160)) / 255
+        except Exception:
+            default_tb = 160 / 255
+        self.state["tb_level"] = float(prefs.get("tb_level", round(default_tb, 3)))
+        self.lyrics_key = None
+        for k in ("bar_style", "text_style", "viz_mood"):
+            if isinstance(prefs.get(k), int):
+                self.state[k] = prefs[k]
+
+        self.reload(force=True)
+        self.connect()
+        GLib.timeout_add(200, self.reconnect_tick)   # yumi: 0,2 с, а не 2 с — меньше старой раскладки touchbard при запуске
+        GLib.timeout_add(1500, self.watch_files)
+        GLib.timeout_add(600, self.poll_sysfs)
+        try:
+            gi.require_version("GLibUnix", "2.0")
+            from gi.repository import GLibUnix
+            GLibUnix.signal_add(GLib.PRIORITY_DEFAULT, signal.SIGUSR1, self.on_usr1)
+        except (ImportError, ValueError):
+            GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGUSR1, self.on_usr1)
+
+        self.start_volume_watch()
+        self.start_media_watch()
+        self.start_finger_watch()
+        self.start_hyprland_watch()
+        self.poll_sysfs()
+        GLib.timeout_add_seconds(3, self.media_tick)
+        self.weather_where, self.weather_ok_at, self.weather_retry = None, 0.0, None
+        self.live_prev, self.live_busy = None, False
+        GLib.timeout_add(2000, self.live_tick)
+        try:   # yumi: последняя известная погода сразу, пока свежая не пришла (сеть при загрузке ещё не поднялась)
+            self.push_state(**json.loads(WEATHER_MEM.read_text()))
+        except (OSError, ValueError, TypeError):
+            pass
+        self.weather_tick()
+        GLib.timeout_add_seconds(15 * 60, self.weather_tick)
+
+    # ---- connection -------------------------------------------------------
+
+    def connect(self):
+        if self.sock:
+            return True
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.connect(SOCKET)
+            s.setblocking(False)
+        except OSError:
+            return False
+        # We run commands the daemon sends us, so make sure it is the daemon:
+        # root (before it drops privileges) or the unprivileged "nobody" it drops to.
+        if not daemon_peer_ok(s):
+            log("refusing to talk to a socket that isn't owned by touchbard")
+            s.close()
+            return False
+        self.sock = s
+        self.rbuf = b""
+        GLib.io_add_watch(s.fileno(), GLib.PRIORITY_DEFAULT,
+                          GLib.IOCondition.IN | GLib.IOCondition.HUP | GLib.IOCondition.ERR, self.on_readable)
+        log("connected to touchbard")
+        self.push_all()
+        return True
+
+    def disconnect(self):
+        if self.sock:
+            try:
+                self.sock.close()
+            except OSError:
+                pass
+        self.sock = None
+        log("disconnected from touchbard")
+
+    def reconnect_tick(self):
+        self.connect()
+        return True
+
+    def send(self, msg, droppable=False):
+        if not self.sock:
+            return
+        data = (json.dumps(msg, ensure_ascii=False) + "\n").encode()
+        if droppable:
+            # High-rate data (the spectrum): if the daemon is busy, skip a frame
+            # rather than stall or tear down the connection.
+            try:
+                self.sock.setblocking(False)
+                if self.sock.send(data) != len(data):
+                    self.disconnect()  # half a line would corrupt the stream
+            except BlockingIOError:
+                pass
+            except OSError:
+                self.disconnect()
+            return
+        try:
+            self.sock.setblocking(True)
+            self.sock.settimeout(1.0)
+            self.sock.sendall(data)
+            self.sock.setblocking(False)
+        except OSError:
+            self.disconnect()
+
+    def push_all(self):
+        if self.theme_msg:
+            self.send(self.theme_msg)
+        if self.layout_msg:
+            self.send(self.layout_msg)
+        self.sent_state = {}
+        self.push_state()
+
+    def push_state(self, **changes):
+        self.state.update(changes)
+        diff = {k: v for k, v in self.state.items() if self.sent_state.get(k, object()) != v}
+        if diff:
+            self.send({"t": "state", **diff})
+            self.sent_state.update(diff)
+
+    def on_readable(self, fd, cond):
+        if not self.sock or fd != self.sock.fileno():
+            return False
+        try:
+            chunk = self.sock.recv(65536)
+        except BlockingIOError:
+            return True
+        except OSError:
+            chunk = b""
+        if not chunk:
+            self.disconnect()
+            return False
+        self.rbuf += chunk
+        while b"\n" in self.rbuf:
+            line, self.rbuf = self.rbuf.split(b"\n", 1)
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue
+            self.handle(msg)
+        return True
+
+    def handle(self, msg):
+        t = msg.get("t")
+        if t == "hello":
+            pass  # push_all already ran on connect
+        elif t == "run":
+            self.run(msg.get("cmd", ""))
+        elif t == "set" and msg.get("k") in ("bar_style", "text_style", "viz_mood"):
+            # Full-screen choices: remember them, and hand them back on reconnect.
+            n = int(float(msg["v"]))
+            self.state[msg["k"]] = self.sent_state[msg["k"]] = n
+            save_prefs({msg["k"]: n})
+        elif t == "set" and msg.get("k") == "lyrics_offset":
+            # Remembered per track, so the song stays in sync next time.
+            v = round(float(msg["v"]), 2)
+            self.state["lyrics_offset"] = self.sent_state["lyrics_offset"] = v
+            if getattr(self, "lyrics_store_key", None):
+                save_offset(self.lyrics_store_key, v)
+        elif t == "set" and msg.get("k") == "lyrics_share":
+            key, lines, offset = getattr(self, "lyrics_store_key", None), getattr(self, "lyrics_lines", []), float(msg["v"])
+            if not key or not lines or abs(offset) < 0.05:
+                self.send({"t": "state", "toast": "Nothing to share: adjust the sync first"})
+            else:
+                self.send({"t": "state", "toast": "Sharing the fix with LRCLIB…"})
+                import threading
+                threading.Thread(target=lambda: (lambda r: GLib.idle_add(
+                    lambda: (self.send({"t": "state", "toast": r}), False)[1]))(share_lyrics_fix(key, lines, offset)),
+                    daemon=True).start()
+        elif t == "set" and msg.get("k") == "tb_level":
+            v = max(0.03, min(1.0, float(msg["v"])))
+            self.state["tb_level"] = self.sent_state["tb_level"] = v
+            save_prefs({"tb_level": round(v, 3)})
+        elif t == "set" and msg.get("k") == "karaoke":
+            on = float(msg["v"]) > 0.5
+            self.state["karaoke"] = self.sent_state["karaoke"] = on
+            save_prefs({"karaoke": on})
+        elif t == "set" and msg.get("k") in ("eq", "viz"):
+            on = float(msg["v"]) > 0.5
+            self.state[msg["k"]] = self.sent_state[msg["k"]] = on
+            if msg["k"] == "eq":
+                save_prefs({"eq": on})
+            self.sync_plugins()
+        elif t == "set":
+            self.queue_set(msg["k"], float(msg["v"]))
+        elif t == "surfaces":
+            self.surfaces = {s["id"]: s for s in msg.get("list", [])}
+            self.sync_plugins()
+        elif t == "plugin_cmd":
+            p = self.plugins.get(msg.get("id"))
+            if p:
+                p.send({"t": "cmd", "cmd": msg.get("cmd"), "x": msg.get("x", 0)})
+        elif t == "power":
+            self.power_on = bool(msg.get("on"))
+            self.sync_plugins()
+        elif t == "seek":
+            self.seek(float(msg.get("pos", 0)))
+        elif t == "layer":
+            # yumi (19.10): демон сменил слой свайпом — пока только в журнал
+            log(f"layer (свайп): {msg.get('name')}")
+
+    # ---- plugins ----------------------------------------------------------
+
+    def send_frame(self, pid, w, h, data):
+        if not self.sock:
+            return
+        header = (json.dumps({"t": "pixels", "id": pid, "w": w, "h": h, "len": len(data)}) + "\n").encode()
+        try:
+            self.sock.setblocking(True)
+            self.sock.settimeout(1.0)
+            self.sock.sendall(header + data)
+            self.sock.setblocking(False)
+        except OSError:
+            self.disconnect()
+
+    def sync_plugins(self):
+        available = find_plugins()
+        want = {}
+        if self.sock and self.power_on:
+            for pid, spec in self.surfaces.items():
+                want[pid] = spec
+            # Background plugins (cava) run while music plays or a visualiser is up.
+            for name, (_, meta) in available.items():
+                spectrum = ((self.layout_msg or {}).get("settings", {}).get("nowplaying", "bars") != "off")
+                wanted = self.state.get("eq", True) or self.state.get("viz")
+                if meta.get("background") == "playing" and spectrum and wanted and self.state.get("playing"):
+                    want.setdefault(name, None)
+        import time
+        now = time.monotonic()
+        for pid, p in list(self.plugins.items()):
+            if not p.alive():
+                self.plugins.pop(pid).stop()
+            elif pid in want:
+                p.unwanted_since = None
+            elif not p.background:
+                self.plugins.pop(pid).stop()  # a surface that's no longer shown
+            elif p.unwanted_since is None:
+                # Background plugins get a grace period, so quick play/pause
+                # toggles don't restart them over and over.
+                p.unwanted_since = now
+                # yumi (19.10): 120 с вместо 10 — при листании слоёв свайпом плагины не перезапускаются
+                GLib.timeout_add_seconds(121, lambda: (self.sync_plugins(), False)[1])
+            elif now - p.unwanted_since >= 120:
+                self.plugins.pop(pid).stop()
+        for pid, spec in want.items():
+            p = self.plugins.get(pid)
+            if p is None:
+                if pid not in available:
+                    continue
+                folder, meta = available[pid]
+                try:
+                    p = self.plugins[pid] = Plugin(self, pid, folder, meta)
+                except OSError as e:
+                    log(f"plugin {pid}: {e}")
+                    continue
+                if self.theme_msg:
+                    p.send(self.theme_msg)
+                p.send({"t": "media", **self.media})
+            if spec and p.size != (spec["w"], spec["h"], json.dumps(spec.get("options"))):
+                p.size = (spec["w"], spec["h"], json.dumps(spec.get("options")))
+                p.send({"t": "size", "w": spec["w"], "h": spec["h"], "options": spec.get("options")})
+
+    # ---- config and theme -------------------------------------------------
+
+    def file_sig(self, p):
+        try:
+            p = Path(os.path.realpath(p))
+            st = p.stat()
+            return (str(p), st.st_mtime_ns, st.st_size)
+        except OSError:
+            return None
+
+    def reload(self, force=False):
+        cfg_sig = self.file_sig(CONFIG if CONFIG.exists() else DEFAULT_CONFIG)
+        theme_sig = self.file_sig(THEME)
+        if not force and cfg_sig == self.config_sig and theme_sig == self.theme_sig:
+            return
+        try:
+            cfg = load_config()
+            layout = build_layout(cfg)
+            theme = build_theme(cfg)
+        except Exception as e:  # keep the last good layout on a typo
+            log(f"config error: {e}")
+            self.notify("Touch Bar config error", str(e))
+            self.config_sig = cfg_sig
+            return
+        self.config_sig, self.theme_sig = cfg_sig, theme_sig
+        if theme != self.theme_msg:
+            self.theme_msg = theme
+            self.send(theme)
+            for p in getattr(self, "plugins", {}).values():
+                p.send(theme)
+        if layout != self.layout_msg:
+            self.layout_msg = layout
+            self.send(layout)
+        # Any config save may have changed [weather] (location, units).
+        wcfg = json.dumps(cfg.get("weather", {}), sort_keys=True)
+        if hasattr(self, "weather_where") and wcfg != getattr(self, "weather_cfg", None):
+            self.weather_cfg = wcfg
+            self.weather_where = None
+            self.weather_tick()
+
+    def watch_files(self):
+        self.reload()
+        return True
+
+    def on_usr1(self):
+        self.reload(force=True)
+        # `touchbar-agent eq ...` changes the saved preference, then signals us.
+        eq = load_prefs().get("eq", True)
+        if eq != self.state.get("eq"):
+            self.push_state(eq=eq)
+            self.sync_plugins()
+        return True
+
+    def notify(self, title, body):
+        subprocess.Popen(["notify-send", "-a", "Touch Bar", title, body],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    # ---- actions ----------------------------------------------------------
+
+    def run(self, command):
+        if not command:
+            return
+        subprocess.Popen(["bash", "-lc", command], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+
+    def queue_set(self, k, v):
+        # Drags send a stream of values; apply only the newest, one at a time.
+        self.pending_set[k] = v
+        self.state[k] = v
+        self.sent_state[k] = v
+        if not self.setter_busy:
+            self.apply_next_set()
+
+    def apply_next_set(self):
+        if not self.pending_set:
+            self.setter_busy = False
+            return
+        k, v = self.pending_set.popitem()
+        pct = round(v * 100)
+        if k == "volume":
+            unmute = " && wpctl set-mute @DEFAULT_AUDIO_SINK@ 0" if self.state.get("muted") and v > 0 else ""
+            command = f"wpctl set-volume @DEFAULT_AUDIO_SINK@ {v:.3f}{unmute}"
+        elif k == "brightness":
+            command = f"brightnessctl -q -d {shlex.quote(self.display_bl or 'apple-panel-bl')} set {max(pct, 1)}%"
+        elif k == "keyboard":
+            command = f"brightnessctl -q -d kbd_backlight set {pct}%"
+        else:
+            self.apply_next_set()
+            return
+        self.setter_busy = True
+        proc = Gio.Subprocess.new(["bash", "-c", command], Gio.SubprocessFlags.STDOUT_SILENCE
+                                  | Gio.SubprocessFlags.STDERR_SILENCE)
+        proc.wait_async(None, lambda p, r: (p.wait_finish(r), self.apply_next_set()))
+
+    # ---- screen and keyboard brightness ------------------------------------
+
+    display_bl = None
+
+    def poll_sysfs(self):
+        if self.display_bl is None:
+            for name in ("apple-panel-bl", "intel_backlight", "gmux_backlight", "acpi_video0"):
+                if Path(f"/sys/class/backlight/{name}").exists():
+                    self.display_bl = name
+                    break
+        changes = {}
+        for key_, base in (("brightness", f"/sys/class/backlight/{self.display_bl}"),
+                           ("keyboard", "/sys/class/leds/kbd_backlight")):
+            if key_ in self.pending_set:
+                continue
+            try:
+                cur = int(Path(base, "brightness").read_text())
+                mx = int(Path(base, "max_brightness").read_text())
+                changes[key_] = round(cur / mx, 3) if mx else 0.0
+            except (OSError, ValueError, TypeError):
+                pass
+        self.push_state(**changes)
+        return True
+
+    # ---- volume -----------------------------------------------------------
+
+    def start_volume_watch(self):
+        self.read_volume()
+        if not getattr(self, "vol_resync", None):          # yumi 18.10: страховка от потерянных событий
+            self.vol_resync = GLib.timeout_add_seconds(2, self.resync_volume)
+        try:
+            self.pactl = Gio.Subprocess.new(["pactl", "subscribe"], Gio.SubprocessFlags.STDOUT_PIPE)
+        except GLib.Error as e:
+            log(f"pactl subscribe: {e.message}")
+            return
+        self.pactl_out = Gio.DataInputStream.new(self.pactl.get_stdout_pipe())
+        self.pactl_out.read_line_async(GLib.PRIORITY_DEFAULT, None, self.on_pactl_line)
+
+    def on_pactl_line(self, stream, res):
+        try:
+            line, _ = stream.read_line_finish_utf8(res)
+        except GLib.Error:
+            line = None
+        if line is None:
+            # pactl died (PipeWire restart); start over shortly.
+            GLib.timeout_add_seconds(2, lambda: (self.start_volume_watch(), False)[1])
+            return
+        if any(w in line for w in ("sink", "source", "server")):
+            if self.vol_timer is None:
+                self.vol_timer = GLib.timeout_add(40, self.read_volume)
+        stream.read_line_async(GLib.PRIORITY_DEFAULT, None, self.on_pactl_line)
+
+    def resync_volume(self):
+        """yumi 18.10: раз в 2 с сверить кнопки звука/микрофона с PipeWire — если событие pactl потерялось,
+        Mute на тачбаре не остаётся в другом состоянии, чем бар."""
+        if self.vol_timer is None:
+            self.read_volume()
+        return True
+
+    def read_volume(self):
+        self.vol_timer = None
+        changes = {}
+        for target, vk, mk in (("@DEFAULT_AUDIO_SINK@", "volume", "muted"),
+                               ("@DEFAULT_AUDIO_SOURCE@", None, "mic_muted")):
+            try:
+                out = subprocess.run(["wpctl", "get-volume", target], capture_output=True, text=True,
+                                     timeout=2).stdout
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            m = re.search(r"Volume:\s*([\d.]+)", out)
+            if m and vk and vk not in self.pending_set:
+                changes[vk] = min(float(m.group(1)), 1.0)
+            if m:
+                changes[mk] = "[MUTED]" in out
+        self.push_state(**changes)
+        return False
+
+    # ---- now playing (MPRIS) ----------------------------------------------
+
+    def start_media_watch(self):
+        try:
+            self.session = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        except GLib.Error as e:
+            log(f"session bus: {e.message}")
+            return
+        self.media_timer = None
+        self.session.signal_subscribe(None, "org.freedesktop.DBus.Properties", "PropertiesChanged",
+                                      "/org/mpris/MediaPlayer2", None, Gio.DBusSignalFlags.NONE,
+                                      self.on_media_signal)
+        self.session.signal_subscribe("org.freedesktop.DBus", "org.freedesktop.DBus", "NameOwnerChanged",
+                                      None, None, Gio.DBusSignalFlags.NONE, self.on_media_signal)
+        self.read_media()
+
+    def on_media_signal(self, *args):
+        if self.media_timer is None:
+            self.media_timer = GLib.timeout_add(80, self.read_media)
+
+    def read_media(self):
+        self.media_timer = None
+        best = None
+        try:
+            names = self.session.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus",
+                                           "org.freedesktop.DBus", "ListNames", None, None,
+                                           Gio.DBusCallFlags.NONE, 1000, None).unpack()[0]
+        except GLib.Error:
+            names = []
+        rank = {"Playing": 0, "Paused": 1}
+        for name in names:
+            if not name.startswith("org.mpris.MediaPlayer2."):
+                continue
+            try:
+                props = self.session.call_sync(name, "/org/mpris/MediaPlayer2", "org.freedesktop.DBus.Properties",
+                                               "GetAll", GLib.Variant("(s)", ("org.mpris.MediaPlayer2.Player",)),
+                                               None, Gio.DBusCallFlags.NONE, 500, None).unpack()[0]
+            except GLib.Error:
+                continue
+            status = props.get("PlaybackStatus", "Stopped")
+            meta = props.get("Metadata", {}) or {}
+            title = meta.get("xesam:title") or ""
+            artist = meta.get("xesam:artist") or []
+            artist = ", ".join(artist) if isinstance(artist, list) else str(artist)
+            r = rank.get(status, 2)
+            if title and (best is None or r < best[0]):
+                best = (r, name, status, title, artist, meta, props.get("Position", 0))
+        if best:
+            _, name, status, title, artist, meta, pos_us = best
+            length = (meta.get("mpris:length") or 0) / 1e6
+            self.media = {"player": name, "title": title, "artist": artist, "playing": status == "Playing",
+                          "position": round(pos_us / 1e6, 2), "length": round(length, 2),
+                          "url": meta.get("xesam:url") or "", "art_url": meta.get("mpris:artUrl") or "",
+                          "trackid": meta.get("mpris:trackid") or ""}
+            self.push_state(playing=status == "Playing", title=title, artist=artist,
+                            position=self.media["position"], length=self.media["length"])
+            self.update_art(self.media["art_url"])
+            self.update_lyrics()
+        else:
+            self.media = {}
+            self.push_state(playing=False, title="", artist="", length=0)
+            self.update_art("")
+        for p in self.plugins.values():
+            p.send({"t": "media", **self.media})
+        self.sync_plugins()
+        return False
+
+    # ---- live colours: follow the video on screen --------------------------
+
+    def player_window(self):
+        """Hyprland's stable id for the playing player's window, or None."""
+        name = self.media.get("player")
+        if not name:
+            return None
+        try:
+            pid = self.session.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+                                         "GetConnectionUnixProcessID", GLib.Variant("(s)", (name,)),
+                                         None, Gio.DBusCallFlags.NONE, 500, None).unpack()[0]
+            clients = json.loads(subprocess.run(["hyprctl", "-j", "clients"], capture_output=True, text=True,
+                                                timeout=2).stdout or "[]")
+        except (GLib.Error, OSError, ValueError, subprocess.TimeoutExpired):
+            return None
+        mine = [c for c in clients if c.get("pid") == pid and c.get("stableId")]
+        if not mine:
+            return None
+        title = (self.media.get("title") or "").lower()
+        # Prefer the window showing this track, else the biggest one.
+        mine.sort(key=lambda c: (title not in (c.get("title") or "").lower(),
+                                 -(c.get("size", [0, 0])[0] * c.get("size", [0, 0])[1])))
+        return mine[0]["stableId"]
+
+    def live_tick(self):
+        settings = (self.layout_msg or {}).get("settings", {})
+        if (settings.get("viz_colors") != "live" or not self.state.get("playing") or not self.power_on
+                or not self.sock or self.live_busy):
+            self.live_prev = None if not self.state.get("playing") else self.live_prev
+            return True
+        wid = self.player_window()
+        if not wid:
+            return True
+        self.live_busy = True
+        import threading
+
+        def work():
+            palette = None
+            try:
+                # A thumbnail of that window, even if it's on another workspace.
+                out = subprocess.run(["grim", "-T", str(wid), "-s", "0.06", "-t", "ppm", "-"],
+                                     capture_output=True, timeout=3).stdout
+                w, h, rgb = read_ppm(out)
+                prev, self.live_prev = self.live_prev, (w, h, rgb)
+                if prev and prev[:2] == (w, h):
+                    old = prev[2]
+                    pixels, motion = [], 0.0
+                    for i in range(0, w * h * 3, 3):
+                        d = (abs(rgb[i] - old[i]) + abs(rgb[i + 1] - old[i + 1]) + abs(rgb[i + 2] - old[i + 2])) / 765
+                        motion += d
+                        # What moved is the video; what didn't is page and grid.
+                        pixels.append((rgb[i], rgb[i + 1], rgb[i + 2], 0.03 + min(1.0, d * 8)))
+                    if motion / (w * h) > 0.004:
+                        palette = palette_from_pixels(pixels)
+            except (OSError, ValueError, IndexError, subprocess.TimeoutExpired) as e:
+                log(f"live colours: {e}")
+
+            def done():
+                self.live_busy = False
+                if palette:
+                    self.push_state(palette=palette)
+                return False
+            GLib.idle_add(done)
+
+        threading.Thread(target=work, daemon=True).start()
+        return True
+
+    def update_lyrics(self):
+        m = self.media
+        key = (m.get("title"), m.get("artist"), round(m.get("length") or 0))
+        if key == self.lyrics_key:
+            return
+        self.lyrics_key = key
+        self.lyrics_store_key = lyrics_key(m.get("title"), m.get("artist"), m.get("length")) if m.get("title") else None
+        self.lyrics_lines = []
+        offset = load_offsets().get(self.lyrics_store_key, 0.0) if self.lyrics_store_key else 0.0
+        self.push_state(lyrics=[], lyrics_status="searching" if m.get("title") else "none", lyrics_offset=offset)
+        if m.get("title"):
+            # Players publish a new track in pieces (title first, then artist
+            # and length). Let it settle, or we'd look up a half-updated track
+            # and flash "no lyrics" just before finding them.
+            self.lyrics_attempt(key, 0, 1.5)
+
+    def lyrics_attempt(self, key, tries, delay):
+        import threading
+
+        def start():
+            if key != self.lyrics_key:
+                return False
+            m = dict(self.media)
+
+            def work():
+                lines = fetch_lyrics_yumi(m)
+                if not lines:
+                    lines = fetch_lyrics(m.get("title"), m.get("artist"), m.get("length"))
+                GLib.idle_add(lambda: (self.lyrics_done(key, tries, lines), False)[1])
+            threading.Thread(target=work, daemon=True).start()
+            return False
+        GLib.timeout_add(int(delay * 1000), start)
+
+    def lyrics_done(self, key, tries, lines):
+        if key != self.lyrics_key:
+            return
+        if lines is None:
+            # LRCLIB unreachable (it answers 503 at times): that says nothing
+            # about the song, so keep "searching" and retry at 5, 15, 45 s.
+            if tries < 3:
+                self.lyrics_attempt(key, tries + 1, 5 * 3 ** tries)
+            else:
+                self.push_state(lyrics_status="unavailable")
+            return
+        self.lyrics_lines = lines
+        self.push_state(lyrics=lines, lyrics_status="found" if lines else "none")
+
+    def media_tick(self):
+        # Players only signal changes, not progress; re-read to keep the time honest.
+        if self.state.get("playing"):
+            self.read_media()
+        return True
+
+    def seek(self, pos):
+        m = self.media
+        if not m.get("player"):
+            return
+        try:
+            if m.get("trackid"):
+                self.session.call_sync(m["player"], "/org/mpris/MediaPlayer2", "org.mpris.MediaPlayer2.Player",
+                                       "SetPosition", GLib.Variant("(ox)", (m["trackid"], int(pos * 1e6))),
+                                       None, Gio.DBusCallFlags.NONE, 1000, None)
+            else:
+                delta = pos - float(m.get("position") or 0)
+                self.session.call_sync(m["player"], "/org/mpris/MediaPlayer2", "org.mpris.MediaPlayer2.Player",
+                                       "Seek", GLib.Variant("(x)", (int(delta * 1e6),)),
+                                       None, Gio.DBusCallFlags.NONE, 1000, None)
+        except GLib.Error as e:
+            log(f"seek: {e.message}")
+        GLib.timeout_add(300, self.read_media)
+
+    def update_art(self, url):
+        if url == self.art_url:
+            return
+        self.art_url = url
+        if not url:
+            self.send({"t": "art", "png": ""})
+            self.push_state(palette=[])
+            return
+
+        def load():
+            import base64
+            import urllib.request
+            try:
+                if url.startswith("file://"):
+                    from urllib.parse import unquote
+                    data = open(unquote(url[7:]), "rb").read()
+                else:
+                    with urllib.request.urlopen(url, timeout=6) as r:
+                        data = r.read(8 << 20)
+                gi.require_version("GdkPixbuf", "2.0")
+                from gi.repository import GdkPixbuf
+                loader = GdkPixbuf.PixbufLoader()
+                loader.write(data)
+                loader.close()
+                pb = loader.get_pixbuf()
+                palette = art_palette(pb)
+                side = 108
+                scale = side / min(pb.get_width(), pb.get_height())
+                pb = pb.scale_simple(max(1, int(pb.get_width() * scale)), max(1, int(pb.get_height() * scale)),
+                                     GdkPixbuf.InterpType.BILINEAR)
+                ok, png = pb.save_to_bufferv("png", [], [])
+                b64 = base64.b64encode(png).decode() if ok else ""
+            except Exception as e:  # art is decoration; never let it take the agent down
+                log(f"art: {e}")
+                b64, palette = "", []
+            if url == self.art_url:
+                GLib.idle_add(lambda: (self.send({"t": "art", "png": b64}), self.push_state(palette=palette),
+                                       False)[2])
+
+        import threading
+        threading.Thread(target=load, daemon=True).start()
+
+    # ---- weather ----------------------------------------------------------
+
+    def weather_tick(self):
+        import threading
+        import time
+        try:
+            wcfg = load_config().get("weather", {})
+        except Exception:
+            wcfg = {}
+
+        def work():
+            try:
+                if self.weather_where is None or wcfg.get("location"):
+                    self.weather_where = weather_location(wcfg)
+                state = fetch_weather(wcfg, self.weather_where)
+                self.weather_ok_at = time.time()
+                try:   # yumi: запомнить — при следующем запуске сразу показать (как виджет экрана блокировки)
+                    WEATHER_MEM.parent.mkdir(parents=True, exist_ok=True)
+                    WEATHER_MEM.write_text(json.dumps(state, ensure_ascii=False))
+                except OSError:
+                    pass
+            except Exception as e:  # offline, rate limited, ...; keep the last reading
+                log(f"weather: {e}")
+                stale = time.time() - self.weather_ok_at > 3600
+                state = {"weather_stale": stale}
+                # One retry at a time, however many failures (or ticks) pile up.
+                if not self.weather_retry:
+                    def retry():
+                        self.weather_retry = None
+                        self.weather_tick()
+                        return False
+                    GLib.idle_add(lambda: (setattr(self, "weather_retry",
+                                                   self.weather_retry or GLib.timeout_add_seconds(10 if not self.weather_ok_at else 120, retry)), False)[1])  # yumi: пока погоды ещё не было (сеть при загрузке) — каждые 10 с
+            GLib.idle_add(lambda: (self.push_state(**state), False)[1])
+
+        threading.Thread(target=work, daemon=True).start()
+        return True
+
+    # ---- Hyprland: workspaces and per-app layers ---------------------------
+
+    def start_hyprland_watch(self):
+        sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
+        run_dir = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+        if not sig:
+            return
+        path = f"{run_dir}/hypr/{sig}/.socket2.sock"
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.connect(path)
+            s.setblocking(False)
+        except OSError as e:
+            log(f"hyprland events: {e}")
+            GLib.timeout_add_seconds(5, lambda: (self.start_hyprland_watch(), False)[1])
+            return
+        self.hypr_sock, self.hypr_buf, self.hypr_timer, self.app_layer = s, b"", None, None
+        GLib.io_add_watch(s.fileno(), GLib.PRIORITY_DEFAULT, GLib.IOCondition.IN | GLib.IOCondition.HUP,
+                          self.on_hypr)
+        self.read_hyprland()
+
+    def on_hypr(self, fd, cond):
+        try:
+            chunk = self.hypr_sock.recv(65536)
+        except BlockingIOError:
+            return True
+        except OSError:
+            chunk = b""
+        if not chunk:
+            GLib.timeout_add_seconds(2, lambda: (self.start_hyprland_watch(), False)[1])
+            return False
+        if self.hypr_timer is None:
+            self.hypr_timer = GLib.timeout_add(60, self.read_hyprland)
+        return True
+
+    def read_hyprland(self):
+        self.hypr_timer = None
+        def j(what):
+            try:
+                return json.loads(subprocess.run(["hyprctl", "-j", what], capture_output=True, text=True,
+                                                 timeout=2).stdout or "null")
+            except (OSError, ValueError, subprocess.TimeoutExpired):
+                return None
+        ws, active, win = j("workspaces") or [], j("activeworkspace") or {}, j("activewindow") or {}
+        self.push_state(workspaces=[[w["id"], w.get("windows", 0)] for w in ws if w.get("id", 0) > 0],
+                        workspace=active.get("id", 1), app=win.get("class") or "")
+        # Per-app layers: [apps] "regex" = "layer" in the config.
+        try:
+            cfg = load_config()
+            apps = cfg.get("apps", {})
+            fs_only = bool(cfg.get("settings", {}).get("apps_fullscreen_only", False))
+        except Exception:
+            apps, fs_only = {}, False
+        cls = win.get("class") or ""
+        layer = next((l for pat, l in apps.items() if re.search(pat, cls, re.I)), None)
+        # yumi (16.10): apps_fullscreen_only = true — слой приложения только когда его окно на весь экран
+        if fs_only and not win.get("fullscreen"):
+            layer = None
+        if layer != self.app_layer:
+            self.app_layer = layer
+            default = (self.layout_msg or {}).get("default", "control")
+            self.send({"t": "layer", "name": layer or default})
+        return False
+
+    # ---- Touch ID ---------------------------------------------------------
+
+    def start_finger_watch(self):
+        try:
+            self.system = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+        except GLib.Error as e:
+            log(f"system bus: {e.message}")
+            return
+        self.system.signal_subscribe("net.reactivated.Fprint", "net.reactivated.Fprint.Device", None, None,
+                                     None, Gio.DBusSignalFlags.NONE, self.on_finger)
+        # yumi (19.10.2026): окно Touch ID держится, пока fprintd ждёт палец (свойство finger-needed). Раньше демон
+        # снимал окно по Enter — и после неверного пароля на экране блокировки тачбар переставал просить палец,
+        # хотя проверка отпечатка шла дальше
+        self.fp_last = "idle"
+        self.fp_idle_timer = 0
+        self.system.signal_subscribe("net.reactivated.Fprint", "org.freedesktop.DBus.Properties", "PropertiesChanged",
+                                     None, "net.reactivated.Fprint.Device", Gio.DBusSignalFlags.NONE, self.on_finger_props)
+
+    def send_finger(self, s):
+        self.fp_last = s
+        if self.fp_idle_timer:
+            GLib.source_remove(self.fp_idle_timer)
+            self.fp_idle_timer = 0
+        self.send({"t": "fingerprint", "s": s})
+        self.island_finger(s)
+
+    # yumi (30.10.2026): Touch ID → Dynamic Island (yumi-island, id fp, priority 1). Без IPC острова — молча ничего
+    ISLAND = os.path.expanduser("~/.local/bin/yumi-island")
+
+    def island(self, *args):
+        if not os.access(self.ISLAND, os.X_OK):
+            return
+        try:
+            subprocess.Popen([self.ISLAND, *args], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+        except OSError:
+            pass
+
+    def island_finger(self, s):
+        active = getattr(self, "island_fp", False)
+        if s == "scan":
+            if not active:
+                self.island("start", "fp", "--title", "Приложите палец", "--sub", "Touch ID · sudo / polkit",
+                            "--icon", "fp", "--tone", "acc", "--prio", "1", "--urgent")
+            self.island_fp = True
+        elif not active:
+            return
+        elif s == "retry":
+            self.island("update", "fp", "--title", "Ещё раз", "--sub", "палец не распознан — приложите снова", "--tone", "warn")
+        elif s == "match":
+            self.island_fp = False
+            self.island("end", "fp", "--done", "Готово")
+        elif s in ("fail", "error"):
+            self.island_fp = False
+            self.island("update", "fp", "--title", "Не распознан" if s == "fail" else "Touch ID недоступен",
+                        "--sub", "введите пароль", "--tone", "bad")
+            def later():
+                if not getattr(self, "island_fp", False):   # новая проверка за это время — не снимать её
+                    self.island("end", "fp")
+                return False
+            GLib.timeout_add(2500, later)
+        else:  # idle — проверку сняли (пароль, Ctrl+C, таймаут)
+            self.island_fp = False
+            self.island("end", "fp")
+
+    def on_finger_props(self, conn, sender, path, iface, signal, params):
+        _, changed, _ = params.unpack()
+        if "finger-present" in changed:
+            self.fp_present = bool(changed["finger-present"])
+        if "finger-needed" not in changed:
+            return
+        if changed["finger-needed"]:
+            if self.fp_idle_timer:
+                GLib.source_remove(self.fp_idle_timer)
+                self.fp_idle_timer = 0
+            if self.fp_last != "scan":
+                self.send_finger("scan")
+        elif self.fp_last == "scan" and not self.fp_idle_timer:
+            # проверка закончилась без итога (пароль, Ctrl+C, таймаут). 19.10: когда палец ложится на сенсор,
+            # finger-needed тоже падает в false до итога — через 0,4 с окно мигало раскладкой. Теперь ждём 1,5 с
+            # и не снимаем окно, пока палец на сенсоре (finger-present); итог match/fail отменяет таймер
+            def gone():
+                if getattr(self, "fp_present", False) and self.fp_last == "scan":
+                    return True                     # палец ещё лежит — проверить снова через 1,5 с
+                self.fp_idle_timer = 0
+                if self.fp_last == "scan":
+                    self.send_finger("idle")
+                return False
+            self.fp_idle_timer = GLib.timeout_add(1500, gone)
+
+    def on_finger(self, conn, sender, path, iface, signal, params):
+        if signal == "VerifyFingerSelected":
+            self.send_finger("scan")
+        elif signal == "VerifyStatus":
+            result, done = params.unpack()
+            if result == "verify-match":
+                s = "match"
+            elif result == "verify-no-match":
+                s = "fail" if done else "retry"
+                if s == "fail":
+                    # yumi (29.10.2026): после входа ПАРОЛЕМ экран блокировки прерывает проверку пальца, и драйвер отвечает
+                    # «не совпало». Экран оставляет отметку $XDG_RUNTIME_DIR/yumi-lock-pw-ok — ждём 0,4 с и, если она свежая
+                    # (до 3 с), просто убираем подсказку вместо «не распознан»
+                    def judge():
+                        flag = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "yumi-lock-pw-ok")
+                        try:
+                            fresh = (time.time() - os.path.getmtime(flag)) < 3
+                        except OSError:
+                            fresh = False
+                        self.send_finger("idle" if fresh else "fail")
+                        return False
+                    GLib.timeout_add(400, judge)
+                    return
+            elif result in ("verify-retry-scan", "verify-swipe-too-short", "verify-finger-not-centered",
+                            "verify-remove-and-retry"):
+                s = "retry"
+            elif result in ("verify-unknown-error", "verify-disconnected"):
+                # yumi (19.10.2026): так приходит и ПРЕРВАННАЯ проверка — экран блокировки Quickshell снимает ожидание
+                # пальца после входа паролем, драйвер apple-sep отвечает «ошибкой»; и сбой связи с сенсором. Это не
+                # промах пальцем — просто убрать подсказку, без «не распознан»
+                s = "idle"
+            else:  # прочее (напр. блокировка после многих неверных пальцев)
+                s = "error"
+            # retry — проверка продолжается, окно остаётся «ждёт палец»
+            self.send_finger(s)
+            if s == "retry":
+                self.fp_last = "scan"
+
+
+def main():
+    if not CONFIG.exists() and DEFAULT_CONFIG.exists():
+        CONFIG.parent.mkdir(parents=True, exist_ok=True)
+        CONFIG.write_text(DEFAULT_CONFIG.read_text())
+    Agent()
+    GLib.MainLoop().run()
+
+
+if __name__ == "__main__":
+    main()

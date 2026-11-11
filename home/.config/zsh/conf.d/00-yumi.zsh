@@ -15,3 +15,8 @@ fi
 if [[ $- == *i* ]] && [ -f "$ZDOTDIR/conf.d/yumi/tools.zsh" ]; then
     . "$ZDOTDIR/conf.d/yumi/tools.zsh" || echo "Error: Could not source $ZDOTDIR/conf.d/yumi/tools.zsh"
 fi
+
+# Вид терминала «Дзен»: подсветка, fzf, сворачивание приглашения (после приглашения и tools.zsh)
+if [[ $- == *i* ]] && [ -f "$ZDOTDIR/conf.d/yumi/style.zsh" ]; then
+    . "$ZDOTDIR/conf.d/yumi/style.zsh" || echo "Error: Could not source $ZDOTDIR/conf.d/yumi/style.zsh"
+fi

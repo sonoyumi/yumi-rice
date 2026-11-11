@@ -1,0 +1,9 @@
+[Unit]
+Description=Пересобрать тему Zed из темы VS Code (цвета обоев)
+# Смена обоев меняет файлы цветов несколько раз подряд — частые запуски здесь норма, а не сбой.
+# Без этой строки systemd после 5 запусков за 10 с отключал слежение (11.11.2026).
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/yumi-zed-theme --settle

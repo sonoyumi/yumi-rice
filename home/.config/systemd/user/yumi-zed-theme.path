@@ -1,0 +1,14 @@
+# Следит за темой VS Code «Wallbash» и за тоном системы (yumi-accent): при смене обоев их переписывают
+# и сразу после этого yumi-zed-theme пересобирает такую же тему для Zed. Откат: yumi-uninstall zed
+[Unit]
+StartLimitIntervalSec=0
+Description=Тема Zed в цветах обоев (следит за темой VS Code)
+
+[Path]
+PathChanged=%h/.vscode/extensions/yumi.wallbash-theme-1.0.0/themes/wallbash.json
+PathChanged=%h/.cache/yumi-accent/bg.txt
+PathChanged=%h/.cache/yumi-accent/accent.txt
+Unit=yumi-zed-theme.service
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,15 @@
+#!/bin/sh
+# YumiTube: открыть (или поднять уже открытое) окно YouTube-клиента. Аргумент — поисковый запрос.
+# Видео играет внутри окна (libmpv, плагин Yumi.Mpv в ~/.local/lib/yumi/qml; рендер — OpenGL).
+E="$HOME/.config/quickshell/yumi/app-youtube.qml"
+export QML_IMPORT_PATH="$HOME/.local/lib/yumi/qml${QML_IMPORT_PATH:+:$QML_IMPORT_PATH}"
+export QSG_RHI_BACKEND=opengl
+if qs ipc -p "$E" call youtube state >/dev/null 2>&1; then
+    [ -n "$1" ] && qs ipc -p "$E" call youtube search "$*" >/dev/null
+    hyprctl dispatch 'hl.dsp.focus({ window = "title:^YumiTube$" })' >/dev/null 2>&1
+else
+    setsid -f qs -p "$E" >/dev/null 2>&1
+    if [ -n "$1" ]; then
+        for i in 1 2 3 4 5 6 7 8 9 10; do sleep 0.3; qs ipc -p "$E" call youtube search "$*" >/dev/null 2>&1 && break; done
+    fi
+fi

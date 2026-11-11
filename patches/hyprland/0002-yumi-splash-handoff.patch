@@ -1,0 +1,82 @@
+diff -ruN a/src/Compositor.cpp b/src/Compositor.cpp
+--- a/src/Compositor.cpp	2026-10-16 03:43:08.626845490 +0200
++++ b/src/Compositor.cpp	2026-10-16 03:43:08.638624171 +0200
+@@ -1,5 +1,6 @@
+ 
+ #include "Compositor.hpp"
++#include "helpers/BootHold.hpp"
+ #include "config/supplementary/executor/Executor.hpp"
+ #include "debug/log/Logger.hpp"
+ #include "desktop/DesktopTypes.hpp"
+@@ -318,6 +319,7 @@
+     option.backendRequestMode = Aquamarine::eBackendRequestMode::AQ_BACKEND_REQUEST_FALLBACK;
+     implementations.emplace_back(option);
+ 
++    BootHold::splashHandoff(); // yumi: the boot splash keeps animating until right here
+     m_aqBackend = CBackend::create(implementations, options);
+ 
+     if (!m_aqBackend) {
+diff -ruN a/src/helpers/BootHold.cpp b/src/helpers/BootHold.cpp
+--- a/src/helpers/BootHold.cpp	2026-10-16 03:43:08.624845474 +0200
++++ b/src/helpers/BootHold.cpp	2026-10-16 03:43:08.638157542 +0200
+@@ -19,6 +19,11 @@
+ #include <string>
+ #include <unordered_set>
+ #include <vector>
++#include <fstream>
++#include <thread>
++#include <sys/stat.h>
++#include <fcntl.h>
++#include <unistd.h>
+ 
+ // static init runs before main(): close enough to "Hyprland started"
+ static const auto BOOT_START = std::chrono::steady_clock::now();
+@@ -206,3 +211,36 @@
+ 
+     return true;
+ }
++
++// ---- yumi-splash handoff --------------------------------------------------------------------------------------
++// Before this patch the splash released the screen from an ExecStartPre of the Hyprland service: ~0.9 s of a frozen
++// frame (Hyprland start + config). Now the request comes from here, right before CBackend::create() opens the DRM
++// device (libseat/seatd makes us DRM master there, so the splash must have dropped it by then).
++void BootHold::splashHandoff() {
++    const char* v = getenv("HYPRLAND_SPLASH_HANDOFF");
++    if (!v || !*v || std::string{v} == "0")
++        return;
++    struct stat st;
++    if (stat("/run/yumi-splash/released", &st) == 0)
++        return; // already released (or the splash is gone)
++    std::string   pid;
++    std::ifstream pf("/run/yumi-splash/pid");
++    if (!(pf >> pid) || pid.empty() || stat(("/proc/" + pid).c_str(), &st) != 0)
++        return; // no splash running
++    const auto t0 = std::chrono::steady_clock::now();
++    int        fd = open("/run/yumi-splash/req/handoff", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
++    if (fd < 0) {
++        Log::logger->log(Log::WARN, "BootHold: splash handoff: cannot write the request");
++        return;
++    }
++    close(fd);
++    while (stat("/run/yumi-splash/released", &st) != 0) {
++        if (std::chrono::steady_clock::now() - t0 > std::chrono::milliseconds(1500)) {
++            Log::logger->log(Log::WARN, "BootHold: splash handoff: no answer in 1.5 s, continuing");
++            return;
++        }
++        std::this_thread::sleep_for(std::chrono::milliseconds(2));
++    }
++    Log::logger->log(Log::DEBUG, "BootHold: splash released the screen in {} ms",
++                     std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count());
++}
+diff -ruN a/src/helpers/BootHold.hpp b/src/helpers/BootHold.hpp
+--- a/src/helpers/BootHold.hpp	2026-10-16 03:43:08.624845474 +0200
++++ b/src/helpers/BootHold.hpp	2026-10-16 03:43:08.637289202 +0200
+@@ -29,4 +29,8 @@
+ 
+     // HYPRLAND_HIDE_CURSOR_UNTIL_LOCK set and the cursor not released yet
+     bool cursorHoldPending();
++
++    // HYPRLAND_SPLASH_HANDOFF=1: ask the boot splash (yumi-splash, /run/yumi-splash) to drop DRM master right
++    // before the DRM backend opens the card, and wait for it (max 1.5 s). The splash animates until this moment.
++    void splashHandoff();
+ };

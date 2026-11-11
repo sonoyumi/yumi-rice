@@ -1,0 +1,12 @@
+#!/bin/sh
+# yumi-nouwsm-undo (18.10): вернуть запуск сеанса через uwsm (как было до 18.10). Потом — перезагрузка.
+B=.bak-nouwsm-20261018
+H="$HOME/.config/hypr/yumi"; G="$HOME/.config/quickshell/yumi/docs/boot/greetd/config.toml"
+for f in "$H/autostart.lua" "$H/events.lua" "$G"; do
+    [ -f "$f$B" ] && cp -f "$f$B" "$f" && echo "возвращён: $f"
+done
+if [ -f /etc/greetd/config.toml$B ]; then sudo install -m644 /etc/greetd/config.toml$B /etc/greetd/config.toml && echo "возвращён: /etc/greetd/config.toml"
+else sudo install -m644 "$G" /etc/greetd/config.toml && echo "/etc/greetd/config.toml ← $G"; fi
+systemctl --user daemon-reload
+grep -n '^command' /etc/greetd/config.toml
+echo "ГОТОВО: снова uwsm. sudo reboot (yumi-hyprland-session и yumi-hyprland-session.target остались, но не используются)"

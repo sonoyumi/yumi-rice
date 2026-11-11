@@ -11,7 +11,7 @@ hl.layer_rule({
 	name = "yumi_workflow_gaming",
 	blur = false,
 	no_anim = true,
-	match = { namespace = "^(notifications|swaync-(notification-window|control-center)|waybar|.*www-daemon)$" },
+	match = { namespace = "^(notifications|.*www-daemon)$" },
 })
 dofile(yumi.dir .. "/anim-off.lua")
 return wf

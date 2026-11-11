@@ -1,16 +1,60 @@
 #!/usr/bin/env bash
-# ai — быстрый локальный помощник по коду (Qwen2.5-Coder 1.5b через Ollama).
+# ai — быстрый локальный помощник по коду (Qwen2.5-Coder 3b через Ollama; 1.5b удалена 19.10).
 #   ai "вопрос"              разовый вопрос
 #   ai                       диалог (выход: /bye)
 #   cat file.py | ai "..."   передать код из файла
-# Модель меняется: AI_MODEL=qwen2.5-coder:7b ai "..."   Откат: rm ~/.local/bin/ai
-MODEL=${AI_MODEL:-qwen2.5-coder:1.5b}
-# сервер — системная служба ollama (модели в /var/lib/ollama); выключена — подсказать, а не падать
-if ! ollama list >/dev/null 2>&1; then
-    echo "Ollama не запущена. Один раз: sudo systemctl start ollama   всегда: sudo systemctl enable --now ollama" >&2
+# Модель меняется: AI_MODEL=qwen2.5-coder:7b ai "..."
+# 19.10: служба ollama запускается сама (polkit 50-yumi-ollama.rules, без пароля); после выхода
+# (ignore-requirements: не ждать network-online — там висит networkd-wait-online ~2 мин)
+# модель выгружается, а службу ai останавливает, если сам её запустил и других `ollama run` нет.
+# Кнопка тачбара 󰚩 ai (слой «Фокус») = kitty --class yumi-ai -e ai.
+# 19.10: свободно < AI_MEM_MIN_MB (2500) — предупреждение и вопрос.
+MODEL=${AI_MODEL:-qwen2.5-coder:3b}
+started=
+
+fail() {
+    echo "$*" >&2
+    # окно терминала с кнопки не должно закрыться раньше, чем прочитаешь ошибку
+    [ -t 0 ] && [ -t 1 ] && read -r -p "Enter — закрыть " _
     exit 1
+}
+
+cleanup() {
+    trap - EXIT HUP INT TERM
+    ollama stop "$MODEL" >/dev/null 2>&1
+    if [ -n "$started" ] && ! pgrep -f '^ollama run' >/dev/null; then
+        systemctl stop --no-ask-password ollama >/dev/null 2>&1
+    fi
+}
+
+# память: 3b занимает ~2,4 ГБ; меньше AI_MEM_MIN_MB свободно — предупредить (если модель ещё не загружена)
+MEM_MIN=${AI_MEM_MIN_MB:-2500}
+avail=$(awk '/^MemAvailable:/ {print int($2/1024)}' /proc/meminfo)
+if [ "$avail" -lt "$MEM_MIN" ] && ! ollama ps 2>/dev/null | grep -q "^$MODEL "; then
+    echo "⚠ Свободно $avail МБ, а $MODEL нужно ~2400 МБ — будет подкачка, всё станет медленнее." >&2
+    echo "  Больше всего памяти сейчас:" >&2
+    ps -eo rss=,comm= --sort=-rss | head -5 | awk '{printf "    %5d МБ  %s\n", $1/1024, $2}' >&2
+    if [ -t 0 ] && [ -t 1 ]; then
+        read -r -p "Enter — всё равно запустить, n — отмена: " ans
+        [[ $ans == [nNнН]* ]] && exit 0
+    fi
 fi
-if [ -t 0 ] && [ $# -eq 0 ]; then exec ollama run "$MODEL"; fi
+
+if ! ollama list >/dev/null 2>&1; then
+    [ -t 1 ] && echo "Запускаю Ollama…"
+    systemctl start --no-ask-password --job-mode=ignore-requirements ollama 2>/dev/null ||
+        fail "Не удалось запустить ollama (нет правила polkit?). Вручную: sudo systemctl start ollama"
+    started=1
+    for _ in $(seq 20); do ollama list >/dev/null 2>&1 && break; sleep 0.5; done
+    ollama list >/dev/null 2>&1 || { cleanup; fail "Ollama не ответила за 10 с: journalctl -u ollama -n 30"; }
+fi
+trap cleanup EXIT
+trap 'exit 130' HUP INT TERM
+
+if [ -t 0 ] && [ $# -eq 0 ]; then
+    ollama run "$MODEL" || fail "ollama run $MODEL завершился с ошибкой"
+    exit 0
+fi
 prompt="$*"
 if [ ! -t 0 ]; then prompt="$(cat)
 $prompt"; fi

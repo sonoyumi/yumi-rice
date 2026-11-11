@@ -1,7 +1,23 @@
 #!/usr/bin/env bash
 # Индикатор раскладки для Waybar (замена hyprland/language для Lua-версии Hyprland)
+# 30.10: смотреть только на физические клавиатуры (MacBook, Logitech): «главной» Hyprland делает устройство с последним
+# нажатием — это бывает виртуальная ydotoold (тачбар, скрипты) или AirPods (avrcp), и индикатор врал.
+# Раскладка у каждого устройства своя; переподключённое (сон, USB/BT) встаёт на 0 (us) — «показывает RU, печатает EN».
+# Правильной считаем раскладку большинства физических клавиатур; разошлось — всем её.
+PHYS='[.keyboards[] | select(.name | test("avrcp|virtual|ydotool|power|lid|mcs") | not)]'
+major() {   # индекс раскладки большинства физических клавиатур и её имя: "1 Russian"
+    hyprctl devices -j | jq -r "$PHYS"' | (group_by(.active_layout_index) | max_by(length)[0]) as $d
+        | "\($d.active_layout_index) \($d.active_keymap)"'
+}
+sync() {
+    hyprctl devices -j | jq -r "$PHYS"' | if (map(.active_layout_index) | unique | length) > 1
+        then (group_by(.active_layout_index) | max_by(length)[0].active_layout_index) else empty end' | while read -r m; do
+        hyprctl switchxkblayout all "$m" >/dev/null
+    done
+}
+
 show() {
-    km="$(hyprctl devices -j | jq -r '.keyboards[] | select(.main) | .active_keymap' | head -1)"
+    km="$(major | cut -d' ' -f2-)"
     case "$km" in
         *Russian*)   s="RU" ;;
         *Ukrain*)    s="UA" ;;
@@ -11,12 +27,13 @@ show() {
     printf '{"text":"󰌌 %s","tooltip":"%s"}\n' "$s" "$km"
 }
 
-show
+sync; show
+( while sleep 2; do sync; done ) &
 sock="$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket2.sock"
 if command -v socat >/dev/null && [ -S "$sock" ]; then
     # Мгновенно: слушаем события Hyprland о смене раскладки
     socat -U - "UNIX-CONNECT:$sock" | while read -r line; do
-        case "$line" in activelayout*) show ;; esac
+        case "$line" in activelayout*) sync; show ;; esac
     done
 else
     # Запасной вариант: проверка 2–3 раза в секунду

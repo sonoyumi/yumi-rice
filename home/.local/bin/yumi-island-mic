@@ -1,0 +1,102 @@
+#!/usr/bin/env -S python3 -I
+"""yumi-island-mic — «микрофон занят» → Dynamic Island (id mic, priority 2). 30.10.2026. Звук только ЧИТАЕТ.
+
+По событиям `pactl subscribe` (source-output new/change/remove) перечитывает `pactl -f json list source-outputs`
+и показывает, какие приложения пишут микрофон. Служебные потоки не считаются: петля yumi-mic (yumi_mic_in),
+эффект-цепочка встроенного микрофона (audio_effect.*), cava (yumi-cava-tap, pw-record), любые .monitor-источники
+(это выход звука, не микрофон), приостановленные (corked) потоки.
+Доп. игнор: YUMI_ISLAND_MIC_IGNORE="regex" по имени приложения/бинарника/узла (например "vesktop", если Discord
+держит микрофон всегда — см. yumi-mic). Служба: yumi-island-mic.service (не включена).
+"""
+import json
+import os
+import re
+import select
+import subprocess
+import sys
+import time
+
+ISLAND = os.path.expanduser("~/.local/bin/yumi-island")
+INTERNAL = re.compile(r"^(yumi_mic_in|yumi-cava-tap|audio_effect\..*|.*\.monitor)$")
+EXTRA = re.compile(os.environ["YUMI_ISLAND_MIC_IGNORE"], re.I) if os.environ.get("YUMI_ISLAND_MIC_IGNORE") else None
+DEBOUNCE = 0.4
+
+
+def island(*args):
+    subprocess.run([ISLAND, *args], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                   stderr=None if os.environ.get("YUMI_ISLAND_DRY") else subprocess.DEVNULL)
+
+
+def pj(*what):
+    try:
+        return json.loads(subprocess.run(["pactl", "-f", "json", "list", *what], capture_output=True,
+                                         text=True, errors="replace", timeout=3).stdout or "[]")
+    except (ValueError, OSError, subprocess.TimeoutExpired):
+        return []
+
+
+def discord_call():
+    """Vesktop держит микрофон ВСЕГДА — точка только в звонке (UDP-сокеты WebRTC, как в yumi-mic)."""
+    try:
+        out = subprocess.run(["ss", "-uanp"], capture_output=True, text=True, errors="replace", timeout=3).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return sum(1 for ln in out.splitlines() if "vesktop" in ln and ":5353 " not in ln) >= 2
+
+
+def users():
+    monitors = {s.get("index") for s in pj("sources") if str(s.get("name", "")).endswith(".monitor")
+                or s.get("monitor_of_sink") not in (None, "n/a")}
+    apps = []
+    for o in pj("source-outputs"):
+        pr = o.get("properties", {})
+        node = pr.get("node.name", "")
+        app = pr.get("application.name") or pr.get("application.process.binary") or node or "?"
+        tgt = str(pr.get("target.object", "") or pr.get("node.target", ""))
+        if o.get("corked") or o.get("source") in monitors or INTERNAL.match(node) or tgt.endswith(".monitor"):
+            continue
+        if app == "pw-record" and "cava" in node:
+            continue
+        if EXTRA and any(EXTRA.search(x or "") for x in (app, pr.get("application.process.binary"), node)):
+            continue
+        if "vesktop" in (app + " " + str(pr.get("application.process.binary", ""))).lower() and not discord_call():
+            continue
+        if app not in apps:
+            apps.append(app)
+    return apps
+
+
+def main():
+    p = subprocess.Popen(["pactl", "subscribe"], stdout=subprocess.PIPE, env={**os.environ, "LC_ALL": "C"})
+    fd, buf, shown, due = p.stdout.fileno(), b"", None, time.monotonic()
+    tick = time.monotonic() + 10
+    while True:
+        wait = max(0.0, (due or tick) - time.monotonic())
+        r, _, _ = select.select([fd], [], [], wait)
+        if r:
+            chunk = os.read(fd, 4096)
+            if not chunk:
+                return 1
+            buf += chunk
+            *lines, buf = buf.split(b"\n")
+            if any(b"source-output" in l for l in lines) and not due:
+                due = time.monotonic() + DEBOUNCE
+            continue
+        resend = not r and time.monotonic() >= tick      # 30.10: раз в 10 с повторить — после рестарта оболочки точка терялась
+        due = None
+        apps = users()
+        if not resend and (apps == shown or (not apps and shown is None)):
+            shown = apps if apps else shown
+            continue
+        tick = time.monotonic() + 10
+        # 30.10: только точка у острова (IPC island mic), не активность — не раскрывается и не вытесняет музыку
+        subprocess.run(["timeout", "1", "qs", "-c", "yumi", "ipc", "call", "island", "mic", ", ".join(apps)[:80] or "-"],
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        shown = apps
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(0)

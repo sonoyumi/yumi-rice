@@ -1,0 +1,8 @@
+PlayerIsland 1.0 PlayerIsland.qml
+IconButton 1.0 IconButton.qml
+LyricsPane 1.0 LyricsPane.qml
+QueuePane 1.0 QueuePane.qml
+PlaylistPicker 1.0 PlaylistPicker.qml
+FullPlayer 1.0 FullPlayer.qml
+FullSlider 1.0 FullSlider.qml
+FullButton 1.0 FullButton.qml

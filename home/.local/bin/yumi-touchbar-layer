@@ -1,0 +1,33 @@
+#!/usr/bin/env python3
+"""yumi-touchbar-layer N|ИМЯ — показать слой тачбара (19.10.2026; бинды Ctrl+Super+1…9).
+
+Номер — по порядку из ~/.config/touchbar/config.toml: сначала слои длинного свайпа (swipe_layers),
+затем Папка (apps) и F1–F12 (function). Переставишь слои в конфиге — номера поедут следом.
+Без аргумента — печатает список номеров.
+"""
+import subprocess, sys, tomllib
+from pathlib import Path
+
+CFG = Path.home() / ".config/touchbar/config.toml"
+AGENT = Path.home() / ".local/lib/yumi/touchbar-agent"   # своя копия агента, если есть; иначе — системный
+if not AGENT.exists():
+    AGENT = Path("/usr/local/bin/touchbar-agent")
+
+cfg = tomllib.loads(CFG.read_text())
+s = cfg.get("settings", {})
+layers = cfg.get("layers", {})
+order = [l for l in s.get("swipe_layers", []) or [s.get("default_layer", "control")] if l in layers]
+order += [l for l in ("apps", s.get("fn_key_layer", "function")) if l in layers and l not in order]
+names = s.get("layer_names", {})
+
+if len(sys.argv) < 2:
+    for i, l in enumerate(order, 1):
+        print(f"{i}. {names.get(l, l)}  ({l})")
+    sys.exit(0)
+
+arg = sys.argv[1]
+name = order[int(arg) - 1] if arg.isdigit() and 0 < int(arg) <= len(order) else (arg if arg in layers else None)
+if not name:
+    subprocess.run(["notify-send", "-a", "Тачбар", "Тачбар", f"Нет слоя {arg}"])
+    sys.exit(1)
+subprocess.run([sys.executable, str(AGENT), "--layer", name])

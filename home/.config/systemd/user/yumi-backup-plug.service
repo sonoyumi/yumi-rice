@@ -1,0 +1,12 @@
+[Unit]
+Description=yumi: уведомление «Сделать бэкап?» при подключении флешки бэкапа
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/yumi-backup-plug
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

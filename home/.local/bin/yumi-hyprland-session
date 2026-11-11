@@ -1,0 +1,39 @@
+#!/bin/sh
+# yumi-hyprland-session (18.10) — запуск сеанса Hyprland из greetd без uwsm: на ~1,5 с быстрее до экрана блокировки.
+# Окружение — те же файлы ~/.config/uwsm (кроме env.d/01-gpu.sh: поиск NVIDIA/AMD/Intel на M1 ничего не находит).
+# Службы сеанса поднимает Hyprland (yumi/autostart.lua): передаёт окружение в systemd/dbus и запускает
+# yumi-hyprland-session.target (BindsTo=graphical-session.target). Выход из Hyprland — цель останавливается здесь.
+# Откат на uwsm: yumi-nouwsm-undo
+
+U="${XDG_CONFIG_HOME:-$HOME/.config}/uwsm"
+set -a
+for f in "$U/env" "$U/env.d/10-yumi.sh" "$U/env-hyprland" "$U"/env-hyprland.d/*.sh; do
+    [ -r "$f" ] && . "$f"
+done
+set +a
+# системная локаль LANG=C: uwsm (Python, PEP 538) сам добавлял LC_CTYPE=C.UTF-8 всем потомкам — без него Quickshell
+# и др. работали в ASCII («locale C ... not UTF-8»). Повторить то же:
+[ -n "${LC_ALL:-}${LC_CTYPE:-}" ] || export LC_CTYPE=C.UTF-8
+export XDG_CURRENT_DESKTOP=Hyprland XDG_SESSION_DESKTOP=Hyprland XDG_SESSION_TYPE=wayland XDG_BACKEND=wayland \
+    XDG_MENU_PREFIX=hyprland-
+
+# остатки прошлого сеанса (выход/вход без перезагрузки)
+systemctl --user stop yumi-hyprland-session.target graphical-session.target 2>/dev/null
+systemctl --user unset-environment WAYLAND_DISPLAY HYPRLAND_INSTANCE_SIGNATURE DISPLAY 2>/dev/null
+
+# 26.10: ждать драйвер экрана apple (не дольше 10 с). Иначе Hyprland берёт simpledrm заставки, а ядро удаляет его
+# через доли секунды → SEGV в CGBMAllocator и запасной экран входа. Бэкап: yumi-hyprland-session.bak-wait-apple-20261026
+i=0
+while [ ! -e /dev/dri/by-path/platform-soc:display-subsystem-card ] && [ $i -lt 500 ]; do sleep 0.02; i=$((i + 1)); done
+[ $i -gt 0 ] && echo "yumi: ждал драйвер экрана apple $((i * 20)) мс"
+
+start-hyprland
+rc=$?
+# 29.10 («Остров», экран входа D): причина выхода для экрана входа — когда и с каким кодом завершился Hyprland.
+# /var/lib/yumi-greeter принадлежит пользователю, greeter читает; запись атомарно, ошибки не мешают выходу
+{ printf '{"ended": %s, "code": %s}\n' "$(date +%s)" "$rc" > /var/lib/yumi-greeter/last-session.json.tmp &&
+  mv -f /var/lib/yumi-greeter/last-session.json.tmp /var/lib/yumi-greeter/last-session.json; } 2>/dev/null || true
+
+systemctl --user stop yumi-hyprland-session.target graphical-session.target 2>/dev/null
+systemctl --user unset-environment WAYLAND_DISPLAY HYPRLAND_INSTANCE_SIGNATURE DISPLAY 2>/dev/null
+exit $rc

@@ -9,9 +9,8 @@ if [ -n "${YUMI_COMMIT_QUEUE:-}" ]; then
     defer=0
     case "$name" in
     hyprctl) case " $* " in *" eval "*|*" reload "*) defer=1 ;; esac ;;
-    systemctl) case " $* " in *" restart "*waybar*|*" reload "*waybar*) defer=1 ;; esac ;;
     pkill|killall) for a in "$@"; do case "$a" in -SIG*|-USR*|-RTMIN*|-HUP|-s) defer=1 ;; esac; done ;;
-    swaync-client|pywalfox) defer=1 ;;
+    pywalfox) defer=1 ;;
     esac
     if [ "$defer" = 1 ]; then
         { printf '%q ' "$real" "$@"; echo; } >> "$YUMI_COMMIT_QUEUE"

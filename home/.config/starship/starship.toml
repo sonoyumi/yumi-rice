@@ -1,22 +1,20 @@
-# Yumi-Rice: подсказка в две строки (вариант C).
-# Цвета — именами палитры терминала (yellow, bright-black…): kitty перекрашивает палитру вместе с обоями,
-# поэтому и подсказка меняет цвета сама.
+# Yumi-Rice: приглашение «Дзен» (19.10.2026) — одна строка, справа git и время;
+# старые приглашения после Enter сворачиваются до ❯ (conf.d/yumi/style.zsh).
+# Цвета — именами палитры терминала (yellow, bright-black…): kitty перекрашивает палитру вместе с обоями.
+# Красный ошибок #c8372d — как печать 〔弓〕 в fastfetch, от обоев не зависит.
+# Прежний вид (2 строки, вариант C): starship.toml.bak-zsh-20261019
 "$schema" = 'https://starship.rs/config-schema.json'
 add_newline = true
-format = """
-[╭─](bright-black) $directory$git_branch$git_status$python$cmd_duration$status$fill$time
-[╰─](bright-black)$character"""
-
-[fill]
-symbol = " "
+format = "[弓](bold yellow) $directory$character"
+right_format = "$git_branch$git_status$python$cmd_duration$status$time"
 
 [character]
 success_symbol = "[❯](bold yellow)"
-error_symbol = "[❯](bold red)"
+error_symbol = "[❯](bold #c8372d)"
 
 [directory]
-style = "bold yellow"
-truncation_length = 4
+style = "yellow"
+truncation_length = 3
 truncation_symbol = "…/"
 read_only = " 󰌾"
 format = "[$path]($style)[$read_only]($read_only_style) "
@@ -24,10 +22,10 @@ format = "[$path]($style)[$read_only]($read_only_style) "
 [git_branch]
 symbol = " "
 style = "green"
-format = "[on](bright-black) [$symbol$branch]($style) "
+format = "[$symbol$branch]($style) "
 
 [git_status]
-style = "red"
+style = "#c8372d"
 format = "([$all_status$ahead_behind]($style) )"
 
 [python]
@@ -40,16 +38,16 @@ detect_files = []
 [cmd_duration]
 min_time = 2000
 style = "bright-black"
-format = "[took $duration]($style) "
+format = "[$duration]($style) "
 
 [status]
 disabled = false
 symbol = "✗ "
-style = "red"
+style = "#c8372d"
 format = "[$symbol$status]($style) "
 
 [time]
 disabled = false
 time_format = "%H:%M"
 style = "bright-black"
-format = "[$time]($style)"
+format = "[· $time]($style)"

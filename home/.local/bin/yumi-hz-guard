@@ -8,6 +8,7 @@
 Остальное время спит. Журнал: journalctl --user -u yumi-hz-guard. Откат: yumi-hz-guard-uninstall
 """
 import json
+import os
 import subprocess
 import sys
 
@@ -24,18 +25,18 @@ def hyprctl(*args):
     return subprocess.run(["hyprctl", *args], capture_output=True, text=True, timeout=5).stdout
 
 
-def restore():
+def restore(only=None, why="после смены терминала"):
     try:
         mons = json.loads(hyprctl("-j", "monitors") or "[]")
     except ValueError:
         mons = []
     for m in mons:
-        if m.get("refreshRate", 0) > 61:
+        if m.get("refreshRate", 0) > 61 and (only is None or m["name"] == only):
             name = m["name"]
             hyprctl("dispatch", f'hl.dsp.dpms({{ action = "disable", monitor = "{name}" }})')
             GLib.usleep(1_200_000)
             hyprctl("dispatch", f'hl.dsp.dpms({{ action = "enable", monitor = "{name}" }})')
-            log(f"{name}: режим {m['width']}x{m['height']}@{m['refreshRate']:.0f} переприменён после смены терминала")
+            log(f"{name}: режим {m['width']}x{m['height']}@{m['refreshRate']:.0f} переприменён {why}")
     return False
 
 
@@ -66,7 +67,35 @@ def main():
 
     bus.signal_subscribe(LOGIN1, "org.freedesktop.DBus.Properties", "PropertiesChanged", None, None,
                          Gio.DBusSignalFlags.NONE, on_signal)
-    log("слежу за сменой терминала")
+    # Монитор подключили заново (через хаб, после сбоя картинки): DCP выставляет режим, а сигнала нет —
+    # «нет связи» на мониторе, пока режим не переприменить (15.10). Слушаем событие monitoradded Hyprland.
+    import socket, threading
+    sock_path = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid()), "hypr",
+                             os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", ""), ".socket2.sock")
+
+    def watch_hypr():
+        while True:
+            try:
+                s2 = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                s2.connect(sock_path)
+                buf = b""
+                while True:
+                    chunk = s2.recv(4096)
+                    if not chunk:
+                        break
+                    buf += chunk
+                    while b"\n" in buf:
+                        line, buf = buf.split(b"\n", 1)
+                        ev, _, data = line.decode(errors="replace").partition(">>")
+                        if ev == "monitoradded":
+                            log(f"подключён монитор {data} — переприменю режим")
+                            GLib.timeout_add(2500, lambda n=data: restore(n, "после подключения"))
+            except OSError as e:
+                log(f"сокет Hyprland: {e}")
+            GLib.usleep(5_000_000)
+
+    threading.Thread(target=watch_hypr, daemon=True).start()
+    log("слежу за сменой терминала и подключением мониторов")
     GLib.MainLoop().run()
 
 

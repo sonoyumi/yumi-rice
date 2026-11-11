@@ -11,7 +11,7 @@ hl.layer_rule({
 	name = "yumi_workflow_powersaver",
 	no_anim = true,
 	blur = false,
-	match = { namespace = "^(notifications|swaync-(notification-window|control-center)|waybar)$" },
+	match = { namespace = "^(notifications)$" },
 })
 dofile(yumi.dir .. "/anim-off.lua")
 return wf

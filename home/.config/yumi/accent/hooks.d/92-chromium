@@ -1,0 +1,6 @@
+#!/bin/sh
+# yumi-chromium-theme: Chromium в цветах обоев (цвет в профиль, тёмная схема; применяется при следующем запуске Chromium)
+T="$HOME/.local/bin/yumi-chromium-theme"
+[ -x "$T" ] || exit 0
+timeout 5 "$T" >/dev/null 2>&1 || exit 0
+exit 0

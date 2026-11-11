@@ -13,5 +13,6 @@ f=$(ls "$S"/*.toml | grep -iE "/${1}[-.]|${1}" | head -1)
 [ -f "$C" ] && [ ! -f "$C.bak-before-styles" ] && cp -a "$C" "$C.bak-before-styles"
 cp "$f" "$C.tmp" && mv "$C.tmp" "$C"
 basename "$f" .toml > "$CUR"
+"$HOME/.local/bin/yumi-touchbar-theme" 2>/dev/null   # стиль с [yumi] palette (6-yumi-boot) задаёт свои цвета темы
 notify-send -a "Тачбар" -i input-touchpad "Тачбар: стиль $(basename "$f" .toml)" "$(sed -n '1s/^# Стиль тачбара «\([^»]*\)».*/\1/p' "$f")" 2>/dev/null
 echo "Стиль: $(basename "$f" .toml)"

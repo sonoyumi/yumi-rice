@@ -12,7 +12,7 @@ last_file="${XDG_STATE_HOME:-$HOME/.local/state}/yumi-vpn-last"
 list()  { nmcli -t -f NAME,TYPE connection show | awk -F: '$2=="wireguard" && $1 ~ /^VPN / {print $1}'; }
 state() { nmcli -t -f NAME,TYPE connection show --active | awk -F: '$2=="wireguard" && $1 ~ /^VPN / {print $1; exit}'; }
 last()  { local l; l="$(cat "$last_file" 2>/dev/null)"; list | grep -qxF "$l" && echo "$l" || echo "VPN WARP"; }
-bar()   { pkill -RTMIN+10 waybar 2>/dev/null; true; }
+bar()   { qs -c yumi ipc call bar refresh vpn >/dev/null 2>&1; true; }   # пилюля Quickshell
 
 down() { local c; c="$(state)"; [ -n "$c" ] && nmcli connection down "$c" >/dev/null; bar; }
 up() {

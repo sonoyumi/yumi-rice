@@ -1,0 +1,524 @@
+#!/usr/bin/env -S python3 -I
+"""smartclip — «умный буфер обмена» (yumi-rice, Quickshell, 30.10.2026).
+
+Следит за буфером (wl-paste --type text --watch — событийно, без опроса; картинки не приходят вовсе), узнаёт, что
+скопировано, и показывает на острове ОДНУ подсказку с кнопкой (~6 с, низкий приоритет). Обычный текст — ничего.
+  ссылка с метками (utm_*, fbclid, gclid, si…) → «Убрать трекеры» (в буфер — чистая ссылка); просто ссылка → «Открыть»
+  (не в браузере — там она и так открыта); цвет #hex / rgb() → «В RGB» / «В HEX»; пример `2350*1.2`, `15% от 3200`,
+  `3200 + 15%` → результат, «Скопировать»; e-mail → «Написать»; текст на латинице → «Перевести» (выключено по умолч.).
+Пропускает: пароли (wl-paste даёт CLIPBOARD_STATE=sensitive — x-kde-passwordManagerHint), окна менеджеров паролей
+(skip_classes), свои записи в буфер (хэш), повторы, событие при старте.
+
+  smartclip run            демон (служба yumi-smartclip.service)
+  smartclip hook           вызывается wl-paste на каждое копирование: печатает JSON-строку демону (stdout общий)
+  smartclip act <токен>    кнопка/клик острова: выполнить действие подсказки
+  smartclip test <текст>   что бы показал (JSON), без острова — для проверки
+
+Настройки: ~/.config/yumi/smartclip.json (detectors: url_clean url_open color math email translate; duration; priority;
+skip_classes; open_skip_classes). Проверка: YP_DRYRUN=1 — действия только печатаются; YUMI_ISLAND_DRY=1 — остров печатается.
+Откат: yumi-uninstall quickshell"""
+import ast
+import hashlib
+import json
+import math
+import operator
+import os
+import re
+import secrets
+import select
+import shlex
+import signal
+import subprocess
+import sys
+import time
+import urllib.parse
+
+HOME = os.path.expanduser("~")
+SELF = os.path.realpath(__file__)
+ISLAND = os.path.join(HOME, ".local/bin/yumi-island")
+CONF = os.path.join(HOME, ".config/yumi/smartclip.json")
+STATE = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.join(HOME, ".cache")), "yumi/smartclip")
+PENDING = os.path.join(STATE, "pending.json")
+SELFW = os.path.join(STATE, "self")
+DRY = os.environ.get("YP_DRYRUN") == "1"
+AID = "clip"                               # id активности острова
+MAXTEXT = 1000                             # длиннее — не разбираем (длинный текст — не «данные»)
+
+DEFAULTS = {
+    "enabled": True,
+    "detectors": {"url_clean": True, "url_open": True, "color": True, "math": True, "email": True, "translate": False},
+    "duration": 6,
+    "priority": 7,
+    "skip_classes": "vaultwarden|bitwarden|keepass|1password|enpass|seahorse|kwalletmanager|proton.?pass",
+    "open_skip_classes": "firefox|zen|chrom|brave|vivaldi|librewolf|floorp|epiphany|qutebrowser|opera",
+    "translate_to": "ru",
+}
+
+G = {"link": "\U000f0339", "clean": "\U000f0339", "color": "\U000f03d8", "calc": "\U000f00ec", "mail": "mail", "tr": "\U000f05ca"}
+
+
+def log(*a):
+    print("smartclip:", *a, file=sys.stderr, flush=True)
+
+
+def conf():
+    c = json.loads(json.dumps(DEFAULTS))
+    try:
+        with open(CONF, encoding="utf-8") as f:
+            u = json.load(f)
+        if isinstance(u, dict):
+            for k, v in u.items():
+                if k == "detectors" and isinstance(v, dict):
+                    c["detectors"].update({dk: bool(dv) for dk, dv in v.items()})
+                elif k in c:
+                    c[k] = v
+    except (OSError, ValueError):
+        pass
+    return c
+
+
+def die_with_parent():
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").prctl(1, signal.SIGTERM)       # PR_SET_PDEATHSIG: демон умер — wl-paste тоже
+    except Exception:
+        pass
+
+
+def h(text):
+    return hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()
+
+
+# ---------------------------------------------------------------- детекторы
+TRACK_EXACT = {"fbclid", "gclid", "dclid", "gbraid", "wbraid", "msclkid", "yclid", "ysclid", "igshid", "igsh", "mc_cid",
+               "mc_eid", "_hsenc", "_hsmi", "mkt_tok", "vero_id", "vero_conv", "ttclid", "twclid", "li_fat_id", "s_cid",
+               "wt_mc", "ref_src", "ref_url", "__twitter_impression", "_openstat", "cmpid", "spm", "scm", "trk",
+               "trkcampaign", "srsltid", "si", "pp", "feature", "share_id", "utm"}
+TRACK_PREFIX = ("utm_", "oly_", "pk_", "hsa_", "ga_")
+# «feature», «pp», «si» — метки только у YouTube/Spotify/Instagram; на других сайтах это могут быть обычные параметры
+HOST_ONLY = {"feature": ("youtube.com", "youtu.be"), "pp": ("youtube.com", "youtu.be"),
+             "si": ("youtube.com", "youtu.be", "spotify.com", "instagram.com", "threads.net", "soundcloud.com")}
+URL_RE = re.compile(r"^(https?://|www\.)[^\s<>\"']+$", re.I)
+EMAIL_RE = re.compile(r"^(mailto:)?[\w.+-]+@[\w-]+(\.[\w-]+)*\.[a-zа-я]{2,}$", re.I)
+
+
+def _host_is(host, tails):
+    return any(host == t or host.endswith("." + t) for t in tails)
+
+
+def url_clean(url):
+    """(чистая ссылка, сколько меток убрано)"""
+    u = urllib.parse.urlsplit(url if "://" in url else "https://" + url)
+    host = (u.hostname or "").lower()
+    pairs = urllib.parse.parse_qsl(u.query, keep_blank_values=True)
+    keep, n = [], 0
+    for k, v in pairs:
+        kl = k.lower()
+        tr = kl.startswith(TRACK_PREFIX) or (kl in TRACK_EXACT and (kl not in HOST_ONLY or _host_is(host, HOST_ONLY[kl])))
+        if tr:
+            n += 1
+        else:
+            keep.append((k, v))
+    frag = u.fragment
+    if frag and re.match(r"^:~:text=", frag):          # «#:~:text=…» — выделение из поиска Google
+        frag, n = "", n + 1
+    if not n:
+        return url, 0
+    q = urllib.parse.urlencode(keep, doseq=True, safe=":/@!$'()*,;")
+    clean = urllib.parse.urlunsplit((u.scheme, u.netloc, u.path, q, frag))
+    if "://" not in url:
+        clean = clean.split("://", 1)[1]
+    return clean, n
+
+
+def plural(n, one, few, many):
+    a, b = n % 10, n % 100
+    return one if a == 1 and b != 11 else few if 2 <= a <= 4 and not 12 <= b <= 14 else many
+
+
+# цвет
+HEX_RE = re.compile(r"^#([0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$", re.I)
+RGB_RE = re.compile(r"^rgba?\(\s*(\d{1,3})\s*[, ]\s*(\d{1,3})\s*[, ]\s*(\d{1,3})\s*(?:[,/]\s*([\d.]+%?)\s*)?\)$", re.I)
+
+
+def color(t):
+    m = HEX_RE.match(t)
+    if m:
+        x = m.group(1)
+        if len(x) in (3, 4):
+            x = "".join(c * 2 for c in x)
+        r, g, b = (int(x[i:i + 2], 16) for i in (0, 2, 4))
+        if len(x) == 8:
+            a = round(int(x[6:8], 16) / 255, 2)
+            conv = f"rgba({r}, {g}, {b}, {a:g})"
+        else:
+            conv = f"rgb({r}, {g}, {b})"
+        return {"hex": "#" + x.lower(), "conv": conv, "label": "В RGB"}
+    m = RGB_RE.match(t)
+    if m:
+        r, g, b = (int(m.group(i)) for i in (1, 2, 3))
+        if max(r, g, b) > 255:
+            return None
+        hx = f"#{r:02x}{g:02x}{b:02x}"
+        a = m.group(4)
+        if a:
+            av = float(a[:-1]) / 100 if a.endswith("%") else float(a)
+            if 0 <= av < 1:
+                hx += f"{round(av * 255):02x}"
+        return {"hex": hx, "conv": hx, "label": "В HEX"}
+    return None
+
+
+# безопасный калькулятор: только числа, + − × ÷ ^ и скобки — разбор через ast, без eval
+OPS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul, ast.Div: operator.truediv,
+       ast.Pow: operator.pow, ast.Mod: operator.mod, ast.FloorDiv: operator.floordiv}
+
+
+def _ev(n):
+    if isinstance(n, ast.Expression):
+        return _ev(n.body)
+    if isinstance(n, ast.Constant) and type(n.value) in (int, float):
+        return n.value
+    if isinstance(n, ast.UnaryOp) and isinstance(n.op, (ast.USub, ast.UAdd)):
+        v = _ev(n.operand)
+        return -v if isinstance(n.op, ast.USub) else v
+    if isinstance(n, ast.BinOp) and type(n.op) in OPS:
+        a, b = _ev(n.left), _ev(n.right)
+        if isinstance(n.op, ast.Pow) and (abs(b) > 64 or abs(a) > 1e6):
+            raise ValueError("слишком большая степень")
+        v = OPS[type(n.op)](a, b)
+        if isinstance(v, complex) or abs(v) > 1e18:
+            raise ValueError("слишком большое")
+        return v
+    raise ValueError("нельзя")
+
+
+NUM = r"\d+(?:\.\d+)?"
+DATE_RE = re.compile(r"^\d{1,4}[-./]\d{1,2}[-./]\d{1,4}$|^\d{1,2}:\d{2}")
+
+
+def _norm(t):
+    s = t.strip().rstrip("=").strip()
+    s = s.replace("−", "-").replace("–", "-").replace("×", "*").replace("·", "*").replace("÷", "/").replace("^", "**")
+    s = re.sub(r"(?<=\d)[   ](?=\d{3}(?!\d))", "", s)          # 3 200 → 3200
+    s = re.sub(r"(?<=\d),(?=\d)", ".", s)                                 # 1,5 → 1.5
+    s = re.sub(r"(?<=\d)\s*[xх]\s*(?=\d)", "*", s, flags=re.I)            # 2x3 / 2х3 (кир.)
+    return s
+
+
+def math_expr(t):
+    """(результат строкой, подпись) или None"""
+    if len(t) > 80 or "\n" in t.strip():
+        return None
+    s = _norm(t)
+    if DATE_RE.match(s):
+        return None
+    m = re.fullmatch(rf"({NUM})\s*%\s*(?:от|of|from)\s*(.+)", s, re.I)
+    if m:
+        base = _calc(m.group(2), True)
+        if base is None:
+            return None
+        return float(m.group(1)) / 100 * base
+    m = re.fullmatch(rf"(.+?)\s*([+-])\s*({NUM})\s*%", s)
+    if m:
+        base = _calc(m.group(1), True)
+        if base is None:
+            return None
+        p = float(m.group(3)) / 100
+        return base * (1 + p if m.group(2) == "+" else 1 - p)
+    s2 = re.sub(rf"({NUM})\s*%", r"(\1/100)", s)
+    if not re.search(r"[*/+]|\s-\s|\)\s*-|-\s*\(", s):        # только «-» без пробелов — дата, телефон, артикул
+        return None
+    if re.match(r"^\+\d", s) or re.search(r"\d{9,}", s):        # +7…, длинные номера
+        return None
+    return _calc(s2)
+
+
+def _calc(s, const=False):
+    if not re.fullmatch(r"[\d\s.+\-*/()]+", s) or not re.search(r"\d", s):
+        return None
+    try:
+        tree = ast.parse(s, mode="eval")
+    except (SyntaxError, ValueError):
+        return None
+    if isinstance(tree.body, ast.Constant) and not const:
+        return None
+    try:
+        v = _ev(tree)
+    except (ValueError, ZeroDivisionError, OverflowError, TypeError):
+        return None
+    if not math.isfinite(v):
+        return None
+    return v
+
+
+def fmt_num(v, comma=False):
+    if abs(v - round(v)) < 1e-9 and abs(v) < 1e15:
+        s = str(int(round(v)))
+    else:
+        s = f"{v:.10g}"
+        if "e" in s:
+            return s
+    return s.replace(".", ",") if comma else s
+
+
+def pretty_num(s):
+    """2820.5 → 2 820,5 (для показа)"""
+    neg, s = s.startswith("-"), s.lstrip("-")
+    ip, _, fp = s.replace(",", ".").partition(".")
+    if not ip.isdigit():
+        return ("-" if neg else "") + s
+    ip = f"{int(ip):,}".replace(",", " ")
+    return ("−" if neg else "") + ip + ("," + fp if fp else "")
+
+
+def latin_prose(t):
+    if len(t) < 20 or len(t) > MAXTEXT or re.search(r"[Ѐ-ӿ]", t):
+        return False
+    if re.search(r"[{}<>=;$\\|`#@]|://|^\s*[/~.]|\b(sudo|git|cd|ls|rm|cp|mv|echo|export|import|def|function|return)\b", t):
+        return False
+    words = re.findall(r"[A-Za-zÀ-ÿĀ-ž']{2,}", t)
+    letters = sum(c.isalpha() for c in t)
+    nonspace = sum(not c.isspace() for c in t)
+    return len(words) >= 4 and nonspace and letters / nonspace > 0.8
+
+
+def detect(text, c, wclass=""):
+    """подсказка {kind, title, sub, trail, icon, label, act:{…}} или None"""
+    d = c["detectors"]
+    t = text.strip()
+    if not t or len(t) > MAXTEXT:
+        return None
+    one = "\n" not in t and " " not in t
+    if one and URL_RE.match(t):
+        clean, n = url_clean(t)
+        host = urllib.parse.urlsplit(t if "://" in t else "https://" + t).hostname or t
+        if n and d.get("url_clean"):
+            return {"kind": "url_clean", "title": "Ссылка с трекерами", "sub": host, "icon": G["clean"],
+                    "trail": f"−{n} {plural(n, 'метка', 'метки', 'меток')}", "label": "Убрать трекеры",
+                    "act": {"do": "copy", "text": clean, "done": "Ссылка очищена"}}
+        if d.get("url_open"):
+            if wclass and re.search(c["open_skip_classes"], wclass, re.I):
+                return None                       # скопировано в браузере — ссылка и так открыта
+            return {"kind": "url_open", "title": "Ссылка", "sub": host, "icon": G["link"], "trail": "",
+                    "label": "Открыть", "act": {"do": "open", "target": t if "://" in t else "https://" + t, "done": "Открыто"}}
+        return None
+    if one and EMAIL_RE.match(t) and d.get("email"):
+        addr = t[7:] if t.lower().startswith("mailto:") else t
+        return {"kind": "email", "title": "Почта", "sub": addr, "icon": G["mail"], "trail": "", "label": "Написать",
+                "act": {"do": "open", "target": "mailto:" + addr, "done": "Открыто"}}
+    if d.get("color"):
+        col = color(t)
+        if col:
+            return {"kind": "color", "title": "Цвет " + col["hex"], "sub": col["conv"], "icon": G["color"], "trail": "",
+                    "label": col["label"], "hex": col["hex"], "act": {"do": "copy", "text": col["conv"], "done": "Скопировано: " + col["conv"]}}
+    if d.get("math"):
+        v = math_expr(t)
+        if v is not None:
+            r = fmt_num(v, comma=bool(re.search(r"\d,\d", t)))
+            return {"kind": "math", "title": "= " + pretty_num(r), "sub": t[:60], "icon": G["calc"], "trail": "",
+                    "label": "Скопировать результат", "act": {"do": "copy", "text": r, "done": "Скопировано: " + r}}
+    if d.get("translate") and latin_prose(t):
+        tr = c.get("translate_to") or "ru"
+        url = "https://translate.google.com/?sl=auto&tl=" + urllib.parse.quote(tr) + "&op=translate&text=" + urllib.parse.quote(t[:1500])
+        return {"kind": "translate", "title": "Текст не по-русски", "sub": t[:60], "icon": G["tr"], "trail": "",
+                "label": "Перевести", "act": {"do": "open", "target": url, "done": "Перевод открыт"}}
+    return None
+
+
+# ---------------------------------------------------------------- остров
+def island(*args):
+    try:
+        subprocess.run([ISLAND, *args], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, timeout=3,
+                       stderr=None if os.environ.get("YUMI_ISLAND_DRY") else subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
+def write_json(path, obj):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def read_json(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def show(s, c):
+    tok = secrets.token_hex(6)
+    write_json(PENDING, {"token": tok, "act": s["act"], "time": time.time()})
+    cmd = shlex.join([SELF, "act", tok])
+    island("end", AID)
+    island("start", AID, "--title", s["title"], "--sub", s["sub"], "--trail", s.get("trail", ""), "--icon", s["icon"],
+           "--tone", "acc", "--prio", str(int(c.get("priority", 7))), "--primary", cmd, "--primary-label", s["label"])
+    return tok
+
+
+def active_class():
+    try:
+        r = subprocess.run(["hyprctl", "activewindow", "-j"], capture_output=True, text=True, timeout=1)
+        j = json.loads(r.stdout or "{}")
+        return f'{j.get("class", "")} {j.get("initialClass", "")} {j.get("title", "")}'
+    except Exception:
+        return ""
+
+
+# ---------------------------------------------------------------- команды
+def cmd_hook():
+    """wl-paste --watch: содержимое на stdin, состояние в CLIPBOARD_STATE. Одна запись os.write ≤ 4 КБ — атомарна в трубе."""
+    st = os.environ.get("CLIPBOARD_STATE", "data")
+    raw = sys.stdin.buffer.read(MAXTEXT * 4 + 8)
+    long = len(raw) > MAXTEXT * 4
+    sys.stdin.buffer.read()                       # дочитать, чтобы wl-paste не получил EPIPE
+    text = "" if st != "data" else raw.decode("utf-8", "replace")[:MAXTEXT + 1]
+    line = json.dumps({"state": st, "long": long or len(text) > MAXTEXT, "text": text if len(text) <= MAXTEXT else ""},
+                      ensure_ascii=False).encode()
+    if len(line) >= 4000:
+        line = json.dumps({"state": st, "long": True, "text": ""}).encode()
+    try:
+        os.write(1, line + b"\n")
+    except OSError:                               # демон уже закрылся
+        pass
+    return 0
+
+
+def cmd_run():
+    c = conf()
+    if not c.get("enabled", True):
+        log("выключено в", CONF)
+    os.makedirs(STATE, exist_ok=True)
+    w = subprocess.Popen(["wl-paste", "--type", "text", "--watch", sys.executable, "-I", SELF, "hook"],
+                         stdout=subprocess.PIPE, stdin=subprocess.DEVNULL, preexec_fn=die_with_parent)
+    signal.signal(signal.SIGTERM, lambda *_: (w.terminate(), sys.exit(0)))
+    fd, buf = w.stdout.fileno(), b""
+    t0 = time.monotonic()
+    pending_ev, ev_at = None, 0.0
+    seen = {}                                 # 30.10: хеш текста → когда подсказывали; тот же текст — не чаще раза в REPEAT_S
+    REPEAT_S = 30 * 60                        # (буфер переотдаётся: восстановление после yumi-quicklook, клипборд-менеджеры)
+    end_at, shown_tok = None, None
+    DEBOUNCE = 0.35
+    while True:
+        now = time.monotonic()
+        waits = [x for x in ((ev_at + DEBOUNCE - now) if pending_ev else None, (end_at - now) if end_at else None) if x is not None]
+        r, _, _ = select.select([fd], [], [], max(0.0, min(waits)) if waits else None)
+        if r:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                log("wl-paste закончился")
+                return 1
+            buf += chunk
+            *lines, buf = buf.split(b"\n")
+            for l in lines:
+                try:
+                    ev = json.loads(l)
+                except ValueError:
+                    continue
+                if time.monotonic() - t0 < 1.5:
+                    continue                      # содержимое буфера на момент запуска — не новое копирование
+                pending_ev, ev_at = ev, time.monotonic()
+            continue
+        now = time.monotonic()
+        if end_at and now >= end_at:
+            end_at = None
+            p = read_json(PENDING)
+            if p and p.get("token") == shown_tok:  # не нажали — убрать подсказку
+                island("end", AID)
+                try:
+                    os.remove(PENDING)
+                except OSError:
+                    pass
+        if pending_ev and now - ev_at >= DEBOUNCE:
+            ev, pending_ev = pending_ev, None
+            c = conf()
+            if not c.get("enabled", True):
+                continue
+            if ev.get("state") != "data":
+                if ev.get("state") == "sensitive":
+                    log("пароль (sensitive) — пропущено")
+                continue
+            text = ev.get("text") or ""
+            if ev.get("long") or not text.strip():
+                continue
+            hh = h(text.strip())
+            sw = read_json(SELFW) or {}
+            if sw.get("hash") == hh and time.time() - sw.get("time", 0) < 10:
+                log("своя запись — пропущено")
+                continue
+            if now - seen.get(hh, -1e9) < REPEAT_S:
+                continue
+            seen[hh] = now
+            if len(seen) > 300:
+                for k in sorted(seen, key=seen.get)[:100]: seen.pop(k)
+            wcls = active_class()
+            if wcls and re.search(c["skip_classes"], wcls, re.I):
+                log("окно менеджера паролей — пропущено")
+                continue
+            s = detect(text, c, wcls)
+            if not s:
+                continue
+            log("подсказка:", s["kind"], "·", s["title"], "·", s["label"])
+            shown_tok = show(s, c)
+            end_at = time.monotonic() + float(c.get("duration", 6))
+
+
+def cmd_act(tok):
+    p = read_json(PENDING)
+    if not p or p.get("token") != tok:
+        log("подсказка устарела")
+        island("end", AID)
+        return 0
+    try:
+        os.remove(PENDING)
+    except OSError:
+        pass
+    a = p.get("act") or {}
+    if a.get("do") == "copy":
+        text = str(a.get("text", ""))
+        write_json(SELFW, {"hash": h(text.strip()), "time": time.time()})
+        if DRY:
+            log("[dry-run] wl-copy", repr(text))
+        else:
+            subprocess.run(["wl-copy", "--", text], stdin=subprocess.DEVNULL, timeout=3)
+    elif a.get("do") == "open":
+        target = str(a.get("target", ""))
+        if not re.match(r"^(https?://|mailto:)", target, re.I):
+            return 0
+        if DRY:
+            log("[dry-run] xdg-open", target)
+        else:
+            subprocess.Popen(["xdg-open", target], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+    island("end", AID, "--done", str(a.get("done", "Готово"))[:60])
+    return 0
+
+
+def main(argv):
+    if not argv:
+        print(__doc__.strip(), file=sys.stderr)
+        return 0
+    if argv[0] == "hook":
+        return cmd_hook()
+    if argv[0] == "run":
+        return cmd_run()
+    if argv[0] == "act" and len(argv) > 1:
+        return cmd_act(argv[1])
+    if argv[0] == "test":
+        text = " ".join(argv[1:]) if len(argv) > 1 else sys.stdin.read()
+        print(json.dumps(detect(text, conf(), os.environ.get("SMARTCLIP_CLASS", "")), ensure_ascii=False))
+        return 0
+    print(__doc__.strip(), file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        sys.exit(0)

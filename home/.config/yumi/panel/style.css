@@ -1,5 +1,5 @@
 /* yumi-panel — общий стиль GTK-меню. Цвета только @yp-* (wallbash, общий файл с плеером).
-   Все px/pt на мониторе DP-1 автоматически ×0.8. */
+   Все px/pt умножаются на коэффициент монитора из ~/.config/yumi/monitors.conf (столбец «интерфейс»). */
 
 window.yp-panel { background: transparent; }
 

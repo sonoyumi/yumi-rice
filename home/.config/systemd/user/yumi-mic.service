@@ -1,0 +1,16 @@
+# «Микрофон (авто)» для Discord: встроенный вне звонка, AirPods в звонке (если в ушах). См. ~/.local/bin/yumi-mic
+# Отключить: systemctl --user disable --now yumi-mic.service
+[Unit]
+Description=yumi-mic — стабильный микрофон для Discord (AirPods только в звонке)
+PartOf=graphical-session.target
+After=graphical-session.target pipewire.service wireplumber.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/yumi-mic
+Restart=on-failure
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=graphical-session.target

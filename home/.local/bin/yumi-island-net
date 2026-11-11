@@ -1,0 +1,86 @@
+#!/usr/bin/env -S python3 -I
+"""yumi-island-net — Wi-Fi / VPN → короткие пузыри Dynamic Island (id net, vpn; priority 4). 30.10.2026.
+
+Слушает `nmcli monitor` (только чтение, сеть не трогает); на каждое событие (с задержкой 0,8 с, чтобы пачка
+событий дала один пузырь) читает активные соединения `nmcli -t con show --active` и сравнивает с прошлым:
+  Wi-Fi пропал → «Wi-Fi пропал · поиск…» (warn, 3 с); Wi-Fi вернулся/сменился → «<SSID> · подключено» (ok, 2 с);
+  VPN (NM vpn/wireguard; tailscale0 не в счёт) появился → «VPN · <имя> · подключён», пропал → «VPN отключён».
+Служба: yumi-island-net.service (не включена).
+"""
+import os
+import select
+import subprocess
+import sys
+import time
+
+ISLAND = os.path.expanduser("~/.local/bin/yumi-island")
+DEBOUNCE = 0.8
+VPN_TYPES = {"vpn", "wireguard"}
+
+
+def bubble(ident, hold, *fields):
+    """start + через hold с end — в фоне, не блокируя чтение событий."""
+    sh = f'"$0" start {ident} "$@"; sleep {hold}; "$0" end {ident}'
+    subprocess.Popen(["sh", "-c", sh, ISLAND, *fields], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=None if os.environ.get("YUMI_ISLAND_DRY") else subprocess.DEVNULL, start_new_session=True)
+
+
+def active():
+    try:
+        out = subprocess.run(["nmcli", "-t", "-f", "NAME,TYPE,DEVICE", "con", "show", "--active"],
+                             capture_output=True, text=True, timeout=3, env={**os.environ, "LC_ALL": "C"}).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    wifi, vpn = None, set()
+    for line in out.splitlines():
+        parts = line.replace("\\:", "\x00").split(":")
+        if len(parts) < 3:
+            continue
+        name, typ, dev = (p.replace("\x00", ":") for p in parts[:3])
+        if typ == "802-11-wireless":
+            wifi = name
+        elif typ in VPN_TYPES or typ.endswith("vpn") or typ == "wireguard":
+            if dev != "tailscale0":
+                vpn.add(name)
+    return wifi, vpn
+
+
+def diff(old, new):
+    (ow, ov), (nw, nv) = old, new
+    if ow and not nw:
+        bubble("net", 3, "--title", "Wi-Fi пропал", "--sub", "поиск…", "--icon", "wifi", "--tone", "warn", "--prio", "4")
+    elif nw and nw != ow:
+        bubble("net", 2, "--title", nw, "--sub", "Wi-Fi подключён", "--trail", "подключено", "--icon", "wifi",
+               "--tone", "ok", "--prio", "4")
+    for v in sorted(nv - ov):
+        bubble("vpn", 2, "--title", f"VPN · {v[4:] if v.lower().startswith('vpn ') else v}", "--sub", "подключён", "--icon", "shield", "--tone", "acc", "--prio", "4")
+    if ov and not nv:
+        bubble("vpn", 2, "--title", "VPN отключён", "--sub", ", ".join(sorted(ov)), "--icon", "shield",
+               "--tone", "warn", "--prio", "4")
+
+
+def main():
+    state = active() or (None, set())
+    p = subprocess.Popen(["nmcli", "monitor"], stdout=subprocess.PIPE, env={**os.environ, "LC_ALL": "C"})
+    fd, due = p.stdout.fileno(), None
+    while True:
+        r, _, _ = select.select([fd], [], [], max(0.0, due - time.monotonic()) if due else None)
+        if r:
+            if not os.read(fd, 4096):
+                return 1
+            due = due or time.monotonic() + DEBOUNCE
+            continue
+        due = None
+        new = active()
+        if new is None:
+            continue
+        if new != state:
+            diff(state, new)
+        state = new
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(0)

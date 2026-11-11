@@ -17,6 +17,10 @@ hl.bind("ALT + J", hl.dsp.layout("swapprev"), { description = "[Master] swap foc
 -- Жесты: 3 пальца ←/→ — рабочие столы, 4 пальца — фокус в сторону свайпа
 -- (3 пальца ↓ — свои действия по раскладке, в hyprland.lua)
 hl.gesture({ fingers = 3, direction = "horizontal", action = "workspace" })
+-- 30.10: 3 пальца вверх — Mission Control (вниз — свои действия в hyprland.lua)
+hl.gesture({ fingers = 3, direction = "up", action = function()
+	hl.dispatch(hl.dsp.exec_cmd("qs -c yumi ipc call mission toggle"))
+end })
 for _, dir in ipairs({ "up", "down", "left", "right" }) do
 	hl.gesture({
 		fingers = 4,

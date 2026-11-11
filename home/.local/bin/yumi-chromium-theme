@@ -1,0 +1,33 @@
+#!/usr/bin/env python3
+"""yumi-chromium-theme — Chromium в цветах обоев, тёмная схема сохраняется.
+Пишет акцент yumi-accent в профиль (browser.theme.user_color2) — из него Chromium строит тёмную палитру.
+Политику BrowserThemeColor НЕ используем: она включает светлую схему и перебивает «Тёмная» и --force-dark-mode (25.10).
+Запущенный Chromium перезаписал бы Preferences, поэтому цвет пишется только при закрытом браузере;
+обёртка ~/.local/bin/chromium вызывает этот скрипт перед запуском, так что новый цвет появится при следующем открытии.
+"""
+import json, os, subprocess, sys
+HOME = os.path.expanduser("~")
+ACC = os.path.join(HOME, ".cache/yumi-accent/accent.txt")
+PREFS = os.path.join(HOME, ".config/chromium/Profile 1/Preferences")
+if subprocess.run(["pgrep", "-x", "chromium"], capture_output=True).returncode == 0:
+    sys.exit(0)
+try:
+    xa = open(ACC).read().split()
+    p = json.load(open(PREFS))
+except (OSError, ValueError):
+    sys.exit(0)
+argb = 0xFF000000 | int(xa[6], 16)        # тот же основной акцент, что у Zen (--yumi-accent)
+color = argb - (1 << 32)                    # Chromium хранит цвет как знаковое int32
+# серый акцент (чёрно-белые обои): Chromium сам добавил бы оттенок, а «Серая» тема держит его нейтральным (29.10)
+r, g, b = (int(xa[6][i:i + 2], 16) for i in (0, 2, 4))
+gray = max(r, g, b) - min(r, g, b) <= 12
+t = p.setdefault("browser", {}).setdefault("theme", {})
+if t.get("user_color2") == color and t.get("color_scheme2") == 2 and t.get("is_grayscale2", False) == gray:
+    sys.exit(0)
+t.update({"user_color2": color, "color_scheme2": 2, "is_grayscale2": gray})   # 2 = тёмная
+p.setdefault("extensions", {}).setdefault("theme", {})["id"] = "user_color_theme_id"
+tmp = PREFS + ".yumi-tmp"
+with open(tmp, "w") as f:
+    json.dump(p, f, separators=(",", ":"))
+os.replace(tmp, PREFS)
+print("#" + xa[6])

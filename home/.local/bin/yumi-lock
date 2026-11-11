@@ -1,33 +1,77 @@
 #!/usr/bin/env bash
-# yumi-lock — блокировка экрана без HyDE (замена `hyde-shell lock-session` и `hyde-shell lockscreen.sh`)
+# yumi-lock — блокировка экрана. С 16.10.2026 основной экран — Quickshell (lock/LockReal.qml), hyprlock — запасной.
 #   yumi-lock            = SUPER+N: есть hypridle (org.freedesktop.ScreenSaver) → `loginctl lock-session`
 #                          (дальше hypridle вызывает свою lock_cmd); нет hypridle → сразу `yumi-lock --now`
-#   yumi-lock --now      = lock_cmd для hypridle: английская раскладка на всех клавиатурах (иначе пароль
-#                          уходит кириллицей → faillock) и hyprlock в отдельной области systemd (scope),
-#                          чтобы перезапуск hypridle не убил открытый экран блокировки.
-#                          Уже открыт hyprlock — второй не запускается.
+#   yumi-lock --now      = lock_cmd для hypridle (и крышка): экран Quickshell (раскладку не трогает); не ответил за ~2 с → hyprlock
+#                          в отдельной области systemd (scope), чтобы перезапуск hypridle его не убил.
+#   yumi-lock --boot     = вход в систему (hyprland.lua): экран «из логотипа» — тот же кадр, что у заставки Plymouth.
+#                          Quickshell ещё не поднялся — оставляет запрос в $XDG_RUNTIME_DIR/yumi-lock-request,
+#                          Quickshell блокирует сразу при старте; нет блокировки за 12 с → hyprlock.
+#                          Курсор (скрыт при загрузке в hyprland.lua) включает Quickshell при растворении входа
+#                          (страховка — через 4 с здесь). Масштабы мониторов → $XDG_RUNTIME_DIR/yumi-monitors.json.
+#   yumi-lock --status   заблокирован ли экран: печатает yes/no, код 0 — да (для yumi-airpods, yumi-idle-action и др.)
 #   yumi-lock --print    напечатать, что было бы сделано (без запуска)
 #
-# Не проверять запуском: hyprlock, закрытый без ввода пароля, считается неверной попыткой (faillock).
-# Проверка без запуска: yumi-lock --print
-#
-# Отличие от HyDE (lockscreen.sh → app2unit hyde-lockscreen.service → hyprlock.sh → app2unit scope → hyprlock):
-#  · HyDE при повторном вызове ОСТАНАВЛИВАЛ уже открытый hyprlock своей области и запускал новый;
-#    здесь второй вызов ничего не делает (pidof hyprlock) — экран остаётся заблокированным тем же hyprlock.
-#  · ensure_lockscreen_bg_exist (hyprlock.png в кэше HyDE) не нужен: макет yumi-google берёт
-#    фон из ~/.cache/yumi/theme/hyprlock-bg.png, его готовит служба hyprlock-bg (это шаг «обои»).
+# Не проверять запуском без пользователя: неверный или пустой пароль — неверная попытка для faillock.
+
+RUN=${XDG_RUNTIME_DIR:-/tmp}
+FLAG=$RUN/yumi-locked          # пишет Quickshell, пока экран заблокирован
+REQ=$RUN/yumi-lock-request     # запрос входа «из логотипа» до старта Quickshell
 
 live() { [[ $1 != print ]]; }
 run() { if live "$MODE"; then "$@"; else printf 'DO:'; printf ' %q' "$@"; echo; fi; }
 
-lock_now() {
-    if pidof -q hyprlock; then
-        echo "hyprlock уже открыт — ничего не делаю"
-        return 0
-    fi
-    run hyprctl switchxkblayout all 0
+is_locked() { [[ -e $FLAG ]] || pidof -q hyprlock; }
+qs_call() { timeout 2 qs -c yumi ipc call lockscreen "$1" >/dev/null 2>&1; }
+wait_flag() {   # $1 — сколько раз по 0,1 с ждать флага от Quickshell
+    for ((i = 0; i < $1; i++)); do [[ -e $FLAG ]] && return 0; sleep 0.1; done
+    return 1
+}
+cursor_on() {   # страховка: обычный курсор (при загрузке его прячет патч Hyprland до экрана блокировки)
+    run "$HOME/.local/bin/yumi-cursor-restore"
+}
+hyprlock_now() {
     # uwsm app: своя область в session-graphical.slice (как app2unit -t scope у HyDE)
     run uwsm app -s s -a yumi-lockscreen -- hyprlock
+}
+
+lock_now() {
+    if is_locked; then
+        # 19.10: блокировку держит Quickshell — сообщить и ему: вход после загрузки (не разблокированный) он переводит
+        # в обычную блокировку перед сном (иначе после сна поверхность бывала без клавиатуры). Сам экран не меняется
+        [[ -e $FLAG ]] && live "$MODE" && qs_call lock
+        echo "экран уже заблокирован — ничего не делаю"
+        return 0
+    fi
+    live "$MODE" || { echo "DO: qs -c yumi ipc call lockscreen lock (нет ответа → hyprlock)"; return 0; }
+    if qs_call lock && wait_flag 20; then return 0; fi
+    echo "Quickshell не заблокировал экран — запасной hyprlock" >&2
+    hyprlock_now
+}
+
+boot_done() {   # экран блокировки готов: запомнить время загрузки (полоска заставки идёт по нему), страховки
+    [[ -w /var/lib/yumi-splash ]] && cut -d' ' -f1 /proc/uptime > /var/lib/yumi-splash/duration
+    # 18.10: курсор при загрузке — только после разблокировки и движения мыши (yumi-cursor-wait --after-unlock, его
+    # запускает Hyprland; здесь — запасной запуск, второй экземпляр сам выходит). Было: cursor_on через 4 с
+    (sleep 4; "$HOME/.local/bin/yumi-cursor-wait" --after-unlock & pkill -x swaybg; "$HOME/.local/bin/yumi-boot-monitors") &   # MSI — страховка, обычно включает Quickshell
+}
+lock_boot() {
+    is_locked && return 0
+    live "$MODE" || { echo "DO: запрос $REQ, qs ipc call lockscreen boot (нет блокировки за 12 с → hyprlock)"; return 0; }
+    # масштабы мониторов для входа «из логотипа» (Quickshell читает их синхронно, с первого кадра)
+    hyprctl monitors -j > "$RUN/yumi-monitors.json.tmp" 2>/dev/null && mv -f "$RUN/yumi-monitors.json.tmp" "$RUN/yumi-monitors.json"
+    : > "$REQ"
+    local end=$((SECONDS + 12))                    # qs ipc call отвечает 0 и без блокировки — верим только флагу
+    while ((SECONDS < end)); do
+        # курсор включает сам Quickshell, когда вход растворяется; здесь — только страховка через 4 с
+        if [[ -e $FLAG ]]; then rm -f "$REQ"; boot_done; return 0; fi
+        if qs_call boot && wait_flag 10; then rm -f "$REQ"; boot_done; return 0; fi
+        sleep 0.2
+    done
+    rm -f "$REQ"
+    echo "Quickshell не поднялся за 12 с — запасной hyprlock" >&2
+    cursor_on; pkill -x swaybg; "$HOME/.local/bin/yumi-boot-monitors"
+    hyprlock_now
 }
 
 MODE=""
@@ -39,6 +83,8 @@ case $1 in
             lock_now
         fi ;;
     --now | now) lock_now ;;
+    --boot | boot) lock_boot ;;
+    --status | status) if is_locked; then echo yes; else echo no; exit 1; fi ;;
     --print | print) MODE=print; lock_now ;;
-    *) echo "использование: yumi-lock [--now|--print]" >&2; exit 2 ;;
+    *) echo "использование: yumi-lock [--now|--boot|--status|--print]" >&2; exit 2 ;;
 esac

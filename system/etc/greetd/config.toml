@@ -1,0 +1,23 @@
+# greetd yumi-rice (шаг 1 плавной загрузки, docs/boot-vision.md): без SDDM и X — сразу uwsm Hyprland на VT1.
+# Ставит install.sh в /etc/greetd/config.toml (прежний — /etc/yumi-greetd-backup/config.toml).
+
+[terminal]
+vt = 1
+
+[general]
+# свой PAM-сервис: logind-сеанс получает Type=wayland, как при SDDM (нужно yumi-hz-guard)
+service = "greetd-yumi"
+
+# автовход — один раз за загрузку (runfile в /run)
+[initial_session]
+# вывод uwsm — в журнал (journalctl -t uwsm-start), а не на экран VT1; -g -1 — не ждать graphical.target
+# (его держит power-profiles-daemon ~0,4–0,6 с; Hyprland он не нужен — 16.10)
+# 18.10: без uwsm — yumi-hyprland-session (на ~1,5 с быстрее); было: systemd-cat -t uwsm-start uwsm start -g -1 -e -D Hyprland hyprland.desktop
+command = "systemd-cat -t yumi-session @HOME@/.local/bin/yumi-hyprland-session"
+user = "@USER@"
+service = "greetd-yumi"
+
+# после выхода из сеанса (uwsm stop) — текстовый вход на VT1: логин и пароль → снова Hyprland
+[default_session]
+command = "/var/lib/yumi-greeter/yumi-greeter"
+user = "greeter"

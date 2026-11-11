@@ -1,0 +1,5 @@
+LockSurface 1.0 LockSurface.qml
+LockPreview 1.0 LockPreview.qml
+LockCard 1.0 LockCard.qml
+LockReal 1.0 LockReal.qml
+GreeterSurface 1.0 GreeterSurface.qml

@@ -1,0 +1,276 @@
+#!/usr/bin/env -S python3 -I
+"""Бэкенд меню «Процессы» для Quickshell (menus/top/TopMenu.qml). Запускается только пока меню открыто.
+Поток JSON-строк в stdout:
+  {"t":"hello","hidden":[...],"ncpu":N}
+  {"t":"sys","cpu":%,"used":кБ,"total":кБ,"temp":[°C,"датчик"]|null,"load":[1,5,15],"up":с}   раз в 1 с
+  {"t":"apps","apps":[{"name","mem":кБ,"pct":%,"n":число,"prot":bool,"icon":имя|путь,"pids":[...]}]}  раз в 2 с
+  {"t":"info","name","pid","n","threads","time":с,"state","cmd","pids":[...]}                 для открытой подстраницы
+  {"t":"result","sig","name","ok","msg","n","dry"}                                              ответ на signal
+Команды в stdin (по строке JSON):
+  {"cmd":"page","name":"zen"}      следить за приложением (подстраница); name "" — перестать
+  {"cmd":"signal","name":"zen","sig":"TERM"|"KILL"}
+Группировка процессов, PSS, защищённые и top-hide — общие с пилюлей: ~/.local/lib/yumi/bar/top.
+YP_DRYRUN=1 — сигналы не отправляются, команда пишется в stderr. Выход — по EOF на stdin."""
+import json
+import os
+import signal
+import sys
+import threading
+import time
+from importlib.machinery import SourceFileLoader
+
+wt = SourceFileLoader("waybar_top", os.path.expanduser("~/.local/lib/yumi/bar/top")).load_module()
+try:
+    import gi
+    try:
+        gi.require_version("GioUnix", "2.0")
+        from gi.repository import GioUnix as DesktopNS
+    except (ValueError, ImportError):
+        from gi.repository import Gio as DesktopNS
+except Exception:  # noqa: BLE001
+    DesktopNS = None
+
+DRY = os.environ.get("YP_DRYRUN") == "1"
+APPS_EVERY = 2
+TICK = os.sysconf("SC_CLK_TCK")
+lock = threading.Lock()
+
+
+def out(d):
+    with lock:
+        try:
+            print(json.dumps(d, ensure_ascii=False), flush=True)
+        except BrokenPipeError:
+            os._exit(0)
+
+
+def read_cpu():
+    with open("/proc/stat") as f:
+        v = [int(x) for x in f.readline().split()[1:]]
+    idle = v[3] + (v[4] if len(v) > 4 else 0)
+    return sum(v) - idle, sum(v)
+
+
+def read_mem():
+    info = {}
+    with open("/proc/meminfo") as f:
+        for line in f:
+            k, v = line.split(":", 1)
+            info[k] = int(v.split()[0])
+    total = info.get("MemTotal", 1)
+    return total - info.get("MemAvailable", total), total
+
+
+def read_temp():
+    """Самый горячий датчик hwmon (на M1 нет датчика CPU — SMC/усилители): [°C, имя] или None."""
+    best = None
+    base = "/sys/class/hwmon"
+    try:
+        hw = os.listdir(base)
+    except OSError:
+        return None
+    for h in hw:
+        d = os.path.join(base, h)
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for n in names:
+            if not (n.startswith("temp") and n.endswith("_input")):
+                continue
+            try:
+                with open(os.path.join(d, n)) as f:
+                    t = int(f.read()) / 1000
+                try:
+                    with open(os.path.join(d, n.replace("_input", "_label"))) as f:
+                        label = f.read().strip()
+                except OSError:
+                    with open(os.path.join(d, "name")) as f:
+                        label = f.read().strip()
+            except (OSError, ValueError):
+                continue
+            if 0 < t < 150 and (best is None or t > best[0]):
+                best = [round(t, 1), label]
+    return best
+
+
+def uptime_s():
+    with open("/proc/uptime") as f:
+        return float(f.read().split()[0])
+
+
+def proc_info(pid):
+    d = {"cmd": "", "start": None, "threads": None, "state": ""}
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            d["cmd"] = f.read().replace(b"\0", b" ").decode(errors="replace").strip()
+        with open(f"/proc/{pid}/stat") as f:
+            s = f.read()
+        fields = s[s.rindex(")") + 2:].split()
+        d["state"] = fields[0]
+        d["threads"] = int(fields[17])
+        d["start"] = int(fields[19]) / TICK
+        if not d["cmd"]:
+            d["cmd"] = "[" + s[s.index("(") + 1:s.rindex(")")] + "]"
+    except (OSError, ValueError, IndexError):
+        pass
+    return d
+
+
+_icon_cache = {}
+
+
+def app_icon(name):
+    """Имя значка из .desktop (как app_icon в yumi-menu-top) или "" — тогда QML покажет Nerd-глиф."""
+    key = name.lower()
+    if key in _icon_cache:
+        return _icon_cache[key]
+    icon = ""
+    if DesktopNS is not None:
+        gicon = None
+        for cand in (key, name, f"org.{key}.desktop", f"com.{key}"):
+            try:
+                info = DesktopNS.DesktopAppInfo.new(cand + ".desktop")
+            except TypeError:
+                info = None
+            if info and info.get_icon():
+                gicon = info.get_icon()
+                break
+        if gicon is None:
+            try:
+                for group in DesktopNS.DesktopAppInfo.search(key)[:1]:
+                    for did in group[:1]:
+                        info = DesktopNS.DesktopAppInfo.new(did)
+                        if info and info.get_icon() and key in (did.lower() + (info.get_executable() or "").lower()):
+                            gicon = info.get_icon()
+            except Exception:  # noqa: BLE001
+                pass
+        if gicon is not None:
+            names = getattr(gicon, "get_names", None)
+            if names:
+                icon = (names() or [""])[0]
+            elif hasattr(gicon, "get_file"):
+                icon = gicon.get_file().get_path() or ""
+    _icon_cache[key] = icon
+    return icon
+
+
+def protected(name, a):
+    return not a["own"] or bool(wt.PROTECTED.match(name))
+
+
+class Top:
+    def __init__(self):
+        self.page = ""
+        self.apps = {}
+        self.alive = True
+
+    def info(self, apps=None):
+        """Сведения о приложении подстраницы (главный процесс — самый старый)."""
+        name = self.page
+        if not name:
+            return
+        apps = apps or self.apps
+        a = apps.get(name)
+        if not a:
+            if apps:                     # до первого снимка «нет» ничего не значит
+                out({"t": "info", "name": name, "gone": True})
+            return
+        pids = sorted(a["pids"])
+        infos = {p: proc_info(p) for p in pids}
+        main = min(pids, key=lambda p: infos[p]["start"] if infos[p]["start"] is not None else 1e18)
+        mi = infos[main]
+        out({"t": "info", "name": name, "pid": main, "n": len(pids), "threads": mi["threads"],
+             "time": (uptime_s() - mi["start"]) if mi["start"] is not None else None, "state": mi["state"],
+             "cmd": mi["cmd"][:600], "pids": pids[:40], "mem": a["mem"], "pct": round(a.get("pct", 0.0), 1),
+             "prot": protected(name, a), "icon": app_icon(name)})
+
+    def send_signal(self, name, sig):
+        a = wt.snapshot().get(name)        # свежий список PID — не убить чужой процесс со старым номером
+        if not a:
+            out({"t": "result", "sig": sig, "name": name, "ok": False, "msg": f"«{name}» уже не запущено", "n": 0, "dry": DRY})
+            return
+        if protected(name, a):
+            out({"t": "result", "sig": sig, "name": name, "ok": False, "msg": "Системное — закрывать нельзя", "n": 0, "dry": DRY})
+            return
+        me = {os.getpid(), os.getppid()}
+        pids = [p for p in a["pids"] if p not in me]
+        signo = signal.SIGKILL if sig == "KILL" else signal.SIGTERM
+        if DRY:
+            print(f"[dry-run] kill -{sig} " + " ".join(map(str, pids)), file=sys.stderr, flush=True)
+            out({"t": "result", "sig": sig, "name": name, "ok": True, "msg": "", "n": len(pids), "dry": True})
+            return
+        errs = []
+        for p in pids:
+            try:
+                os.kill(p, signo)
+            except OSError as e:
+                errs.append(str(e))
+        ok = len(errs) < len(pids) or not pids
+        out({"t": "result", "sig": sig, "name": name, "ok": ok, "msg": errs[0][:60] if errs and not ok else "",
+             "n": len(pids), "dry": False})
+        os.system("qs -c yumi ipc call bar refresh top >/dev/null 2>&1")
+
+    def reader(self):
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                c = json.loads(line)
+            except ValueError:
+                continue
+            cmd = c.get("cmd")
+            if cmd == "page":
+                self.page = c.get("name", "") or ""
+                self.info()
+            elif cmd == "signal":
+                self.send_signal(c.get("name", ""), "KILL" if c.get("sig") == "KILL" else "TERM")
+        self.alive = False
+        os._exit(0)
+
+    def loop(self):
+        out({"t": "hello", "hidden": sorted(wt.hidden()), "ncpu": os.cpu_count() or 1})
+        prev_cpu = read_cpu()
+        prev_apps, prev_t = None, None
+        tick = 0
+        first = True
+        while self.alive:
+            t0 = time.monotonic()
+            try:
+                busy, total = read_cpu()
+                cpu = (busy - prev_cpu[0]) / max(total - prev_cpu[1], 1) * 100
+                prev_cpu = (busy, total)
+                used, mtotal = read_mem()
+                if not first:   # первый замер CPU неточный (интервал 0)
+                    out({"t": "sys", "cpu": round(cpu, 1), "used": used, "total": mtotal, "temp": read_temp(),
+                         "load": [round(x, 2) for x in os.getloadavg()], "up": int(uptime_s())})
+                if tick % APPS_EVERY == 0:
+                    apps = wt.snapshot()
+                    now = time.monotonic()
+                    if prev_apps is not None:
+                        wt.cpu_percent(apps, prev_apps, now - prev_t)
+                        self.apps = apps
+                        out({"t": "apps", "apps": [
+                            {"name": n, "mem": a["mem"], "pct": round(a.get("pct", 0.0), 1), "n": len(a["pids"]),
+                             "prot": protected(n, a), "icon": app_icon(n), "pids": sorted(a["pids"])[:40]}
+                            for n, a in sorted(apps.items(), key=lambda kv: -kv[1]["mem"])[:40]]})
+                        self.info(apps)
+                    prev_apps, prev_t = {n: a["cpu"] for n, a in apps.items()}, now
+            except Exception as e:  # noqa: BLE001 — опрос не должен падать
+                print("qs/top:", e, file=sys.stderr, flush=True)
+            tick += 1
+            delay = 0.5 if first else 1.0     # первый замер CPU по процессам — через 0,5 с, чтобы список появился сразу
+            first = False
+            if tick == 1:
+                tick = APPS_EVERY
+            time.sleep(max(delay - (time.monotonic() - t0), 0.05))
+
+
+if __name__ == "__main__":
+    t = Top()
+    threading.Thread(target=t.reader, daemon=True).start()
+    try:
+        t.loop()
+    except KeyboardInterrupt:
+        pass

@@ -1,0 +1,13 @@
+[Unit]
+Description=yumi Fn tap -> next keyboard layout (physical Fn key only)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/yumi-fn-tap
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=graphical-session.target

@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""yumi-lid-guard — встроенный экран Mac не остаётся тёмным после сна и открытия крышки (16.10.2026).
+
+16.10: после сна (крышка закрывалась при подключённом MSI → правило Hyprland отключило eDP-1) встроенный экран не
+вернулся: событие «крышка открыта» до Hyprland не дошло или пришло не вовремя (SMC при пробуждении шлёт ложные
+закрыта→открыта, события запаздывают). Экран блокировки при этом был на тёмном eDP, пароль ввести было негде.
+
+Что делает (служба yumi-lid-guard.service, пользователь в группе input):
+  · крышка открылась (событие SW_LID прямо от «Apple SMC power/lid events») — и с ☕ (Mac не спит), и без:
+    eDP-1 включить (disabled = false, режим как в hyprland.lua) и включить экраны (dpms);
+  · Mac проснулся (скачок CLOCK_BOOTTIME относительно монотонных часов) и крышка открыта — то же самое;
+  · раз в 3 с: крышка открыта, а eDP-1 у Hyprland отключён — включить (dpms не трогает: гашение по простою
+    hypridle — не наше дело).
+Крышка закрыта — ничего не делает (там работает правило Hyprland). Всё пишет в журнал: journalctl --user -u yumi-lid-guard
+Откат: systemctl --user disable --now yumi-lid-guard; удалить этот файл и ~/.config/systemd/user/yumi-lid-guard.service
+"""
+import fcntl, glob, json, os, select, struct, subprocess, sys, time
+
+NAME = "Apple SMC power/lid events"
+EV_SW, SW_LID = 0x05, 0x00
+EVIOCGSW = 0x8000451B | (8 << 16)          # _IOR('E', 0x1b, 8 байт)
+EDP = ('hl.monitor({ output = "eDP-1", disabled = false, mode = "2560x1600@60.0", position = "0x0", '
+       'scale = 1.6, vrr = 0, reserved = { top = 38 } })')
+EV = struct.Struct("llHHi")
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def lid_device():
+    for d in glob.glob("/sys/class/input/event*/device/name"):
+        try:
+            if open(d).read().strip() == NAME:
+                return "/dev/input/" + d.split("/")[4]
+        except OSError:
+            pass
+    return None
+
+
+def lid_closed(fd):
+    buf = bytearray(8)
+    fcntl.ioctl(fd, EVIOCGSW, buf)
+    return bool(buf[0] & (1 << SW_LID))
+
+
+def hypr(*args):
+    try:
+        return subprocess.run(["hyprctl", *args], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def edp_state():
+    try:
+        for m in json.loads(hypr("monitors", "all", "-j") or "[]"):
+            if m.get("name") == "eDP-1":
+                return m
+    except ValueError:
+        pass
+    return None
+
+
+def restore(why, dpms=True):
+    m = edp_state()
+    before = "нет в списке" if m is None else f"disabled={m.get('disabled')} dpms={m.get('dpmsStatus')}"
+    hypr("eval", EDP)
+    if dpms:
+        hypr("dispatch", 'hl.dsp.dpms({ action = "enable" })')
+    m = edp_state()
+    after = "нет в списке" if m is None else f"disabled={m.get('disabled')} dpms={m.get('dpmsStatus')}"
+    log(f"{why}: eDP-1 {before} → {after}")
+
+
+def drift():
+    return time.clock_gettime(time.CLOCK_BOOTTIME) - time.monotonic()
+
+
+def main():
+    path = lid_device()
+    if not path:
+        log("датчик крышки не найден"); return 1
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    log(f"слежу за крышкой: {path}, сейчас {'закрыта' if lid_closed(fd) else 'открыта'}")
+    last_drift = drift()
+    while True:
+        r, _, _ = select.select([fd], [], [], 3.0)
+        opened = False
+        if r:
+            try:
+                data = os.read(fd, EV.size * 64)
+            except OSError:
+                data = b""
+            for i in range(0, len(data) - EV.size + 1, EV.size):
+                _, _, typ, code, val = EV.unpack_from(data, i)
+                if typ == EV_SW and code == SW_LID and val == 0:
+                    opened = True
+        d = drift()
+        woke = d - last_drift > 2.0               # время шло, а монотонные часы стояли — был сон
+        last_drift = d
+        if lid_closed(fd):
+            continue
+        if opened or woke:
+            time.sleep(0.8)                        # дать Hyprland обработать своё событие и прийти в себя
+            if not lid_closed(fd):
+                restore("крышка открыта" if opened else "проснулся, крышка открыта")
+            continue
+        m = edp_state()
+        if m is not None and m.get("disabled"):
+            restore("крышка открыта, а eDP-1 отключён", dpms=False)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

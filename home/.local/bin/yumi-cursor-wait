@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+"""yumi-cursor-wait — после загрузки курсор скрыт, пока не тронешь мышь или тачпад (16.10.2026).
+
+Ждёт первое событие от указателя (/dev/input: устройства с обработчиком mouseN, кроме Touch Bar; нужна группа
+input) — движение, касание, кнопку — и тогда возвращает курсор: тема Bibata в окружении и в Hyprland,
+cursor.invisible = false. Клавиатура не считается: пароль можно вводить, курсор не появится.
+Запускает yumi-cursor-restore (Quickshell, когда вход растворился; yumi-lock --boot как страховка).
+Один экземпляр (flock). Нет устройств или ошибка — курсор возвращается сразу. Мышь, подключённая позже,
+подхватывается (список устройств перечитывается раз в 2 с).
+С 16.10 (ночь): пока экран заблокирован (флаг $XDG_RUNTIME_DIR/yumi-locked от Quickshell), скрипт не выходит —
+в момент разблокировки курсор включается сразу, вместе с рабочим столом, даже без касания (раньше бывало: после
+разблокировки курсора нет ~минуту). Журнал: $XDG_RUNTIME_DIR/yumi-cursor-wait.log. Прежний: .bak-unlock-20261016
+"""
+import fcntl, os, select, struct, subprocess, sys, time
+
+RUN = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
+EV = struct.Struct("llHHi")          # struct input_event (64 бит): время, type, code, value
+EV_KEY, EV_REL, EV_ABS = 1, 2, 3
+FLAG = f"{RUN}/yumi-locked"         # пишет Quickshell, пока экран заблокирован
+
+
+def log(msg):
+    try:
+        with open(f"{RUN}/yumi-cursor-wait.log", "a") as f:
+            f.write(f"{time.strftime('%H:%M:%S')} up {open('/proc/uptime').read().split()[0]} {msg}\n")
+    except OSError:
+        pass
+
+
+def show():
+    # 18.10: сначала снять cursor.invisible, потом заново загрузить тему — иначе Hyprland не перерисовывает курсор,
+    # пока его не задаст какое-нибудь окно (курсор появлялся через 1–2 мин после движения мыши)
+    for cmd in (['hyprctl', 'eval', 'hl.config({ cursor = { invisible = false } })'],
+                ['hyprctl', 'eval', 'hl.env("XCURSOR_THEME", "Adwaita"); hl.env("HYPRCURSOR_THEME", "Adwaita")'],
+                # смена размера туда-обратно — Hyprland заново загружает тему и выставляет курсор (тот же размер он
+                # пропускает: «already has a shape loaded»)
+                ['hyprctl', 'setcursor', 'Adwaita', '21'],
+                ['hyprctl', 'setcursor', 'Adwaita', '20'],
+                # и окружение служб: uwsm finalize при загрузке отдал им пустую тему — приложения, запущенные потом,
+                # рисовали бы невидимый курсор над своими окнами (16.10)
+                ['systemctl', '--user', 'set-environment', 'XCURSOR_THEME=Adwaita', 'HYPRCURSOR_THEME=Adwaita', 'XCURSOR_SIZE=20', 'HYPRCURSOR_SIZE=20'],
+                ['dbus-update-activation-environment', '--systemd', 'XCURSOR_THEME=Adwaita', 'HYPRCURSOR_THEME=Adwaita', 'XCURSOR_SIZE=20', 'HYPRCURSOR_SIZE=20'],
+                # Hyprland при загрузке записал в gsettings пустую тему (setcursor yumi-empty), а Bibata (hyprcursor)
+                # обратно не пишет — GTK-приложения (Zen и др.) рисовали бы невидимый курсор
+                ['gsettings', 'set', 'org.gnome.desktop.interface', 'cursor-theme', 'Adwaita']):
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def pointers():
+    out, name = [], ""
+    try:
+        # 18.10: имя устройства бывает не UTF-8 (мышь Logitech: "Logitech \x08@\xa9\x11") — не падать
+        text = open("/proc/bus/input/devices", encoding="utf-8", errors="replace").read()
+    except OSError:
+        return out
+    for line in text.splitlines():
+        if line.startswith("N: Name="):
+            name = line[8:].strip('"')
+        elif line.startswith("H: Handlers=") and "mouse" in line and "Touch Bar" not in name:
+            out += ["/dev/input/" + h for h in line[12:].split() if h.startswith("event")]
+    return out
+
+
+def main():
+    lock = open(f"{RUN}/yumi-cursor-wait.lock", "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return 0                     # уже ждёт другой экземпляр
+    was_locked = os.path.exists(FLAG)
+    log(f"start, locked={was_locked}")
+    fds, shown, rescan = {}, False, 0.0
+    while True:
+        now = time.monotonic()
+        if now >= rescan:
+            rescan = now + 2.0
+            for p in pointers():
+                if p not in fds:
+                    try:
+                        fds[p] = os.open(p, os.O_RDONLY | os.O_NONBLOCK)
+                    except OSError:
+                        pass
+        locked = os.path.exists(FLAG)
+        if was_locked and not locked:            # разблокировали — курсор сразу, вместе с рабочим столом
+            show(); log("unlock -> show"); return 0
+        was_locked = was_locked or locked
+        if not fds and not shown:
+            show(); log("no pointer devices -> show")
+            shown = True
+        if shown and not locked:
+            return 0
+        r, _, _ = select.select(list(fds.values()), [], [], 0.2)
+        for fd in r:
+            try:
+                data = os.read(fd, EV.size * 64)
+            except OSError:          # устройство отключили
+                for p, f in list(fds.items()):
+                    if f == fd:
+                        os.close(f); del fds[p]
+                continue
+            if shown:
+                continue             # уже показан, ждём только разблокировку
+            for i in range(0, len(data) - EV.size + 1, EV.size):
+                _, _, typ, code, _ = EV.unpack_from(data, i)
+                if typ in (EV_REL, EV_ABS) or (typ == EV_KEY and 0x110 <= code < 0x150):
+                    show(); log(f"pointer -> show (locked={locked})")
+                    shown = True
+                    break
+
+
+def open_pointers(fds):
+    for p in pointers():
+        if p not in fds:
+            try:
+                fds[p] = os.open(p, os.O_RDONLY | os.O_NONBLOCK)
+            except OSError:
+                pass
+
+
+def drain(fds, r):
+    """Прочитать события; True — было движение указателя, касание или кнопка мыши."""
+    moved = False
+    for fd in r:
+        try:
+            data = os.read(fd, EV.size * 64)
+        except OSError:              # устройство отключили
+            for p, f in list(fds.items()):
+                if f == fd:
+                    os.close(f); del fds[p]
+            continue
+        for i in range(0, len(data) - EV.size + 1, EV.size):
+            _, _, typ, code, _ = EV.unpack_from(data, i)
+            if typ in (EV_REL, EV_ABS) or (typ == EV_KEY and 0x110 <= code < 0x150):
+                moved = True
+    return moved
+
+
+def after_unlock():
+    """18.10, --after-unlock: при загрузке курсора нет ни на заставке, ни на экране блокировки (у Hyprland пустая
+    тема yumi-empty с первого кадра, на экране блокировки — BlankCursor Quickshell). 19.10: и после разблокировки
+    курсора нет, пока не тронешь мышь или тачпад (движение, касание, кнопка; клавиатура не считается) — тогда
+    show() ставит Bibata. Прежний вариант (показ сразу при разблокировке): yumi-cursor-wait.bak-touch-20261019"""
+    lock = open(f"{RUN}/yumi-cursor-wait.lock", "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return 0
+    log("after-unlock: start")
+    t0 = time.monotonic()
+    while not os.path.exists(FLAG) and time.monotonic() - t0 < 30:
+        time.sleep(0.1)
+    log(f"after-unlock: locked={os.path.exists(FLAG)}")
+    while os.path.exists(FLAG):
+        time.sleep(0.05)
+    log("after-unlock: unlocked, waiting for pointer")
+    # устройства открываются только сейчас — касания во время блокировки не считаются
+    fds, rescan = {}, 0.0
+    while True:
+        now = time.monotonic()
+        if now >= rescan:
+            rescan = now + 2.0
+            open_pointers(fds)
+        if not fds:
+            show(); log("after-unlock: no pointer devices -> show"); return 0
+        r, _, _ = select.select(list(fds.values()), [], [], 0.5)
+        if os.path.exists(FLAG):     # снова заблокировали, не тронув мышь — ждать следующей разблокировки
+            drain(fds, r)
+            while os.path.exists(FLAG):
+                time.sleep(0.1)
+            continue
+        if drain(fds, r):
+            show(); log("after-unlock: pointer -> show"); return 0
+
+
+if __name__ == "__main__":
+    try:
+        if "--after-unlock" in sys.argv[1:]:
+            sys.exit(after_unlock())
+        sys.exit(main())
+    except Exception as e:
+        log(f"error {e!r} -> show")
+        show()

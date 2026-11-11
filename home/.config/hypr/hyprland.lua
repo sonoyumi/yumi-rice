@@ -9,13 +9,10 @@ dofile((os.getenv("XDG_CONFIG_HOME") or (os.getenv("HOME") .. "/.config")) .. "/
 
 -- === Мои настройки ===
 
--- Курсор (Bibata-Modern-Ice 20) и переменные окружения — в yumi/env.lua
+-- Курсор (Adwaita 20; до 19.10 — Bibata-Modern-Ice 20) и переменные окружения — в yumi/env.lua
 
 hl.config({
-	-- Монитор по умолчанию (свои мониторы задайте ниже, в блоке «Два монитора»)
-	monitor = {
-		"eDP-1, preferred, auto, 1.666667"
-	},
+	-- Мониторы по умолчанию — в monitors.lua (любой выход: preferred, auto, auto); свои — там же или ниже, в блоке «Два монитора»
 
 	input = {
 
@@ -37,13 +34,7 @@ hl.config({
 
 	},
 
-	decoration = {
-
-		active_opacity = 0.95,
-
-		inactive_opacity = 0.85,
-
-	},
+	-- прозрачность окон — в yumi/look.lua (14.10: здесь были 0.95/0.85 со времён 2.5, их перебивал my_look)
 
 	general = {
 			layout = "dwindle",
@@ -72,7 +63,7 @@ end
 -- Музыка и громкость с внешней клавиатуры: её Fn не доходит до системы (с Fn и без шлёт одно и то же),
 -- поэтому медиа — на ALT + те же клавиши. SUPER+F10..F12 заняты скриншотами
 local media = {
-	{ "F9",          "playerctl play-pause",                   "play / pause" },
+	{ "F9",          "yumi-play-pause",                        "play / pause" },   -- 30.10: и продолжить последний трек
 	{ "F10",         "playerctl stop",                         "stop" },
 	{ "F11",         "playerctl previous",                     "previous track" },
 	{ "F12",         "playerctl next",                         "next track" },
@@ -106,7 +97,7 @@ end)
 -- -- MSI справа (1536 = 2560 / 1.666667): 180 Гц, без масштабирования
 -- hl.monitor({ output = "DP-1", mode = "1920x1080@180", position = "1536x0", scale = 1 })
 --
--- -- Рабочие столы: 1–5 на MacBook, 6–10 на внешнем (по 5 на каждом, всегда видны в Waybar).
+-- -- Рабочие столы: 1–5 на MacBook, 6–10 на внешнем (по 5 на каждом, всегда видны в баре).
 -- -- default: при подключении внешнего монитора открывается 6, а не первый свободный номер
 -- for i = 1, 10 do
 -- 	hl.workspace_rule({
@@ -120,30 +111,32 @@ end)
 -- Обои на мониторе, подключённом после старта, перерисовываются ниже (hl.on("monitor.added")) — для любого железа.
 
 --hl.bind("SUPER + F",hl.dsp.window.fullscreen({ mode = "maximized", action = "toggle" }))
-hl.bind("XF86KbdBrightnessUp",   hl.dsp.exec_cmd("brightnessctl -d kbd_backlight set 10%+"), { locked = true, repeating = true })
-hl.bind("XF86KbdBrightnessDown", hl.dsp.exec_cmd("brightnessctl -d kbd_backlight set 10%-"), { locked = true, repeating = true })
+-- Подсветка клавиатуры — через yumi-brightness (капсула OSD Quickshell «kbd», без неё — уведомление). Откат: *.bak-quickshell-*
+hl.bind("XF86KbdBrightnessUp",   hl.dsp.exec_cmd("env YUMI_BACKLIGHT=kbd_backlight @HOME@/.local/bin/yumi-brightness i 10"), { locked = true, repeating = true })
+hl.bind("XF86KbdBrightnessDown", hl.dsp.exec_cmd("env YUMI_BACKLIGHT=kbd_backlight @HOME@/.local/bin/yumi-brightness d 10"), { locked = true, repeating = true })
 -- Лупа на тачбаре (клавиша Search) — файловый менеджер Dolphin
 hl.bind("XF86Search", hl.dsp.exec_cmd("dolphin"))
 -- Кнопка ☕ на тачбаре: tiny-dfr шлёт KEY_F13, а раскладка xkb называет его XF86Tools (не "F13")
 hl.bind("XF86Tools", hl.dsp.exec_cmd("@HOME@/.local/bin/yumi-caffeine toggle"))
--- Часы на тачбаре: tiny-dfr шлёт KEY_F14 (в xkb это XF86Launch5) — открыть/закрыть календарь, как клик по часам в Waybar
-hl.bind("XF86Launch5", hl.dsp.exec_cmd("@HOME@/.local/bin/yumi-menu-calendar"))
+-- Часы на тачбаре: tiny-dfr шлёт KEY_F14 (в xkb это XF86Launch5) — открыть/закрыть календарь, как клик по часам в баре
+hl.bind("XF86Launch5", hl.dsp.exec_cmd("qs -c yumi ipc call menu center calendar"))   -- Quickshell (3.1); было yumi-menu-calendar
 
 
 
 -- kitty: прозрачность общая, как у всех окон (13.10: убрано своё правило 0.85/0.70)
 
--- Экран блокировки сразу при входе (автовход SDDM).
--- Флаг — страховка: если файл выполнится дважды за загрузку, hyprlock всё равно запустится один раз.
+-- Экран блокировки сразу при входе (автовход greetd): Quickshell «из логотипа» — тот же кадр, что у заставки
+-- Plymouth; Quickshell не поднялся за 12 с — запасной hyprlock (см. yumi-lock --boot).
+-- Флаг — страховка: если файл выполнится дважды за загрузку, блокировка всё равно запустится один раз.
 if not _G.yumi_lock_on_start then
 	_G.yumi_lock_on_start = true
 	hl.on("hyprland.start", function()
-		hl.exec_cmd("hyprlock")
+		hl.exec_cmd(os.getenv("HOME") .. "/.local/bin/yumi-lock --boot")
 	end)
 end
 
 -- Меню выключения
-hl.bind("SUPER + Escape", hl.dsp.exec_cmd("@HOME@/.local/bin/yumi-menu-session --center"), {description = "[Session] power menu"})
+hl.bind("SUPER + Escape", hl.dsp.exec_cmd("qs -c yumi ipc call menu center session"), {description = "[Session] power menu"})
 
 -- === Крышка MacBook (07.10) ===
 -- Сон при закрытии решает ☕ «Не засыпать» (yumi-caffeine держит блокировку handle-lid-switch у systemd).
@@ -151,22 +144,27 @@ hl.bind("SUPER + Escape", hl.dsp.exec_cmd("@HOME@/.local/bin/yumi-menu-session -
 -- нет → экран гаснет. Открыли: встроенный экран снова включён (параметры как в monitors.lua).
 -- locked = true — срабатывает и на экране блокировки.
 local LID = "Apple SMC power/lid events"
+-- встроенный экран — выход, чьё имя начинается с eDP (eDP-1, eDP-2…), внешний — любой другой (19.10);
+-- имя встроенного запоминается, пока он включён, — чтобы включить его обратно при открытии крышки
+local lid_output = "eDP-1"
+local function is_internal(name) return name:sub(1, 3) == "eDP" end
 local function has_external()
+	local ext = false
 	for _, m in ipairs(hl.get_monitors()) do
-		if m.name ~= "eDP-1" then return true end
+		if is_internal(m.name) then lid_output = m.name else ext = true end
 	end
-	return false
+	return ext
 end
 hl.bind("switch:on:" .. LID, function()
 	hl.exec_cmd("loginctl lock-session")
 	if has_external() then
-		hl.monitor({ output = "eDP-1", disabled = true })
+		hl.monitor({ output = lid_output, disabled = true })
 	else
 		hl.dispatch(hl.dsp.dpms({ action = "disable" }))
 	end
 end, { locked = true, description = "[Hardware] lid closed" })
 hl.bind("switch:off:" .. LID, function()
-	hl.monitor({ output = "eDP-1", mode = "2560x1600@60.0", position = "0x0", scale = 1.6, vrr = 0, reserved = { top = 38 } })
+	hl.monitor({ output = lid_output, disabled = false, mode = "preferred", position = "auto", scale = "auto", reserved = { top = 38 } })
 	hl.dispatch(hl.dsp.dpms({ action = "enable" }))
 end, { locked = true, description = "[Hardware] lid opened" })
 
@@ -175,11 +173,14 @@ end, { locked = true, description = "[Hardware] lid opened" })
 -- Загрузка плагинов Hyprland (hyprexpo) при входе
 hl.on("hyprland.start", function()
 	-- плагины подключаются через hl.plugin.load (ниже)
+	-- 09.11: yumi-diag — после сна вернуть клавиатуру экрану блокировки (hyprctl yumirefocus, зовёт yumi-lock-refocus).
+	-- Собран под Hyprland 0.56.2-4.3; откат: убрать строку, бэкап hyprland.lua.bak-lockfix-20261109
+	hl.exec_cmd("hyprctl plugin load " .. os.getenv("HOME") .. "/.local/src/yumi-hypr-lockfix/yumi-diag.so")
 end)
 
 -- === Жесты 3 пальцами вверх/вниз (свои для каждого лейаута) ===
 local function overview()
-	hl.exec_cmd("@HOME@/.local/bin/yumi-menu-workspaces --center")
+	hl.exec_cmd("qs -c yumi ipc call menu center workspaces")
 end
 
 
@@ -202,26 +203,13 @@ hl.gesture({ fingers = 3, direction = "down", action = function() run_gesture("d
 -- hl.plugin.load("/var/cache/hyprpm/<user>/hyprland-scroll-overview/scrolloverview.so")
 
 -- Обзор рабочих столов
-hl.bind("SUPER + grave", hl.dsp.exec_cmd("@HOME@/.local/bin/yumi-menu-system --center"), {description = "[Session] system menu"})
+hl.bind("SUPER + grave", hl.dsp.exec_cmd("qs -c yumi ipc call menu center system"), {description = "[Session] system menu"})
 
--- Рисовать рабочий стол под экраном блокировки: после разблокировки всё уже готово, без серого экрана
-hl.config({ misc = { session_lock_xray = true } })
-
--- Прозрачность всех окон: 75% в фокусе, 65% без фокуса, полный экран — непрозрачно (13.10, было 85/75)
-hl.config({ decoration = { active_opacity = 0.75, inactive_opacity = 0.65, fullscreen_opacity = 1 } })
-
--- Размытие под центром управления и уведомлениями (как у окон)
-hl.layer_rule({
-  name = "swaync_blur",
-  match = { namespace = "^swaync-.*" },
-  blur = true,
-  ignore_alpha = 0.5,
-})
-
--- Плеер yumi-player (GTK4 + layer-shell): SUPER+M — по центру, повторно — закрыть
-hl.bind("SUPER + M", hl.dsp.exec_cmd("@HOME@/.local/bin/yumi-player toggle --center"), {description = "[Media] player"})
+-- Плеер: SUPER+M — остров Quickshell по центру экрана, повторно — закрыть (3.1; откат: yumi-uninstall quickshell).
+-- Прежний GTK-плеер: @HOME@/.local/bin/yumi-player toggle --center
+hl.bind("SUPER + M", hl.dsp.exec_cmd("qs -c yumi ipc call player toggle center"), {description = "[Media] player"})
 -- Меню «Музыка» (yumi-music: mpv + YouTube Music): очередь, поиск, плейлисты
-hl.bind("SUPER + SHIFT + M", hl.dsp.exec_cmd("@HOME@/.local/bin/yumi-menu-music --center"), {description = "[Media] music library"})
+hl.bind("SUPER + SHIFT + M", hl.dsp.exec_cmd("qs -c yumi ipc call menu center music"), {description = "[Media] music library"})
 
 -- Размытие под окном плеера (как у центра управления)
 hl.layer_rule({
@@ -241,38 +229,23 @@ hl.layer_rule({
   -- поэтому анимация изменения размера слоя (та же layersIn) больше не срабатывает
 })
 
--- === Мой вид окон: не зависит от обоев (обои меняют только цвета) ===
-local function my_look()
-	hl.config({
-		general = { border_size = 2, gaps_in = 3, gaps_out = 8 },
-		misc = { session_lock_xray = true },
-		decoration = {
-			rounding = 10,
-			rounding_power = 2,
-			active_opacity = 0.75,
-			inactive_opacity = 0.65,
-			fullscreen_opacity = 1,
-			shadow = { enabled = false },
-			blur = { enabled = true, size = 3, passes = 2, xray = true },
-		},
-	})
-end
-my_look()
-hl.on("config.reloaded", my_look)
+-- Вид окон (рамки, отступы, скругление, прозрачность, размытие, session_lock_xray) — один файл yumi/look.lua.
+-- 14.10: прежний my_look() отсюда убран (дублировал look.lua со времён HyDE 2.5); режимы workflows/*.lua
+-- теперь могут менять вид (gaming/powersaver — без размытия и скругления). Откат: ~/.local/share/yumi-archive/look-merge-20261014
 
--- 13.10: мягкое проявление слоёв (Waybar после смены обоев появляется плавно, без рывка в конце).
+-- 13.10: мягкое проявление слоёв (бар и меню появляются плавно, без рывка в конце).
 -- Только кривая, ≈0,2 с; стиль анимации меню (popin) не меняется. Откат: удалить 2 строки ниже
 hl.curve("yumiFade", { type = "bezier", points = { {0.25, 0.1}, {0.25, 1.0} } })
 hl.animation({ leaf = "fadeLayersIn", enabled = true, speed = 2, bezier = "yumiFade" })
 
 -- Тяжёлые программы: только после разблокировки (не мешают загрузке рабочего стола)
 hl.on("hyprland.start", function()
-	hl.exec_cmd([[sh -c 'sleep 6; while pgrep -x hyprlock >/dev/null; do sleep 1; done; sleep 30; Telegram -startintray &']])
+	hl.exec_cmd([[sh -c 'sleep 6; while $HOME/.local/bin/yumi-lock --status >/dev/null; do sleep 1; done; sleep 30; Telegram -startintray &']])
 end)
 
 -- Обои при старте: без анимации перехода, пока открыт экран блокировки
 hl.on("hyprland.start", function()
-	hl.exec_cmd([[sh -c 'for i in $(seq 40); do awww query >/dev/null 2>&1 && break; sleep 0.5; done; sleep 2; awww img --transition-type none "$(readlink -f "$HOME/.cache/yumi/theme/wall.set")"']])
+	hl.exec_cmd([[sh -c 'for i in $(seq 40); do awww query >/dev/null 2>&1 && break; sleep 0.5; done; $HOME/.local/bin/yumi-boot-wait-lock; sleep 2; awww img --transition-type none "$(readlink -f "$HOME/.cache/yumi/theme/wall.set")"']])
 end)
 
 -- Обои на мониторе, подключённом после старта (иначе там чёрный фон)
@@ -297,3 +270,12 @@ hl.on("config.reloaded", yumi_borders)
 -- Апплет NetworkManager не нужен: Wi-Fi и VPN — свои пилюли и меню (yumi-menu-wifi, yumi-menu-vpn);
 -- база его не запускает. blueman-applet стартует из ~/.config/autostart: он агент сопряжения (окно PIN),
 -- его значок в трее выключен настройкой blueman (StatusIcon).
+
+-- Курсор при загрузке прячет сам Hyprland до экрана блокировки (патч, см. yumi/env.lua); своё скрытие убрано 18.10
+
+-- Прячем уведомление Chromium "app.zoom.us має доступ до вашого екрана"
+hl.window_rule({
+    name = "hide-zoom-share-notice",
+    match = { title = "^app[.]zoom[.]us .+" },
+    workspace = "special:hidden silent",
+})

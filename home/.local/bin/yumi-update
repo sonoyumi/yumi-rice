@@ -4,6 +4,8 @@
 #                             (пилюля custom/updates: exec раз в сутки и по сигналу RTMIN+20)
 #   yumi-update run           открыть kitty с обновлением (пункт «Обновить систему» в yumi-menu-system)
 #   yumi-update interactive   само обновление — то, что выполняется внутри kitty
+#   yumi-update               без аргументов в терминале = interactive (30.10); из скриптов без терминала — check
+# 30.10: ход обновления виден в острове (yumi-island: активность update, этапы, галочка или ошибка)
 # Порядок как у HyDE: сводка → список пакетов → «Обновить сейчас?» → pacman -Syu, AUR, flatpak (только где есть
 # обновления; при ошибке дальше не идём) → пересчёт, сигнал Waybar → «Нажми Enter, чтобы закрыть».
 # Снимки: отдельный снимок перед pacman -Syu НЕ делается — snap-pac (pacman-хуки 05-snap-pac-pre / zz-snap-pac-post,
@@ -73,9 +75,9 @@ count_pacman() {
 }
 
 RETRY_SEC=${YUMI_UPDATE_RETRY:-600}
-schedule_retry() {   # одна повторная проверка через RETRY_SEC (Waybar сам проверяет лишь раз в сутки)
+schedule_retry() {   # одна повторная проверка через RETRY_SEC (бар сам проверяет лишь раз в сутки)
     [[ -n $DRY ]] && { echo "[пробный режим] повтор через ${RETRY_SEC} с"; return; }
-    setsid -f bash -c 'exec 9>"$1"; flock -n 9 || exit 0; sleep "$2"; pkill -RTMIN+20 waybar' \
+    setsid -f bash -c 'exec 9>"$1"; flock -n 9 || exit 0; sleep "$2"; qs -c yumi ipc call bar refresh updates >/dev/null 2>&1' \
         _ "$RUNTIME/yumi/update-retry.lock" "$RETRY_SEC" </dev/null >/dev/null 2>&1
 }
 
@@ -141,8 +143,8 @@ from_cache() {   # NAMES/COUNTS из свежего удачного кеша; 1
 }
 
 refresh_waybar() {
-    if [[ -n $DRY ]]; then echo "[пробный режим] pkill -RTMIN+20 waybar"; return; fi
-    pkill -RTMIN+20 waybar 2>/dev/null
+    if [[ -n $DRY ]]; then echo "[пробный режим] qs -c yumi ipc call bar refresh updates"; return; fi
+    qs -c yumi ipc call bar refresh updates >/dev/null 2>&1   # пилюля в Quickshell (без него — тихо)
 }
 
 # --- интерактивное обновление (внутри kitty) ---
@@ -206,20 +208,52 @@ ask() {          # [Д/н], по умолчанию «да»
     [[ -z $a || $a == y || $a == yes || $a == д || $a == да ]]
 }
 
+island() { command -v yumi-island >/dev/null && yumi-island "$@" >/dev/null 2>&1; true; }
+
+# 30.10: прогресс в острове — по пакетам, а не по этапам («2/2» при 5 пакетах): pacman пишет в журнал строку про
+# каждый поставленный пакет ([ALPM] upgraded|installed …) — считаем их с начала обновления (AUR ставится тем же pacman)
+watch_progress() {   # $1 — всего пакетов pacman+AUR, $2 — смещение журнала, $3 — флаг «работаем»
+    local log=/var/log/pacman.log done=0 last="" line
+    while [[ -e $3 ]]; do
+        while IFS= read -r line; do
+            if [[ $line =~ \[ALPM\]\ (upgraded|installed|reinstalled|downgraded)\ ([^ ]+) ]]; then
+                done=$((done + 1)); last=${BASH_REMATCH[2]}
+            fi
+        done < <(tail -c +"$(( $2 + 1 ))" "$log" 2>/dev/null)
+        if (( done > 0 )); then
+            (( done > $1 )) && done=$1
+            island update update --sub "$last" --trail "$done из $1" --progress "$(( done * 100 / $1 ))"
+        fi
+        done=0
+        sleep 1
+    done
+}
+
 upgrades() {
-    local i cmd rc
+    local i cmd rc alpm=0 flag watcher
+    for i in "${!NAMES[@]}"; do [[ ${NAMES[i]} != flatpak ]] && alpm=$(( alpm + COUNTS[i] )); done
+    island start update --title "Обновление системы" --sub "$(total) пакетов" --icon update --prio 4 --progress 0 \
+        --trail "0 из $(total)" --open "hyprctl dispatch focuswindow class:yumi-update"
+    flag=$(mktemp -u "${XDG_RUNTIME_DIR:-/tmp}/yumi-update-watch.XXXX"); : > "$flag"
+    (( alpm > 0 )) && { watch_progress "$alpm" "$(stat -c %s /var/log/pacman.log 2>/dev/null || echo 0)" "$flag" & watcher=$!; }
     for i in "${!NAMES[@]}"; do
         [[ ${COUNTS[i]} -gt 0 ]] || continue
         cmd=$(upgrade_cmd "${NAMES[i]}")
+        [[ ${NAMES[i]} == flatpak ]] && island update update --sub "flatpak · ${COUNTS[i]}"
         printf '\n%s\n' "${B}Обновляю: $(title "${NAMES[i]}")${N}"
         printf '%.0s~' {1..60}; echo
         if [[ -n $DRY ]]; then echo "[пробный режим] $cmd"; continue; fi
         $cmd; rc=$?
         if [[ $rc -ne 0 ]]; then
             printf '\n%s\n' "${R}Ошибка ($cmd, код $rc) — остальное не обновляю.${N}"
+            rm -f "$flag"; [[ -n ${watcher:-} ]] && wait "$watcher" 2>/dev/null
+            island update update --title "Обновление не удалось" --sub "$cmd · код $rc" --tone bad --progress 100
+            ( sleep 6; island end update ) &
             return $rc
         fi
     done
+    rm -f "$flag"; [[ -n ${watcher:-} ]] && wait "$watcher" 2>/dev/null
+    island end update --done "Система обновлена"
     return 0
 }
 
@@ -260,6 +294,7 @@ run() {
     exec "${cmd[@]}"
 }
 
+if [[ $# -eq 0 && -t 0 && -t 1 ]]; then set -- interactive; fi   # 30.10: просто `yumi-update` в терминале — обновить
 case ${1:-check} in
     check|status)
         # Waybar перезапускается при каждой смене обоев и сразу зовёт check — свежий (до CACHE_MIN мин) удачный

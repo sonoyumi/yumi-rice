@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+"""yumi-airpods-mode 1|2|3|4 [MAC] — режим AirPods без открытого меню (19.10.2026; кнопки тачбара, слой «Звук»).
+
+1 — выкл, 2 — шумоподавление, 3 — прозрачность, 4 — адаптивный.
+Зачем: `qs ipc call airpods mode N` работает только при открытом меню AirPods — сеанс с наушниками бэкенд
+Bluetooth держит, лишь пока меню открыто, иначе команда молча пропадает. Здесь — тот же aap.Session, что у меню
+(через сокет службы yumi-airpods, с повтором и подтверждением): открыть, сменить, дождаться ответа наушников
+(до 5 с), закрыть. Нет подключения/службы — уведомление «AirPods не на связи».
+MAC без аргумента — aap.default_mac(): ~/.config/yumi/airpods.conf (MAC=…) или первые сопряжённые «AirPods».
+"""
+import os, sys, threading, time
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi/panel"))
+import aap  # noqa: E402
+
+NAMES = {1: "Выкл", 2: "Шумоподавление", 3: "Прозрачность", 4: "Адаптивный"}
+
+
+def notify(title, body):
+    os.spawnlp(os.P_NOWAIT, "notify-send", "notify-send", "-a", "AirPods", "-t", "1800", "-i", "audio-headphones", title, body)
+
+
+def main():
+    try:
+        mode = int(sys.argv[1])
+    except (IndexError, ValueError):
+        sys.exit(__doc__)
+    if mode not in aap.MODES:
+        sys.exit(f"режим 1–4, а не {mode}")
+    mac = sys.argv[2] if len(sys.argv) > 2 else aap.default_mac()
+    if not mac:
+        notify("AirPods не найдены", "Нет сопряжённых AirPods — укажи MAC=… в ~/.config/yumi/airpods.conf")
+        sys.exit(1)
+    if not os.path.exists(aap.relay_path(mac)):
+        notify("AirPods не на связи", "Подключи наушники — режим не сменить")
+        sys.exit(1)
+    done = threading.Event()
+    last = {}
+
+    def on_update(snap):
+        last.update(snap)
+        cur = snap["settings"].get(aap.S_MODE, [None])[0]
+        if snap["status"] == "ok" and cur == mode and aap.S_MODE not in snap["pending"]:
+            done.set()
+
+    sess = aap.Session(mac, on_update)
+    sess.start()
+    if mode == 1:      # «Выкл» — только с разрешением 0x34 и маской режимов с «Выкл» (проверено 19.10 на A3047)
+        sess.change(0x34, 0x01)
+        sess.change(aap.S_ALLOWED, 0x0F)
+    sess.change(aap.S_MODE, mode)
+    ok = done.wait(5.0)
+    sess.stop()
+    if ok:
+        print(f"режим: {NAMES[mode]}")
+    else:
+        allowed = last.get("allowed") or []
+        why = "наушники не подтвердили" if not allowed or mode in allowed else "этот режим выключен в настройках AirPods"
+        notify("AirPods: режим не сменился", f"{NAMES[mode]} — {why}")
+        print(f"не подтверждено: {why}", file=sys.stderr)
+        sys.exit(2)
+
+
+if __name__ == "__main__":
+    main()

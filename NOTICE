@@ -1,0 +1,13 @@
+Yumi-Rice
+Copyright (C) 2026 Vladyslav Shokun <sonoyumiii@gmail.com>
+
+This program is free software: you can redistribute it and/or modify it under the terms of the
+GNU General Public License as published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version. See LICENSE.
+
+Third-party code and assets:
+- yumi-colors and the *.dcol color templates are a port of wallbash from HyDE
+  (https://github.com/HyDE-Project/HyDE), GPL-3.0.
+- touchbard (https://github.com/0800tim/touchbard) — MIT, used as an optional module (MacBook Touch Bar).
+- Fonts are not bundled: Noto Serif, Noto Serif CJK JP (SIL OFL 1.1), Inter (SIL OFL 1.1),
+  JetBrains Mono Nerd Font (SIL OFL 1.1) are installed from the distribution repositories.

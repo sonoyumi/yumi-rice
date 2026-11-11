@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# yumi-boot-wait-lock — при загрузке (первые 60 с после включения) ждать экран блокировки, не дольше 20 с.
+# ExecStartPre демона обоев (yumi-awww.service.d/yumi-boot.conf): обои не мелькают раньше блокировки — до неё
+# виден фон Hyprland (кадр заставки с логотипом), потом вход Quickshell растворяется в экран блокировки.
+# Позже (перезапуск демона, смена обоев) — сразу выход. Откат: rm ~/.config/systemd/user/yumi-awww.service.d/yumi-boot.conf
+up=$(cut -d. -f1 /proc/uptime)
+(( up < 60 )) || exit 0
+R=${XDG_RUNTIME_DIR:-/tmp}
+for ((i = 0; i < 200; i++)); do
+    [[ -e $R/yumi-locked ]] && exit 0
+    pidof -q hyprlock && exit 0
+    sleep 0.1
+done
+exit 0

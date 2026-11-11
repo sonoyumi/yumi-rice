@@ -1,0 +1,12 @@
+[Unit]
+Description=yumi-airpods-mic — HD-микрофон AirPods (AAC-ELD по AAP, как у Mac)
+After=pipewire.service yumi-airpods.service
+Wants=yumi-airpods.service
+
+[Service]
+ExecStart=%h/.local/bin/yumi-airpods-mic
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

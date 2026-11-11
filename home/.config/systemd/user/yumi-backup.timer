@@ -1,0 +1,10 @@
+[Unit]
+Description=yumi: суточная подстраховка бэкапа (сработает, если флешка воткнута)
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=30m
+
+[Install]
+WantedBy=timers.target

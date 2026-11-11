@@ -1,0 +1,11 @@
+[Unit]
+Description=yumi: подсветка клавиш MacBook — автояркость по датчику света и вспышки при событиях
+PartOf=graphical-session.target
+After=graphical-session.target
+[Service]
+ExecStart=%h/.local/bin/yumi-light daemon
+Restart=on-failure
+RestartSec=5
+Slice=background.slice
+[Install]
+WantedBy=graphical-session.target

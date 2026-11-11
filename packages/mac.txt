@@ -1,0 +1,7 @@
+# Пакеты только для MacBook на Asahi (Arch Linux ARM + asahi-alarm). Ставятся, только если установщик
+# определил MacBook (/proc/device-tree/compatible содержит «apple,»). Формат: пакет  # зачем.
+# Ядро, драйверы Asahi, m1n1 и прошивки здесь не ставятся — их даёт сам Asahi.
+# Touch ID (github.com/sonoyumi/yumi-touchid) и тачбар (touchbard) — отдельные репозитории со своей установкой;
+# ./install.sh только показывает ссылки и шаги.
+
+swaybg                       # мост заставки при загрузке (yumi-boot-bridge): тот же кадр до экрана блокировки

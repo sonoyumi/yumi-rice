@@ -36,7 +36,7 @@ def main():
         if not it:
             sys.exit(1)
         if it["item_is_menu"] or not yt.activate(it):
-            os.execv(os.path.expanduser("~/.local/bin/yumi-menu-tray"), ["yumi-menu-tray", "--bar"])
+            os.execvp("qs", ["qs", "-c", "yumi", "ipc", "call", "menu", "toggle", "tray"])   # GTK yumi-menu-tray — в архиве (16.10)
     elif cmd == "list":
         items = yt.load_items(all_items="--all" in sys.argv)
         for i, it in enumerate(items, 1):

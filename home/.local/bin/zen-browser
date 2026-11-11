@@ -1,3 +1,0 @@
-#!/bin/sh
-# Запуск Zen внутри zen.slice (лимиты памяти — в ~/.config/systemd/user/zen.slice), как ~/.local/bin/firefox
-exec systemd-run --user --scope --slice=zen.slice --collect --quiet -- /opt/zen-browser-bin/zen-bin "$@"

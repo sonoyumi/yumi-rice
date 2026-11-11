@@ -1,0 +1,229 @@
+#!/usr/bin/env -S python3 -I
+"""Бэкенд меню «Мышь» для Quickshell (menus/mouse/) — логика как у yumi-menu-mouse (Logitech PRO X 2 через Solaar).
+Поток JSON-строк в stdout:
+  {"t":"bat","pct":N,"state":"charging|full|discharging…","model","maker"} | {"t":"bat","off":true}   сразу и раз в 10 с
+  {"t":"st","dpi":N,"rate_hz":N,"onboard":"…","onboard_choices":[…],"loading":bool}   DPI из config.yaml сразу, потом Solaar
+  {"t":"solaar_fail"}                                   Solaar не ответил (две попытки)
+  {"t":"busy","label":"DPI 800"} / {"t":"done","ok":bool,"label","msg","key","value"}   запись настройки
+Команды в stdin (JSON): {"cmd":"dpi","v":800} | {"cmd":"rate","hz":2000} | {"cmd":"onboard","on":bool}
+                        | {"cmd":"solaar"} (открыть окно Solaar) | {"cmd":"refresh"}
+Изменения — `solaar config "PRO X 2" …` как в GTK-меню (фоновый Solaar останавливается и запускается снова).
+YP_DRYRUN=1 — настройки не меняются, команды solaar пишутся в stderr. Выход — по EOF на stdin."""
+import glob
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import threading
+import time
+
+DEVICE = "PRO X 2"
+SOLAAR_CONF = os.path.expanduser("~/.config/solaar/config.yaml")
+RATES = {500: "2ms", 1000: "1ms", 2000: "500us", 4000: "250us", 8000: "125us"}   # Гц → значение Solaar
+SOLAAR = ["env", "-u", "LD_PRELOAD", "solaar"]
+BG = "^/usr/bin/python /usr/bin/solaar --window"
+DRY = os.environ.get("YP_DRYRUN") == "1"
+LOCK = threading.Lock()
+WLOCK = threading.Lock()          # записи — по одной
+ST = {}
+WRITING = set()
+DRY_SET = set()          # в dry-run «записанное» не затирать ответом Solaar (он вернёт старое)
+
+
+def die_with_parent():
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").prctl(1, signal.SIGTERM)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def emit(**obj):
+    with LOCK:
+        try:
+            sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+            sys.stdout.flush()
+        except (BrokenPipeError, OSError):
+            os._exit(0)
+
+
+def run(cmd, timeout=20):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def do(cmd, timeout=25):
+    if DRY:
+        print("[dry-run]", " ".join(cmd), file=sys.stderr, flush=True)
+        return True, ""
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return r.returncode == 0, (r.stdout + r.stderr)
+    except Exception as e:  # noqa: BLE001
+        return False, str(e)
+
+
+def spawn(cmd):
+    if DRY:
+        print("[dry-run]", " ".join(cmd), file=sys.stderr, flush=True)
+        return
+    subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+
+
+def sys_battery():
+    """Батарея мыши из ядра (hid-logitech-hidpp)."""
+    for d in glob.glob("/sys/class/power_supply/hidpp_battery_*"):
+        def rd(n, d=d):
+            try:
+                with open(os.path.join(d, n)) as f:
+                    return f.read().strip()
+            except OSError:
+                return ""
+        if DEVICE.lower() not in rd("model_name").lower():
+            continue
+        if rd("online") == "0" or not rd("capacity"):
+            return None
+        return {"pct": int(rd("capacity")), "state": rd("status").lower(), "model": rd("model_name"),
+                "maker": rd("manufacturer")}
+    return None
+
+
+def config_dpi():
+    try:
+        with open(SOLAAR_CONF) as f:
+            text = f.read()
+    except OSError:
+        return None
+    block = text.split(f"_NAME: {DEVICE}", 1)[-1]
+    m = re.search(r"dpi_extended:\s*\{0:\s*(\d+)", block)
+    return int(m[1]) if m else None
+
+
+def hz(rate):
+    m = re.match(r"(\d+)(ms|us)", rate or "")
+    if not m or int(m[1]) == 0:
+        return None
+    return round(1000 / int(m[1])) if m[2] == "ms" else round(1_000_000 / int(m[1]))
+
+
+def solaar_settings():
+    out = run(SOLAAR + ["config", DEVICE], timeout=20)
+    d = {}
+    m = re.search(r"^dpi_extended = \{X:(\d+)", out, re.M)
+    if m:
+        d["dpi"] = int(m[1])
+    m = re.search(r"^report_rate_extended = (\S+)", out, re.M)
+    if m:
+        d["rate_hz"] = hz(m[1])
+    m = re.search(r"^onboard_profiles = (.+)$", out, re.M)
+    if m:
+        d["onboard"] = m[1].strip()
+    m = re.search(r"possible values: one of \[ ([^\]]*Profile[^\]]*) \]", out)
+    if m:
+        d["onboard_choices"] = [s.strip() for s in m[1].split(",")]
+    return d
+
+
+def send_bat():
+    b = sys_battery()
+    emit(t="bat", **b) if b else emit(t="bat", off=True)
+
+
+def battery_loop():
+    while True:
+        time.sleep(10)
+        send_bat()
+
+
+def read_solaar(tries=2):
+    """Solaar иногда отвечает 10+ с или зависает (USB занят OpenRGB) — вторая попытка."""
+    d = {}
+    for _ in range(tries):
+        d = solaar_settings()
+        if d:
+            break
+    if not d:
+        emit(t="solaar_fail")
+        emit(t="st", loading=False, **ST)
+        return
+    ST.update({k: v for k, v in d.items() if k not in WRITING and k not in DRY_SET})   # пока пишем настройку — её не затирать
+    emit(t="st", loading=False, **ST)
+
+
+def write(label, key, value, settings):
+    WRITING.add(key)
+    emit(t="busy", label=label)
+
+    def work():
+        with WLOCK:
+            ok, msg = True, ""
+            # фоновый Solaar перехватывает изменения из командной строки — остановить без сохранения, применить, запустить
+            bg = run(["pgrep", "-f", BG]).strip()
+            if bg and not DRY:
+                do(["pkill", "-9", "-f", BG])
+            for args in settings:
+                ok, msg = do(SOLAAR + ["config", DEVICE] + [str(a) for a in args], timeout=25)
+                if ok and "=?" in msg:                       # «key not found» Solaar возвращает с кодом 0
+                    ok = False
+                if not ok:
+                    break
+            if bg and not DRY:
+                spawn(SOLAAR + ["--window=hide"])
+            WRITING.discard(key)
+            if ok:
+                ST[key] = value
+                if DRY:
+                    DRY_SET.add(key)
+            last = (msg.strip().splitlines() or ["ошибка"])[-1]
+            emit(t="done", ok=ok, label=label, msg=last[:60], key=key, value=value)
+            if ok:
+                emit(t="st", loading=False, **ST)
+            else:
+                threading.Thread(target=read_solaar, daemon=True).start()
+    threading.Thread(target=work, daemon=True).start()
+
+
+def main():
+    die_with_parent()
+    dpi = config_dpi()
+    if dpi:
+        ST["dpi"] = dpi
+    emit(t="st", loading=True, **ST)
+    send_bat()
+    threading.Thread(target=battery_loop, daemon=True).start()
+    threading.Thread(target=read_solaar, daemon=True).start()
+    for line in sys.stdin:
+        try:
+            c = json.loads(line)
+        except ValueError:
+            continue
+        cmd = c.get("cmd")
+        if cmd == "dpi":
+            d = int(c.get("v", 0))
+            if 100 <= d <= 6400 and d != ST.get("dpi"):
+                write(f"DPI {d}", "dpi", d, [("dpi_extended", "0", d), ("dpi_extended", "1", d)])   # 0=X, 1=Y
+        elif cmd == "rate":
+            h = int(c.get("hz", 0))
+            if h in RATES and h != ST.get("rate_hz"):
+                write(f"Частота {h} Гц", "rate_hz", h, [("report_rate_extended", RATES[h])])
+        elif cmd == "onboard":
+            on = bool(c.get("on"))
+            cur = ST.get("onboard", "")
+            if on != (cur.lower() != "disabled"):
+                choices = [x for x in ST.get("onboard_choices", []) if x.lower() != "disabled"] or ["Profile 1"]
+                val = choices[0] if on else "Disabled"
+                write("Профиль " + ("включён" if on else "выключен"), "onboard", val, [("onboard_profiles", val)])
+        elif cmd == "solaar":
+            spawn(SOLAAR + ["--window=show"])
+        elif cmd == "refresh":
+            send_bat()
+    os._exit(0)
+
+
+if __name__ == "__main__":
+    main()

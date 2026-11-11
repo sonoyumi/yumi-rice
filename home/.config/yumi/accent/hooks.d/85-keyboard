@@ -1,0 +1,3 @@
+#!/bin/sh
+# подсветка клавиатуры Logitech цветом бара (акцент yumi-accent) — yumi-kb-light
+exec timeout 10 "$HOME/.local/bin/yumi-kb-light"

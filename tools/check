@@ -24,7 +24,7 @@ GENERATED = {".config/hypr/hyprlock/yumi-google.conf", ".config/swaync/config.js
              ".config/yumi/player/accent.css", ".config/yumi/player/colors.css",
              ".config/hypr/hyprlock/avatar.jpg", ".local/share/yumi-sddm/yumi/background.jpg"}
 SECRET = re.compile(r"(api[_-]?key|secret|passw(or)?d|token)\s*[:=]\s*['\"][^'\"\s$/]{8,}['\"]", re.I)
-EXTERNAL = {"claude", "xdg-terminal-exec"}  # сторонние программы, не наши скрипты
+EXTERNAL = {"claude", "xdg-terminal-exec", "borg", "chromium"}  # сторонние программы, не наши скрипты
 ALLOW_PRIVATE_WORDS = ('"claude": "',)  # иконка процесса в списке приложений меню процессов
 
 errors, warnings = [], []
@@ -51,6 +51,8 @@ def syntax(rel, f):
                 r = subprocess.run(["luac", "-p", "-"], input=text, capture_output=True, text=True)
                 if r.returncode:
                     errors.append(f"Lua: {rel}: {r.stderr.strip()[:120]}")
+        elif rel.endswith(".json") and "/Code/User/" in rel:
+            jsonc(text)  # настройки VS Code — JSONC (комментарии и висячие запятые)
         elif rel.endswith(".json"):
             json.loads(text)
         elif rel.endswith(".jsonc"):

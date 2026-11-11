@@ -1,0 +1,34 @@
+#!/bin/bash
+# yumi-backup-plug (29.10.2026) — флешка бэкапа смонтирована → уведомление «Сделать бэкап?» с кнопками.
+# Следит за монтированиями через findmnt --poll (события ядра, без опроса). Точка — каталог REPO из
+# ~/.config/yumi-backup/config (его верхний уровень /mnt/…); при монтировании в неё или ниже — уведомление
+# (в острове Quickshell, кнопки = действия notify-send). «Сделать бэкап» — yumi-backup run (прогресс в пилюле бара).
+# Служба: systemctl --user enable --now yumi-backup-plug.service. Откат: disable --now + удалить этот файл и юнит.
+set -u
+CONF="$HOME/.config/yumi-backup/config"; STATE="$HOME/.local/state/yumi-backup"
+REPO=$(bash -c '. "$1" 2>/dev/null; printf %s "$REPO"' _ "$CONF")
+[ -n "$REPO" ] || { echo "yumi-backup-plug: REPO не задан в $CONF" >&2; exit 1; }
+MNT="/$(printf %s "$REPO" | cut -d/ -f2-3)"          # /mnt/yumi-backup
+last_ask=0
+
+ask() {
+    local now age txt act
+    now=$(date +%s)
+    [ $((now - last_ask)) -lt 60 ] && return           # повторное монтирование за минуту — не спрашивать снова
+    last_ask=$now
+    [ -d "$REPO" ] || return                           # смонтировано не то (нет репозитория)
+    pgrep -f "yumi-backup run" >/dev/null && return    # бэкап уже идёт
+    if [ -f "$STATE/last" ]; then
+        age=$(( (now - $(cat "$STATE/last")) / 86400 ))
+        case $age in 0) txt="Последний бэкап — сегодня.";; 1) txt="Последний бэкап — вчера.";; *) txt="Последний бэкап — $age дн. назад.";; esac
+    else txt="Бэкапа ещё не было."; fi
+    act=$(notify-send -a "Бэкап" -i drive-removable-media -A "run=Сделать бэкап" -A "later=Позже" \
+          "Флешка бэкапа подключена" "$txt Сделать бэкап сейчас?" 2>/dev/null)
+    [ "$act" = "run" ] && setsid -f "$HOME/.local/bin/yumi-backup" run >/dev/null 2>&1
+}
+
+# уже смонтирована при старте службы — не спрашивать (только новые монтирования)
+findmnt --poll=mount -n -o ACTION,TARGET | while read -r action target; do
+    [ "$action" = "mount" ] || continue
+    case "$target" in "$MNT"|"$MNT"/*) ask & ;; esac
+done

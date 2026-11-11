@@ -27,6 +27,16 @@ def load():
     return out
 
 
+def is_internal(name):
+    """Встроенный экран ноутбука: имя выхода начинается с eDP (eDP-1, eDP-2…); всё остальное — внешний."""
+    return str(name or "").startswith("eDP")
+
+
+def internal_first(names):
+    """Имена выходов: сначала встроенные, потом внешние (порядок внутри групп сохраняется)."""
+    return sorted(names, key=lambda n: not is_internal(n))
+
+
 def ui_scale():
     """{выход: коэффициент} только для мониторов, где он не 1.0."""
     return {n: m["ui"] for n, m in load().items() if m["ui"] != 1.0}

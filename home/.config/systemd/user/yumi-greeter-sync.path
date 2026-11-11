@@ -1,0 +1,11 @@
+[Unit]
+Description=yumi: следить за экраном блокировки (lock/, greeter.qml, конфиг sway) — обновлять экран входа
+
+[Path]
+PathChanged=%h/.config/quickshell/yumi/lock
+PathChanged=%h/.config/quickshell/yumi/greeter.qml
+PathChanged=%h/.config/yumi/greeter
+Unit=yumi-greeter-sync.service
+
+[Install]
+WantedBy=graphical-session.target

@@ -1,0 +1,772 @@
+#!/usr/bin/env -S python3 -I
+"""bluetooth — бэкенд меню Bluetooth для Quickshell (yumi-rice 3.1). Логика та же, что у
+~/.local/bin/yumi-menu-bluetooth: состояние — из D-Bus org.bluez (живые сигналы, без опроса), действия —
+bluetoothctl/busctl/pactl, AirPods — ~/.local/lib/yumi/panel/aap.py (через сокет службы yumi-airpods, если она
+держит канал). Без GTK: JSON-строки состояния в stdout, команды JSON-строками из stdin.
+
+stdout:
+  {"type":"state", powered, adapter:{alias,address,discoverable,pairable}, devices:[{mac,name,kind,icon,kindName,
+      paired,connected,trusted,blocked,battery,rssi,airpods,modelName,audio,status}], scanning, left, dry}
+  {"type":"busy", mac, text|null}   {"type":"result", cmd, mac, ok, msg}   {"type":"toast", text, error}
+  {"type":"airpods", mac, status, message, battery:{left,right,single,case:{level,status,available}}, ear, mode,
+      allowed, conv, pending, stale, model}
+  {"type":"pair", mac, step, state}  {"type":"pair_agent", kind|null, code}  {"type":"pair_done", mac, ok, msg}
+  {"type":"card", mac, group, a2dp, hfp}
+stdin:
+  {"cmd":"power","on":b} {"cmd":"connect","mac":…} {"cmd":"disconnect","mac":…} {"cmd":"trust","mac":…,"on":b}
+  {"cmd":"block","mac":…,"on":b} {"cmd":"remove","mac":…} {"cmd":"scan","on":b} {"cmd":"pair","mac":…}
+  {"cmd":"pair_reply","text":…} {"cmd":"pair_cancel"} {"cmd":"airpods","mac":…,"on":b}
+  {"cmd":"airpods_mode","mac":…,"mode":1..4} {"cmd":"airpods_conv","mac":…,"on":b}
+  {"cmd":"card","mac":…} {"cmd":"profile","mac":…,"group":"a2dp|hfp"} {"cmd":"discoverable","on":b} {"cmd":"quit"}
+Проверка: YP_DRYRUN=1 — действия только печатаются в stderr и имитируются (поиск — настоящий);
+YP_BT_AAP_DEMO=1 (с YP_DRYRUN) — имитация AirPods; YP_BT_FAKE_CONNECT=MAC (с YP_DRYRUN) — считать подключённым;
+YP_BT_FAKE_FOUND=MAC:Имя (с YP_DRYRUN) — выдуманное найденное устройство (проверка сопряжения).
+Откат: yumi-uninstall quickshell"""
+import json
+import os
+import re
+import select
+import signal
+import subprocess
+import sys
+import threading
+import time
+
+import gi
+gi.require_version("Gio", "2.0")
+from gi.repository import Gio, GLib  # noqa: E402
+
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi/panel"))
+import aap  # noqa: E402
+
+DRY = os.environ.get("YP_DRYRUN") == "1"
+SCAN_S = 20
+ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|[\x01\x02]")
+BLUEZ = "org.bluez"
+OUT_LOCK = threading.Lock()
+
+KINDS = {"headphones": ("󰋋", "Наушники"), "mouse": ("󰍽", "Мышь"), "keyboard": ("󰌌", "Клавиатура"),
+         "speaker": ("󰓃", "Колонка"), "phone": ("󰄜", "Телефон"), "gamepad": ("󰊴", "Геймпад"),
+         "computer": ("󰟀", "Компьютер"), "other": ("󰂯", "Устройство")}
+BY_ICON = {"audio-headphones": "headphones", "audio-headset": "headphones", "input-mouse": "mouse",
+           "input-tablet": "mouse", "input-keyboard": "keyboard", "audio-card": "speaker",
+           "audio-speakers": "speaker", "phone": "phone", "input-gaming": "gamepad", "computer": "computer"}
+BY_NAME = [(r"airpods|buds|headphone|headset|наушник|wh-|wf-|earbud", "headphones"),
+           (r"mouse|мыш|\bm\d{3}\b|mx master|mx anywhere|rival|pro x", "mouse"),
+           (r"keyboard|клавиат|keys\b|k\d{3}\b", "keyboard"),
+           (r"speaker|колонк|soundlink|jbl|boom|charge|flip", "speaker"),
+           (r"controller|gamepad|dualsense|dualshock|joy-?con", "gamepad"),
+           (r"iphone|galaxy|pixel|phone|redmi|xiaomi", "phone")]
+AUDIO_UUIDS = {"110b", "110d", "111e", "1108", "184e", "1850"}
+ERRORS = [
+    (r"page-timeout|Page Timeout|HostDown|Host is down|ConnectionAttemptFailed|abort-by-local",
+     "Устройство не отвечает — оно включено и рядом?"),
+    (r"AuthenticationFailed|Authentication Failed", "Не удалось подтвердить код"),
+    (r"AuthenticationCanceled|AuthenticationRejected|Canceled|Rejected", "Сопряжение отклонено"),
+    (r"AuthenticationTimeout|Timeout|timed out", "Время ожидания истекло"),
+    (r"AlreadyExists", "Устройство уже сопряжено"),
+    (r"InProgress", "Операция уже выполняется — подождите"),
+    (r"not available|DoesNotExist", "Устройство не найдено — запустите поиск ещё раз"),
+    (r"NotReady|Not Ready|not ready", "Адаптер Bluetooth не готов (выключен?)"),
+    (r"profile-unavailable|Protocol not available|NotAvailable", "Нет подходящего профиля для подключения"),
+    (r"Access denied|AccessDenied|NotAuthorized|not authorized", "Нет прав на это действие"),
+]
+AGENT = [
+    (re.compile(r"Confirm passkey (\d+)"), "confirm"),
+    (re.compile(r"Enter PIN code:"), "pin"),
+    (re.compile(r"Enter passkey \(number in 0-999999\):"), "passkey"),
+    (re.compile(r"\[agent\] Passkey: (\d+)"), "display"),
+    (re.compile(r"\[agent\] PIN code: (\w+)"), "display"),
+    (re.compile(r"Authorize service \S+ \(yes/no\)"), "auto-yes"),
+    (re.compile(r"Accept pairing \(yes/no\)"), "auto-yes"),
+]
+EAR = {0: "в ухе", 1: "вне уха", 2: "в кейсе"}
+
+
+def die_with_parent():
+    """Если Quickshell умер (SIGKILL, падение) — выйти вместе с ним, не висеть сиротой."""
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").prctl(1, signal.SIGTERM)       # PR_SET_PDEATHSIG
+    except Exception:
+        pass
+
+
+def emit(**obj):
+    with OUT_LOCK:
+        try:
+            sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+            sys.stdout.flush()
+        except (BrokenPipeError, OSError):
+            os._exit(0)
+
+
+def log(*a):
+    print(*a, file=sys.stderr, flush=True)
+
+
+def short_uuid(u):
+    u = (u or "").lower()
+    return u[4:8] if u.endswith("-0000-1000-8000-00805f9b34fb") else ""
+
+
+def dev_kind(d):
+    if d.get("Icon") in BY_ICON:
+        return BY_ICON[d["Icon"]]
+    app = d.get("Appearance")
+    if app:
+        cat, sub = app >> 6, app & 0x3F
+        if cat == 0x0F:
+            return {1: "keyboard", 2: "mouse", 3: "gamepad", 4: "gamepad"}.get(sub, "other")
+        if cat == 0x01:
+            return "phone"
+        if cat == 0x02:
+            return "computer"
+        if cat == 0x25:
+            return "headphones"
+        if cat == 0x21:
+            return "speaker"
+    cls = d.get("Class")
+    if cls:
+        major, minor = (cls >> 8) & 0x1F, (cls >> 2) & 0x3F
+        if major == 1:
+            return "computer"
+        if major == 2:
+            return "phone"
+        if major == 4:
+            return "speaker" if minor in (5, 7, 8) else "headphones"
+        if major == 5:
+            if minor & 0x10:
+                return "keyboard"
+            if minor & 0x20:
+                return "mouse"
+            if minor & 0x0F in (1, 2):
+                return "gamepad"
+    name = (d.get("Name") or "").lower()
+    for pat, kind in BY_NAME:
+        if re.search(pat, name):
+            return kind
+    return "other"
+
+
+def friendly(text):
+    for pat, msg in ERRORS:
+        if re.search(pat, text or ""):
+            return msg
+    lines = [l.strip() for l in (text or "").splitlines() if "Fail" in l or "Error" in l or "rror" in l]
+    return (lines[-1] if lines else "Не получилось")[:80]
+
+
+def do(*cmd, timeout=15):
+    """Команда, МЕНЯЮЩАЯ систему. В YP_DRYRUN=1 только печатается. → (ok, вывод)."""
+    if DRY:
+        log("[dry-run]", " ".join(str(c) for c in cmd))
+        return True, ""
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return r.returncode == 0, (r.stdout + r.stderr).strip()
+    except Exception as e:
+        return False, str(e)
+
+
+def bt(*args, timeout=25):
+    if DRY:
+        do("bluetoothctl", *args)
+        time.sleep(0.8)
+        return True, ""
+    ok, out = do("bluetoothctl", "--timeout", str(timeout), *args, timeout=timeout + 3)
+    out = ANSI.sub("", out)
+    if not ok or re.search(r"Failed|not available|org\.bluez\.Error", out):
+        return False, friendly(out)
+    return True, out
+
+
+def status_text(d):
+    parts = ["подключено" if d["connected"] else "не подключено"]
+    if d["paired"]:
+        parts.append("сопряжено")
+    if d["trusted"]:
+        parts.append("доверенное")
+    if d["blocked"]:
+        parts.append("заблокировано")
+    s = " · ".join(parts)
+    return s[0].upper() + s[1:]
+
+
+# ---------- звук: профили карты PipeWire ----------
+def audio_card(mac):
+    name = "bluez_card." + mac.replace(":", "_")
+    try:
+        cards = json.loads(subprocess.run(["pactl", "-f", "json", "list", "cards"], capture_output=True, text=True,
+                                          timeout=3).stdout or "[]")
+    except (ValueError, Exception):
+        cards = []
+    for c in cards:
+        if c.get("name") == name:
+            profs = {k: (v.get("available", True) if isinstance(v, dict) else True)
+                     for k, v in (c.get("profiles") or {}).items()}
+            return name, profs, c.get("active_profile", "")
+    return None
+
+
+def profile_group(p):
+    if p.startswith("a2dp"):
+        return "a2dp"
+    if p.startswith(("headset", "handsfree", "hfp", "hsp")):
+        return "hfp"
+    return ""
+
+
+def best_profile(profs, group, active):
+    if profile_group(active) == group:
+        return active
+    cands = [p for p, avail in profs.items() if profile_group(p) == group and avail]
+    order = ["a2dp-sink-aac", "a2dp-sink-aptx_hd", "a2dp-sink-aptx", "a2dp-sink-ldac", "a2dp-sink",
+             "headset-head-unit-msbc", "headset-head-unit", "headset-head-unit-cvsd"]
+    cands.sort(key=lambda p: order.index(p) if p in order else 99)
+    return cands[0] if cands else ""
+
+
+# ---------- сопряжение: bluetoothctl с агентом ----------
+class Pairer(threading.Thread):
+    STEPS = [("pair", "Сопряжение", ["Pairing successful", "AlreadyExists"],
+              r"Failed to pair[^\n]*|Device \S+ not available", 90),
+             ("trust", "Доверие", ["trust succeeded"], r"Failed to set trust[^\n]*|Device \S+ not available", 10),
+             ("connect", "Подключение", ["Connection successful"], r"Failed to connect[^\n]*|Device \S+ not available", 30)]
+
+    def __init__(self, mac, on_step, on_agent, on_done):
+        super().__init__(daemon=True)
+        self.mac = mac
+        self.on_step, self.on_agent, self.on_done = on_step, on_agent, on_done
+        self.proc = None
+        self.cancelled = False
+        self.answer = None
+        self.answer_ev = threading.Event()
+        self.buf, self.agent_pos = "", 0
+
+    def send(self, line, log_it=True):
+        if DRY:
+            if log_it:
+                log(f"[dry-run] bluetoothctl> {line}")
+            return
+        try:
+            self.proc.stdin.write((line + "\n").encode())
+            self.proc.stdin.flush()
+        except (OSError, AttributeError, ValueError):
+            pass
+
+    def reply(self, text):
+        if DRY:
+            log(f"[dry-run] agent ← {text}")
+            self.answer = text
+            self.answer_ev.set()
+        else:
+            self.send(text)
+
+    def cancel(self):
+        self.cancelled = True
+        self.answer_ev.set()
+        if self.proc and self.proc.poll() is None:
+            self.send(f"cancel-pairing {self.mac}")
+            self.proc.terminate()
+
+    def run(self):
+        try:
+            ok, msg = self.run_dry() if DRY else self.run_real()
+        except Exception as e:          # noqa: BLE001
+            ok, msg = False, str(e)
+        finally:
+            if self.proc and self.proc.poll() is None:
+                self.proc.terminate()
+        if not self.cancelled:
+            self.on_done(ok, msg)
+
+    def run_dry(self):
+        for i, (key, *_r) in enumerate(self.STEPS):
+            self.on_step(i, "run")
+            self.send(f"{key} {self.mac}")
+            if key == "pair":
+                time.sleep(1.2)
+                self.on_agent("confirm", "482915")
+                self.answer_ev.wait(90)
+                self.on_agent(None, "")
+                if self.cancelled:
+                    return False, ""
+                if self.answer != "yes":
+                    self.on_step(i, "err")
+                    return False, "Сопряжение отклонено"
+            time.sleep(1.0)
+            self.on_step(i, "ok")
+        return True, ""
+
+    def run_real(self):
+        self.proc = subprocess.Popen(["bluetoothctl"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     stderr=subprocess.STDOUT)
+        self.fd = self.proc.stdout.fileno()
+        self.wait_for(["Agent registered", "agent is already registered"], None, 6)
+        for i, (key, _title, oks, fail, limit) in enumerate(self.STEPS):
+            self.on_step(i, "run")
+            self.buf, self.agent_pos = "", 0
+            self.send(f"{key} {self.mac}")
+            ok, msg = self.wait_for(oks, fail, limit)
+            if self.cancelled:
+                return False, ""
+            self.on_step(i, "ok" if ok else "err")
+            self.on_agent(None, "")
+            if not ok:
+                return False, friendly(msg)
+        self.send("quit", log_it=False)
+        return True, ""
+
+    def wait_for(self, oks, fail, limit):
+        end = time.monotonic() + limit
+        while time.monotonic() < end and not self.cancelled:
+            r, _, _ = select.select([self.fd], [], [], 0.25)
+            if r:
+                chunk = os.read(self.fd, 4096)
+                if not chunk:
+                    return False, "bluetoothctl завершился"
+                self.buf += ANSI.sub("", chunk.decode(errors="replace")).replace("\r", "\n")
+            hits = [(m, kind) for rx, kind in AGENT if (m := rx.search(self.buf, self.agent_pos))]
+            if hits:
+                m, kind = min(hits, key=lambda h: h[0].start())
+                self.agent_pos = m.end()
+                end += 60
+                if kind == "auto-yes":
+                    self.send("yes")
+                else:
+                    self.on_agent(kind, m.group(1) if m.groups() else "")
+                continue
+            if any(o in self.buf for o in oks):
+                return True, ""
+            if fail and (m := re.search(fail, self.buf)):
+                return False, m.group(0)
+        return False, "Timeout"
+
+
+# ---------- служба ----------
+class Backend:
+    def __init__(self):
+        self.loop = GLib.MainLoop()
+        self.powered, self.adapter_path, self.ad, self.devs = None, None, {}, {}
+        self.fake, self.fake_ad, self.fake_card = {}, {}, {}
+        self.refresh_timer = 0
+        self.scan_proc, self.scan_left = None, 0
+        self.pairer, self.pair_mac = None, None
+        self.aap = {}            # mac → aap.Session
+        self.ap_snap = {}
+        self.busy = {}
+        self.seen_rssi = {}
+        self.cards = {}
+        if DRY and os.environ.get("YP_BT_FAKE_CONNECT"):
+            self.fake[os.environ["YP_BT_FAKE_CONNECT"].upper()] = {"connected": True, "paired": True}
+        try:
+            self.bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+            self.bus.signal_subscribe(BLUEZ, None, None, None, None, Gio.DBusSignalFlags.NONE,
+                                      lambda *_: self.schedule_refresh())
+            reply = self.bus.call_sync(BLUEZ, "/", "org.freedesktop.DBus.ObjectManager", "GetManagedObjects",
+                                       None, None, Gio.DBusCallFlags.NONE, 1500, None)
+            self.apply(reply.unpack()[0])
+        except GLib.Error as e:
+            log("D-Bus:", e)
+            self.bus = None
+            self.apply({})
+
+    # -- состояние --
+    def schedule_refresh(self, delay=300):
+        if not self.refresh_timer:
+            self.refresh_timer = GLib.timeout_add(delay, self.refresh)
+
+    def refresh(self):
+        self.refresh_timer = 0
+        if self.bus is None:
+            return False
+        self.bus.call(BLUEZ, "/", "org.freedesktop.DBus.ObjectManager", "GetManagedObjects", None, None,
+                      Gio.DBusCallFlags.NONE, 3000, None, self.on_objects)
+        return False
+
+    def on_objects(self, bus, res):
+        try:
+            self.apply(bus.call_finish(res).unpack()[0])
+        except GLib.Error:
+            self.apply({})
+
+    def apply(self, objs):
+        ad, devs = None, {}
+        for path, ifs in sorted(objs.items()):
+            a = ifs.get("org.bluez.Adapter1")
+            if a and ad is None:
+                ad, self.adapter_path = dict(a), path
+            d = ifs.get("org.bluez.Device1")
+            if not d or not d.get("Address"):
+                continue
+            mac = d["Address"]
+            uuids = list(d.get("UUIDs") or [])
+            modalias = d.get("Modalias") or ""
+            kind = dev_kind(d)
+            dev = dict(mac=mac, path=path, name=d.get("Alias") or d.get("Name") or mac, hasName=bool(d.get("Name")),
+                       paired=bool(d.get("Paired") or d.get("Bonded")), connected=bool(d.get("Connected")),
+                       trusted=bool(d.get("Trusted")), blocked=bool(d.get("Blocked")),
+                       battery=ifs.get("org.bluez.Battery1", {}).get("Percentage"),
+                       rssi=d.get("RSSI"), kind=kind, icon=KINDS[kind][0], kindName=KINDS[kind][1],
+                       airpods=aap.is_airpods(modalias, uuids), modelName=aap.model_name(modalias) or "",
+                       audio=kind in ("headphones", "speaker") or bool({short_uuid(u) for u in uuids} & AUDIO_UUIDS))
+            dev.update(self.fake.get(mac, {}))
+            if dev.get("removed"):
+                continue
+            if dev["rssi"] is not None:                    # после поиска bluez стирает RSSI — помним последний
+                self.seen_rssi[mac] = dev["rssi"]
+            dev["rssi"] = self.seen_rssi.get(mac)
+            devs[mac] = dev
+        if DRY and os.environ.get("YP_BT_FAKE_FOUND"):
+            spec = os.environ["YP_BT_FAKE_FOUND"]
+            fmac, _, fname = spec[:17].upper(), spec[17:18], spec[18:] or "Тестовое устройство"
+            fd = dict(mac=fmac, path="", name=fname, hasName=True, paired=False, connected=False, trusted=False,
+                      blocked=False, battery=None, rssi=-58, kind="headphones", icon=KINDS["headphones"][0],
+                      kindName=KINDS["headphones"][1], airpods=False, modelName="", audio=True)
+            fd.update(self.fake.get(fmac, {}))
+            if not fd.get("removed"):
+                devs[fmac] = fd
+        if ad is not None:
+            ad.update(self.fake_ad)
+        self.ad = ad or {}
+        self.powered = bool(ad.get("Powered")) if ad is not None else None
+        if not self.powered:
+            for d in devs.values():
+                d["connected"] = False
+        for d in devs.values():
+            d["status"] = status_text(d)
+            d["busy"] = self.busy.get(d["mac"])
+        self.devs = devs
+        # AirPods-сессии: закрыть для отключённых
+        for mac, sess in list(self.aap.items()):
+            d = devs.get(mac)
+            if not d or not d["connected"]:
+                self.airpods(mac, False)
+        self.send_state()
+
+    def send_state(self):
+        a = self.ad
+        emit(type="state", powered=self.powered,
+             adapter={"alias": a.get("Alias", ""), "address": a.get("Address", ""),
+                      "discoverable": bool(a.get("Discoverable")), "pairable": bool(a.get("Pairable"))},
+             devices=sorted(({k: v for k, v in d.items() if k != "path"} for d in self.devs.values()),
+                            key=lambda d: (not d["connected"], not d["paired"], d["name"].lower())),
+             scanning=self.scan_running(), left=self.scan_left, dry=DRY)
+
+    def toast(self, text, error=False):
+        emit(type="toast", text=text, error=error)
+
+    def set_busy(self, mac, text):
+        if text:
+            self.busy[mac] = text
+        else:
+            self.busy.pop(mac, None)
+        emit(type="busy", mac=mac, text=text)
+
+    def act(self, cmd, mac, doing, fn, fake=None, ok_text="Готово", after=None):
+        """fn() → (ok, сообщение) в потоке; fake() — имитация результата в dry-run."""
+        self.set_busy(mac, doing)
+        if not mac:
+            self.toast(doing)
+
+        def work():
+            try:
+                ok, msg = fn()
+            except Exception as e:      # noqa: BLE001
+                ok, msg = False, str(e)
+            GLib.idle_add(done, ok, msg)
+
+        def done(ok, msg):
+            if ok and DRY and fake:
+                fake()
+            self.set_busy(mac, None)
+            if ok:
+                self.toast(ok_text)
+                if after:
+                    after()
+            else:
+                self.toast(msg, error=True)
+            emit(type="result", cmd=cmd, mac=mac, ok=ok, msg=ok_text if ok else msg)
+            self.refresh() if self.bus else self.apply({})
+            return False
+        threading.Thread(target=work, daemon=True).start()
+
+    def fake_dev(self, mac, **kw):
+        return lambda: self.fake.setdefault(mac, {}).update(kw)
+
+    def fake_adapter(self, **kw):
+        return lambda: self.fake_ad.update(kw)
+
+    # -- команды --
+    def cmd_power(self, on):
+        if on == bool(self.powered):
+            return
+        self.act("power", "", "Включаю…" if on else "Выключаю…", lambda: bt("power", "on" if on else "off"),
+                 fake=self.fake_adapter(Powered=on), ok_text="Bluetooth включён" if on else "Bluetooth выключен")
+
+    def cmd_discoverable(self, on):
+        self.act("discoverable", "", "Включаю видимость…" if on else "Скрываю…",
+                 lambda: bt("discoverable", "on" if on else "off"), fake=self.fake_adapter(Discoverable=on),
+                 ok_text="Ноутбук виден другим" if on else "Ноутбук скрыт")
+
+    def cmd_connect(self, mac, on):
+        if on:
+            self.act("connect", mac, "Подключаю…", lambda: bt("connect", mac), fake=self.fake_dev(mac, connected=True),
+                     ok_text="Подключено")
+        else:
+            self.act("disconnect", mac, "Отключаю…", lambda: bt("disconnect", mac),
+                     fake=self.fake_dev(mac, connected=False), ok_text="Отключено")
+
+    def cmd_trust(self, mac, on):
+        self.act("trust", mac, "Меняю доверие…", lambda: bt("trust" if on else "untrust", mac),
+                 fake=self.fake_dev(mac, trusted=on), ok_text="Доверие включено" if on else "Доверие снято")
+
+    def cmd_block(self, mac, on):
+        fake = dict(blocked=on, connected=False) if on else dict(blocked=False)
+        self.act("block", mac, "Блокирую…" if on else "Снимаю блокировку…", lambda: bt("block" if on else "unblock", mac),
+                 fake=self.fake_dev(mac, **fake), ok_text="Заблокировано" if on else "Блокировка снята")
+
+    def cmd_remove(self, mac):
+        self.act("remove", mac, "Удаляю…", lambda: bt("remove", mac), fake=self.fake_dev(mac, removed=True),
+                 ok_text="Устройство удалено")
+
+    # поиск (всегда настоящий)
+    def scan_running(self):
+        return self.scan_proc is not None and self.scan_proc.poll() is None
+
+    def cmd_scan(self, on):
+        if not on:
+            self.stop_scan()
+            self.send_state()
+            return
+        if not self.powered:
+            self.toast("Bluetooth выключен", error=True)
+            return
+        self.stop_scan()
+        self.scan_left = SCAN_S
+        try:
+            proc = subprocess.Popen(["bluetoothctl", "--timeout", str(SCAN_S), "scan", "on"],
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as e:
+            self.toast(str(e), error=True)
+            return
+        self.scan_proc = proc
+        self.send_state()
+
+        def wait():
+            proc.wait()
+            GLib.idle_add(self.scan_finished, proc)
+        threading.Thread(target=wait, daemon=True).start()
+
+        def tick():
+            if self.scan_proc is not proc or proc.poll() is not None:
+                return False
+            self.scan_left = max(self.scan_left - 1, 0)
+            emit(type="scan", on=True, left=self.scan_left)
+            return True
+        GLib.timeout_add_seconds(1, tick)
+
+    def scan_finished(self, proc):
+        if self.scan_proc is proc:
+            self.scan_proc = None
+        self.scan_left = 0
+        emit(type="scan", on=False, left=0)
+        self.send_state()
+        return False
+
+    def stop_scan(self):
+        p, self.scan_proc = self.scan_proc, None
+        if p and p.poll() is None:
+            p.terminate()
+            try:
+                p.wait(1.5)
+            except subprocess.TimeoutExpired:
+                p.kill()
+
+    # сопряжение
+    def cmd_pair(self, mac):
+        if self.pairer:
+            self.pairer.cancel()
+        self.stop_scan()
+        self.pair_mac = mac
+        self.pairer = Pairer(mac, lambda i, st: GLib.idle_add(self.pair_step, mac, i, st),
+                             lambda kind, code: GLib.idle_add(self.pair_agent, mac, kind, code),
+                             lambda ok, msg: GLib.idle_add(self.pair_done, mac, ok, msg))
+        self.pairer.start()
+
+    def pair_step(self, mac, i, state):
+        emit(type="pair", mac=mac, step=i, state=state, title=Pairer.STEPS[i][1])
+        return False
+
+    def pair_agent(self, mac, kind, code):
+        emit(type="pair_agent", mac=mac, kind=kind, code=code)
+        return False
+
+    def pair_done(self, mac, ok, msg):
+        self.pairer = None
+        if ok and DRY:
+            self.fake.setdefault(mac, {}).update(paired=True, trusted=True, connected=True)
+        emit(type="pair_done", mac=mac, ok=ok, msg=msg or ("" if ok else "Не получилось"))
+        self.toast("Готово" if ok else (msg or "Не получилось"), error=not ok)
+        self.refresh()
+        return False
+
+    def cmd_pair_reply(self, text):
+        if self.pairer:
+            self.pairer.reply(text)
+
+    def cmd_pair_cancel(self):
+        if self.pairer:
+            self.pairer.cancel()
+            self.pairer = None
+
+    # AirPods
+    def airpods(self, mac, on):
+        sess = self.aap.get(mac)
+        if on and sess is None:
+            demo = DRY and os.environ.get("YP_BT_AAP_DEMO", "")
+            sess = aap.Session(mac, lambda snap: GLib.idle_add(self.ap_update, mac, snap), dry=DRY, demo=demo)
+            self.aap[mac] = sess
+            sess.start()
+        elif not on and sess is not None:
+            sess.stop()
+            del self.aap[mac]
+
+    def ap_update(self, mac, snap):
+        if mac not in self.aap:
+            return False
+        settings = snap["settings"]
+        mode = settings[aap.S_MODE][0] if aap.S_MODE in settings else None
+        conv = (settings[aap.S_CONVERSATION][0] == aap.ON) if aap.S_CONVERSATION in settings else None
+        ear = snap["ear"]
+        ear_text = ""
+        if ear:
+            a, b = (EAR.get(ear.get(k), "?") for k in ("primary", "secondary"))
+            ear_text = f"Наушники: {a}" if a == b else f"Наушники: {a} · {b}"
+        waiting = snap["status"] == "ok" and not snap["battery"] and not settings
+        msg = {"connecting": "Подключаюсь к наушникам…"}.get(snap["status"], snap["message"])
+        if waiting:
+            msg = "Жду данные от наушников…"
+        emit(type="airpods", mac=mac, status=snap["status"], message=msg, waiting=waiting,
+             battery=snap["battery"], ear=ear_text, mode=mode, allowed=list(snap["allowed"]), conv=conv,
+             pending=aap.S_MODE in snap["pending"], stale=aap.S_MODE in snap["stale"],
+             model=snap["model"] or "", firmware=snap["firmware"] or "")
+        return False
+
+    def cmd_airpods_mode(self, mac, mode):
+        sess = self.aap.get(mac)
+        if sess and mode in aap.MODES:
+            sess.change(aap.S_MODE, mode)
+
+    def cmd_airpods_conv(self, mac, on):
+        sess = self.aap.get(mac)
+        if sess:
+            sess.change(aap.S_CONVERSATION, aap.ON if on else aap.OFF)
+
+    # профиль звука
+    def cmd_card(self, mac):
+        def work():
+            card = audio_card(mac)
+            if card is None and DRY and self.devs.get(mac, {}).get("connected"):
+                card = (f"bluez_card.{mac.replace(':', '_')}",
+                        {"a2dp-sink": True, "headset-head-unit": True, "off": True},
+                        self.fake_card.get(mac, "a2dp-sink"))
+            GLib.idle_add(self.card_ready, mac, card)
+        threading.Thread(target=work, daemon=True).start()
+
+    def card_ready(self, mac, card):
+        if not card:
+            emit(type="card", mac=mac, group="", a2dp=False, hfp=False)
+            return False
+        name, profs, active = card
+        self.cards[mac] = card
+        emit(type="card", mac=mac, group=profile_group(active),
+             a2dp=any(profile_group(p) == "a2dp" and av for p, av in profs.items()),
+             hfp=any(profile_group(p) == "hfp" and av for p, av in profs.items()))
+        return False
+
+    def cmd_profile(self, mac, group):
+        card = self.cards.get(mac)
+        if not card:
+            return
+        name, profs, active = card
+        prof = best_profile(profs, group, active)
+        if not prof or prof == active:
+            return
+        text = "Высокое качество (A2DP)" if group == "a2dp" else "Гарнитура с микрофоном (HFP)"
+
+        def fn():
+            ok, out = do("pactl", "set-card-profile", name, prof)
+            return (True, "") if ok else (False, out or "Не удалось сменить профиль")
+        self.act("profile", mac, "Меняю профиль звука…", fn, fake=lambda: self.fake_card.__setitem__(mac, prof),
+                 ok_text=text, after=lambda: self.cmd_card(mac))
+
+    # -- цикл --
+    def on_stdin(self, ch, cond):
+        line = sys.stdin.readline()
+        if not line:
+            self.stop()
+            return False
+        try:
+            c = json.loads(line)
+        except ValueError:
+            log("плохая команда:", line.strip())
+            return True
+        cmd, mac, on = c.get("cmd"), str(c.get("mac", "")).upper(), bool(c.get("on"))
+        if cmd == "power":
+            self.cmd_power(on)
+        elif cmd == "connect":
+            self.cmd_connect(mac, True)
+        elif cmd == "disconnect":
+            self.cmd_connect(mac, False)
+        elif cmd == "trust":
+            self.cmd_trust(mac, on)
+        elif cmd == "block":
+            self.cmd_block(mac, on)
+        elif cmd == "remove":
+            self.cmd_remove(mac)
+        elif cmd == "scan":
+            self.cmd_scan(on)
+        elif cmd == "pair":
+            self.cmd_pair(mac)
+        elif cmd == "pair_reply":
+            self.cmd_pair_reply(str(c.get("text", "")))
+        elif cmd == "pair_cancel":
+            self.cmd_pair_cancel()
+        elif cmd == "airpods":
+            self.airpods(mac, on)
+        elif cmd == "airpods_mode":
+            self.cmd_airpods_mode(mac, int(c.get("mode", 0)))
+        elif cmd == "airpods_conv":
+            self.cmd_airpods_conv(mac, on)
+        elif cmd == "card":
+            self.cmd_card(mac)
+        elif cmd == "profile":
+            self.cmd_profile(mac, str(c.get("group", "")))
+        elif cmd == "discoverable":
+            self.cmd_discoverable(on)
+        elif cmd == "refresh":
+            self.refresh()
+        elif cmd == "quit":
+            self.stop()
+            return False
+        return True
+
+    def stop(self):
+        self.stop_scan()
+        for sess in self.aap.values():
+            sess.stop()
+        if self.pairer:
+            self.pairer.cancel()
+        os._exit(0)
+
+    def main(self):
+        GLib.io_add_watch(sys.stdin, GLib.PRIORITY_DEFAULT, GLib.IO_IN | GLib.IO_HUP, self.on_stdin)
+        signal.signal(signal.SIGTERM, lambda *_: self.stop())
+        self.loop.run()
+
+
+if __name__ == "__main__":
+    die_with_parent()
+    Backend().main()

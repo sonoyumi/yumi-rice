@@ -90,11 +90,9 @@ def wait_action(ev_id, urgency, summary, body):
         cs.modify(apply)
     elif act == "open":
         # через Hyprland: процесс-ожидатель живёт во временном юните systemd и его потомки погибнут вместе с ним
-        menu = os.path.expanduser("~/.local/bin/yumi-menu-calendar")
-        r = subprocess.run(["hyprctl", "dispatch", f"hl.dsp.exec_cmd([[{menu} --center]])"],
-                           capture_output=True, text=True, timeout=5)
-        if r.returncode != 0 or "error" in (r.stdout + r.stderr).lower():
-            subprocess.run(["systemd-run", "--user", "--collect", "--quiet", menu, "--center"], timeout=5)
+        # меню календаря Quickshell (3.1) по центру; старое GTK yumi-menu-calendar — в архиве (16.10)
+        subprocess.run(["qs", "-c", "yumi", "ipc", "call", "menu", "center", "calendar"],
+                       capture_output=True, text=True, timeout=5)
 
 
 def check():

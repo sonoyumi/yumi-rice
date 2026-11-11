@@ -1,0 +1,5 @@
+#!/bin/sh
+# yumi-obsidian-theme: Obsidian (vault ~/Projects/Схемы) в цвете бара — сниппет wallbash.css (откат — см. сам скрипт)
+T="$HOME/.local/bin/yumi-obsidian-theme"
+[ -x "$T" ] || exit 0
+exec timeout 5 "$T"

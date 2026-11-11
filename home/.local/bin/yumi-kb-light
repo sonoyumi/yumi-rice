@@ -4,18 +4,28 @@
   yumi-kb-light                 применить сохранённые настройки
   yumi-kb-light 70              яркость 70 %   (yumi-kb-light up / down — ±10 %)
   yumi-kb-light off | on        выключить / включить (яркость сохраняется)
-  yumi-kb-light wall            цвет по обоям (по умолчанию; меняется вместе с обоями)
+  yumi-kb-light wall            цвет как у бара (по умолчанию; меняется вместе с обоями)
+  yumi-kb-light sat auto        прибавка насыщенности сама по обоям и оттенку бара (по умолчанию)
+  yumi-kb-light sat 25          своя постоянная прибавка, 0–100 % (светодиоды бледнят пастель)
   yumi-kb-light color FF8800    свой постоянный цвет (обои его не меняют)
   yumi-kb-light status          показать настройки
 Яркость делается масштабированием цвета, поэтому работает в любом режиме клавиатуры.
-Настройки: ~/.config/yumi/kb/state.json. Цвет обоев — из ~/.cache/yumi/theme/wallbash/keyboard."""
-import json, os, re, subprocess, sys
+Настройки: ~/.config/yumi/kb/state.json. Цвет обоев = акцент бара Quickshell (Colors.acc): тон xa7 из
+~/.cache/yumi-accent/accent.txt (его перекрашивает хук ~/.config/yumi/accent/hooks.d/85-keyboard);
+нет файла — KB_COLOR из ~/.cache/yumi/theme/wallbash/keyboard."""
+import colorsys, json, os, re, subprocess, sys
 
 HOME = os.path.expanduser("~")
 STATE = os.path.join(HOME, ".config/yumi/kb/state.json")
 WALL = os.path.join(HOME, ".cache/yumi/theme/wallbash/keyboard")
+ACCENT = os.path.join(HOME, ".cache/yumi-accent/accent.txt")
+# палитра бара: файл шаблона (пишется при prepare или подменяется из комплекта ДО сигналов commit), а не
+# ~/.config/yumi/quickshell/colors.json — его копирует в тот же момент другая команда очереди, гонка (19.10)
+PALETTE = os.path.join(HOME, ".cache/yumi/theme/wallbash/quickshell.json")
+SAT_MIN, SAT_MAX = 10, 50     # авто: серые обои → 10 %, яркие → 50 %
+BLUE_DAMP = 0.5               # синий светодиод сильнее — синим/фиолетовым оттенкам вдвое меньше (60 было «прям синее»)
 DEVICE = "PRO Gaming Keyboard"
-DEFAULT = {"brightness": 100, "on": True, "source": "wall", "color": "FFFFFF"}
+DEFAULT = {"brightness": 100, "on": True, "source": "wall", "color": "FFFFFF", "sat": "auto"}
 
 
 def load():
@@ -32,7 +42,24 @@ def save(s):
     os.replace(STATE + ".tmp", STATE)
 
 
+def bar_accent():
+    """Colors.acc бара: band(xa7, 0.62, 0.80) — светлота HSL в коридоре, оттенок и насыщенность те же."""
+    try:
+        xa = open(ACCENT).read().split()
+    except OSError:
+        return None
+    if len(xa) < 7 or not re.fullmatch(r"[0-9A-Fa-f]{6}", xa[6]):
+        return None
+    r, g, b = (int(xa[6][i:i + 2], 16) / 255 for i in (0, 2, 4))
+    h, l, s = colorsys.rgb_to_hls(r, g, b)
+    r, g, b = colorsys.hls_to_rgb(h, min(0.80, max(0.62, l)), s)
+    return "%02X%02X%02X" % tuple(round(c * 255) for c in (r, g, b))
+
+
 def wall_color():
+    c = bar_accent()
+    if c:
+        return c
     try:
         m = re.search(r"KB_COLOR=([0-9A-Fa-f]{6})", open(WALL).read())
         return m.group(1) if m else "FFFFFF"
@@ -40,16 +67,70 @@ def wall_color():
         return "FFFFFF"
 
 
+def hsv(hexc):
+    return colorsys.rgb_to_hsv(*(int(hexc[i:i + 2], 16) / 255 for i in (0, 2, 4)))
+
+
+def auto_sat(base):
+    """Прибавка по обоям: средняя насыщенность 4 основных цветов (pry1–4) → SAT_MIN…SAT_MAX;
+    оттенок бара 200–290° (синий/фиолетовый) × BLUE_DAMP. Возвращает (процент, пояснение)."""
+    try:
+        d = json.load(open(PALETTE))
+        sats = [hsv(d[k].lstrip("#"))[1] for k in ("pry1", "pry2", "pry3", "pry4")
+                if re.fullmatch(r"#?[0-9A-Fa-f]{6}", d.get(k, ""))]
+    except (OSError, ValueError):
+        sats = []
+    w = sum(sats) / len(sats) if sats else 0.4
+    pct = SAT_MIN + (SAT_MAX - SAT_MIN) * min(1, w / 0.6)     # 60 % средней насыщенности — уже «яркие обои»
+    hue = hsv(base)[0] * 360
+    blue = 200 <= hue <= 290
+    if blue:
+        pct *= BLUE_DAMP
+    return round(pct), f"обои {round(w * 100)} %, оттенок {round(hue)}°" + (" (синий ×0,5)" if blue else "")
+
+
+def sat_pct(s, base):
+    return auto_sat(base)[0] if s["sat"] == "auto" else s["sat"]
+
+
+def saturate(hexc, pct):
+    """Насыщенность HSV ближе к 100 % на pct % от остатка; серый (без оттенка) остаётся серым."""
+    r, g, b = (int(hexc[i:i + 2], 16) / 255 for i in (0, 2, 4))
+    h, s, v = colorsys.rgb_to_hsv(r, g, b)
+    if s < 0.05:
+        return hexc
+    r, g, b = colorsys.hsv_to_rgb(h, s + (1 - s) * max(0, min(100, pct)) / 100, v)
+    return "%02X%02X%02X" % tuple(round(c * 255) for c in (r, g, b))
+
+
 def final_color(s):
     if not s["on"] or s["brightness"] <= 0:
         return "000000"
-    base = wall_color() if s["source"] == "wall" else s["color"]
+    w = wall_color()
+    base = saturate(w, sat_pct(s, w)) if s["source"] == "wall" else s["color"]
     r, g, b = (int(base[i:i + 2], 16) for i in (0, 2, 4))
     k = 255 / max(r, g, b, 1) * s["brightness"] / 100      # 100 % — самый яркий вариант оттенка
     return "%02X%02X%02X" % tuple(min(255, round(c * k)) for c in (r, g, b))
 
 
+def dark_menu():
+    """Клавиша Menu («листок»): у её светодиода умерли зелёный и синий каналы — при любом цвете она горела красным.
+    Гасится после каждого применения цвета (yumi_kbkey, HID++ 0x8080 напрямую; OpenRGB путает номера клавиш)."""
+    try:
+        import yumi_kbkey
+        yumi_kbkey.dark_keys()
+    except Exception:
+        pass
+
+
 def apply(s):
+    c, ok = apply_color(s)
+    if ok:
+        dark_menu()
+    return c, ok
+
+
+def apply_color(s):
     c = final_color(s)
     # быстрый путь: напрямую серверу OpenRGB (~30 мс; `openrgb --client` каждый раз стартует ~2,5 с)
     sys.path.insert(0, os.path.join(HOME, ".local/lib/yumi/openrgb"))
@@ -58,6 +139,14 @@ def apply(s):
         if yumirgb.set_mode_color(DEVICE, c):
             return c, True
     except ImportError:
+        pass
+    # сервер отвечает, но клавиатуры не видит (после загрузки поднялся раньше прав на hidraw) — `openrgb --client`
+    # спросит тот же сервер и только потратит ~3 с; клавиатуру вернёт yumi-kb-light-watch (перезапуск сервера)
+    import socket
+    try:
+        socket.create_connection(("127.0.0.1", 6742), timeout=0.3).close()
+        return c, False
+    except OSError:
         pass
     r = subprocess.run(["openrgb", "--client", "127.0.0.1:6742", "--noautoconnect", "--device", DEVICE,
                         "--mode", "static", "--color", c], capture_output=True, timeout=30)
@@ -80,10 +169,16 @@ def main(a):
             s["on"] = not s["on"]
         elif cmd == "wall":
             s["source"] = "wall"
+        elif cmd == "sat" and len(a) > 1 and a[1] == "auto":
+            s["sat"] = "auto"
+        elif cmd == "sat" and len(a) > 1 and a[1].isdigit():
+            s["sat"] = max(0, min(100, int(a[1])))
         elif cmd == "color" and len(a) > 1 and re.fullmatch(r"#?[0-9A-Fa-f]{6}", a[1]):
             s["source"], s["color"] = "fixed", a[1].lstrip("#").upper()
         elif cmd == "status":
-            print(json.dumps(s | {"итоговый цвет": final_color(s)}, ensure_ascii=False)); return 0
+            w = wall_color()
+            extra = {"авто": "%d %% — %s" % auto_sat(w)} if s["sat"] == "auto" else {}
+            print(json.dumps(s | {"цвет бара": w} | extra | {"итоговый цвет": final_color(s)}, ensure_ascii=False)); return 0
         else:
             print(__doc__, file=sys.stderr); return 2
         save(s)

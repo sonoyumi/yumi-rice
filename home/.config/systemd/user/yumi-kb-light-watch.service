@@ -1,0 +1,11 @@
+[Unit]
+Description=yumi: цвет обоев на клавиатуре Logitech после сна и переподключения (OpenRGB)
+PartOf=graphical-session.target
+After=graphical-session.target
+[Service]
+ExecStart=%h/.local/bin/yumi-kb-light-watch
+Restart=on-failure
+RestartSec=5
+Slice=background.slice
+[Install]
+WantedBy=graphical-session.target

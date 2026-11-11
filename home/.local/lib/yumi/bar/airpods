@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""Пилюля AirPods (бар Quickshell, 18.10): заряд левого/правого/кейса из канала AAP службы yumi-airpods.
+Поток JSON-строк в формате Waybar (BarScript interval 0): {"text":"80%","tooltip":…,"class":…,"percentage":80}.
+Сокет службы (aap.relay_path) есть, только пока наушники на связи; при подключении служба сразу отдаёт
+последние пакеты, дальше — каждый новый. Только читаем: всё, что клиент пишет в сокет, уходит наушникам.
+Классы: off (не подключены — пилюля скрыта), connected, charging, low (≤ 20 %), critical (≤ 10 %).
+text — меньший заряд из наушников вне кейса/в ушах; пока заряд неизвестен — пусто (только значок)."""
+import glob
+import json
+import os
+import select
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi/panel"))
+import aap  # noqa: E402
+
+RUN = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+NAMES = (("left", "Левый"), ("right", "Правый"), ("single", "Наушник"), ("case", "Кейс"))
+last = None
+
+
+def emit(obj):
+    global last
+    line = json.dumps(obj, ensure_ascii=False)
+    if line != last:
+        print(line, flush=True)
+        last = line
+
+
+def alias(mac):
+    try:
+        out = subprocess.run(["bluetoothctl", "info", mac], capture_output=True, text=True, timeout=3).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return "AirPods"
+    for ln in out.splitlines():
+        if ln.strip().startswith("Alias:"):
+            return ln.split(":", 1)[1].strip()
+    return "AirPods"
+
+
+def render(name, battery):
+    parts, buds, charging = [], [], False
+    for key, title in NAMES:
+        b = battery.get(key)
+        if not b or not b.get("available") or not 0 <= b.get("level", -1) <= 100:
+            continue
+        ch = b.get("status") == "charging"
+        parts.append(f"{title} {b['level']} %" + (" 󱐋" if ch else "") + (f" ({b['ago']})" if b.get("last") else ""))
+        if key != "case":
+            buds.append(b["level"])
+            charging = charging or ch
+    tip = name + ("\n" + " · ".join(parts) if parts else "\nЗаряд: ждём данные")
+    if not buds:
+        return {"text": "", "tooltip": tip, "class": "connected"}
+    p = min(buds)
+    cls = "charging" if charging else ("critical" if p <= 10 else ("low" if p <= 20 else "connected"))
+    return {"text": f"{p}%", "tooltip": tip, "class": cls, "percentage": p}
+
+
+def watch(path):
+    mac = ":".join(path.rsplit("-", 1)[1].split(".")[0][i:i + 2] for i in range(0, 12, 2))
+    s = aap.open_relay(mac)
+    if s is None:
+        return
+    name, st = alias(mac), aap.State()
+    emit({"text": "", "tooltip": name, "class": "connected"})
+    try:
+        while True:
+            ready, _, _ = select.select([s], [], [], 5)
+            if not ready:
+                if not os.path.exists(path):
+                    return
+                continue
+            data = s.recv(8192)
+            if not data:
+                return
+            if st.handle(data) and data[4:6] == aap.OP_BATTERY.to_bytes(2, "little"):
+                emit(render(name, aap.with_last_case(mac, st.battery)))   # кейс закрыт — последний известный (18.10)
+    except OSError:
+        return
+    finally:
+        s.close()
+
+
+def main():
+    while True:
+        socks = sorted(glob.glob(os.path.join(RUN, "yumi-airpods-*.sock")))
+        if socks:
+            watch(socks[0])
+        emit({"text": "", "tooltip": "", "class": "off"})
+        time.sleep(2)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (KeyboardInterrupt, BrokenPipeError):
+        pass

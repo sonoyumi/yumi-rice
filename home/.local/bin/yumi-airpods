@@ -13,6 +13,10 @@
 заменяет первое); каждое — раз за цикл разряда. Сброс: наушники заряжаются (в кейсе) или заряд снова выше
 порога на 3 %; при зарядке критическое закрывается. Выключить: "battery_notify": false в airpods.json.
 
+Выход по умолчанию (18.10): AirPods подключились — их выход PipeWire становится выходом по умолчанию, чтобы свайп
+по ножке (аппаратная громкость AirPods), клавиши громкости и проценты в баре были одной общей громкостью; при
+отключении WirePlumber сам возвращает звук на динамики. Выключить: "default_output": false в airpods.json.
+
 Канал AAP может держать только одна программа, поэтому служба отдаёт его через сокет aap.relay_path(mac):
 меню yumi-menu-bluetooth (aap.Session) подключается туда, получает последние пакеты и дальше всё
 пересылается в обе стороны.
@@ -27,6 +31,7 @@ import select
 import socket
 import subprocess
 import sys
+import threading
 import time
 
 sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi/panel"))
@@ -35,8 +40,10 @@ import json  # noqa: E402
 
 DRY = os.environ.get("YP_DRYRUN") == "1"
 POLL_S = 3.0
+CASE_OFF_S = 0                                    # 30.10: оба наушника в кейсе столько секунд — отключить Bluetooth (0 — сразу)
+CASE_SINCE = None                                 # с какого момента оба в кейсе (time.monotonic), None — нет
 LOCK_POLL_S = 2.0                                 # как часто проверять, не заблокирован ли экран (hyprlock)
-STEM_MASK = 0x06                                  # 0x02 двойное | 0x04 тройное
+STEM_MASK = 0x0E                                  # 0x02 двойное | 0x04 тройное | 0x08 зажатие (18.10: режимы по кругу)
 SILENT_S, SILENT_TRIES = 3.0, 3                   # канал открыт, а наушники молчат (вернулись с айфона и
                                                   # пропустили рукопожатие) — повторить, потом переоткрыть
 ACTIONS = {"double": ("next",), "triple": ("previous",)}
@@ -82,6 +89,62 @@ def cache_key(data):
     return None
 
 
+MODE_NAMES = {1: "выкл", 2: "шумоподавление", 3: "прозрачность", 4: "адаптивный"}
+
+
+def hold_cycle():
+    """Режимы, между которыми ходит зажатие ножки (как «Нажатие и удержание» на iPhone). airpods.json: "hold_cycle"."""
+    try:
+        with open(aap.PREFS) as f:
+            c = [int(m) for m in json.load(f).get("hold_cycle", [2, 3, 4]) if int(m) in aap.MODES]
+        return c or [2, 3, 4]
+    except (OSError, ValueError, AttributeError, TypeError):
+        return [2, 3, 4]
+
+
+def cycle_mode(sock, cache):
+    """Зажатие ножки → следующий режим шумоподавления по кругу; текущий — из последнего пакета настройки 0x0D."""
+    cur = cache.get((aap.OP_CONTROL, aap.S_MODE))
+    cur = cur[7] if cur and len(cur) > 7 else None
+    allowed = cache.get((aap.OP_CONTROL, aap.S_ALLOWED))
+    mask = allowed[7] if allowed and len(allowed) > 7 and allowed[7] else 0x0F
+    modes = [m for m in hold_cycle() if mask & (1 << (m - 1))] or hold_cycle()
+    nxt = modes[(modes.index(cur) + 1) % len(modes)] if cur in modes else modes[0]
+    log("зажатие ножки → режим:", MODE_NAMES.get(nxt, nxt))
+    if not DRY:
+        sock.send(aap.set_packet(aap.S_MODE, nxt))
+
+
+class ModePop:
+    """Пузырь режима с задержкой: пачка пакетов режима схлопывается, «выкл → тот же режим» не показывается."""
+    def __init__(self):
+        self.base, self.timer, self.lock = None, None, threading.Lock()
+
+    def packet(self, mode, prev):
+        with self.lock:
+            if self.base is None:
+                self.base = prev                      # режим до пачки
+            if self.timer:
+                self.timer.cancel()
+            self.timer = threading.Timer(1.0, self.fire, args=(mode,))
+            self.timer.daemon = True
+            self.timer.start()
+
+    def fire(self, mode):
+        with self.lock:
+            base, self.base, self.timer = self.base, None, None
+        if mode == base:
+            log("режим вернулся к", MODE_NAMES.get(mode, mode), "— без пузыря (наушник вынимали/надевали)")
+            return
+        log("режим →", MODE_NAMES.get(mode, mode))
+        if not DRY:
+            subprocess.Popen(["qs", "-c", "yumi", "ipc", "call", "--", "airpodsPopup", "mode", str(mode)],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+MODE_POP = ModePop()
+
+
 def on_stem(data):
     if len(data) < 7:
         return
@@ -92,13 +155,145 @@ def on_stem(data):
         subprocess.Popen(["playerctl", *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def on_ear(data, ear_pause):
-    """Наушник вынули — пауза, оба снова в ушах — продолжить (как на айфоне). Выключается в airpods.json."""
-    if len(data) < 8 or not aap.load_prefs()["pause_on_removal"]:
+def on_ear(data, ear_pause, mac=None):
+    """Наушник вынули — пауза, оба снова в ушах — продолжить (как на айфоне). Выключается в airpods.json.
+    18.10: оба в кейсе — звук и микрофон на прошлое устройство (CASE_ROUTE), не зависит от pause_on_removal."""
+    if len(data) < 8:
         return
     ear = {"primary": data[6], "secondary": data[7]}
+    if mac:
+        CASE_ROUTE.update(mac, ear)
+    # 30.10: оба в кейсе — через CASE_OFF_S отключить (как у айфона после закрытия кейса); вынули — отменить
+    global CASE_SINCE
+    both = all(aap.EAR_STATE.get(v) == "in-case" for v in ear.values())
+    if not both:
+        CASE_SINCE = None
+    elif CASE_SINCE is None:
+        CASE_SINCE = time.monotonic()
+        if CASE_OFF_S <= 0 and mac and aap.load_prefs().get("case_disconnect", True):
+            CASE_SINCE = None
+            log("оба наушника в кейсе → отключаю Bluetooth сразу")
+            if not DRY:
+                subprocess.Popen(["bluetoothctl", "disconnect", mac], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if not aap.load_prefs()["pause_on_removal"]:
+        return
     log("уши:", {k: aap.EAR_STATE.get(v, v) for k, v in ear.items()})
     ear_pause.update(ear)
+
+
+def pactl(*args):
+    try:
+        return subprocess.run(["pactl", *args], capture_output=True, text=True, timeout=3).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def case_route_enabled():
+    try:
+        with open(aap.PREFS) as f:
+            return bool(json.load(f).get("case_to_previous", True))
+    except (OSError, ValueError, AttributeError):
+        return True
+
+
+class CaseRoute:
+    """Оба наушника в кейсе → звук и микрофон уходят на прошлое устройство (то, что было выходом по умолчанию
+    до AirPods; иначе — динамики), потоки с AirPods переносятся туда же. Наушник снова в ухе → всё назад на
+    AirPods. Как iPhone/Mac. Выключить: "case_to_previous": false в airpods.json (18.10)."""
+    SPEAKERS, MIC = "audio_effect.j293-convolver", "effect_output.j293-mic"
+
+    def __init__(self):
+        self.prev_sink = None          # выход по умолчанию до AirPods (запоминает make_default)
+        self.parked = False
+        self.mic_moved = False         # микрофон увели с AirPods — вернуть вместе со звуком
+
+    def remember(self, sink):
+        if sink and not sink.startswith("bluez_"):
+            self.prev_sink = sink
+
+    @staticmethod
+    def _names(kind):
+        return [ln.split("\t")[1] for ln in pactl("list", "short", kind).splitlines() if "\t" in ln]
+
+    def _move(self, kind, frm_prefix, to):
+        """Перенести потоки (sink-inputs / source-outputs) с устройства frm_prefix* на to."""
+        devs = {ln.split("\t")[0]: ln.split("\t")[1] for ln in pactl("list", "short", kind + "s").splitlines()
+                if "\t" in ln}
+        what = "sink-input" if kind == "sink" else "source-output"
+        for ln in pactl("list", "short", what + "s").splitlines():
+            f = ln.split("\t")
+            if len(f) > 1 and devs.get(f[1], "").startswith(frm_prefix):
+                if not DRY:
+                    pactl("move-" + what, f[0], to)
+
+    def update(self, mac, ear):
+        if not case_route_enabled():
+            return
+        both_in_case = ear.get("primary") == 0x02 and ear.get("secondary") == 0x02
+        in_ear = 0x00 in ear.values()
+        key = mac.replace(":", "_")
+        if both_in_case and not self.parked:
+            sinks = self._names("sinks")
+            to = self.prev_sink if self.prev_sink in sinks else (self.SPEAKERS if self.SPEAKERS in sinks else
+                 next((n for n in sinks if not n.startswith("bluez_")), None))
+            if not to:
+                return
+            self.parked = True
+            log("оба наушника в кейсе → звук на", to)
+            if not DRY:
+                pactl("set-default-sink", to)
+            self._move("sink", "bluez_output." + key, to)
+            srcs = self._names("sources")
+            if self.MIC in srcs and "yumi_mic" not in srcs:   # микрофоном управляет yumi-mic, если запущен
+                if pactl("get-default-source").startswith("bluez_input."):
+                    self.mic_moved = True
+                    if not DRY:
+                        pactl("set-default-source", self.MIC)
+                self._move("source", "bluez_input.", self.MIC)
+        elif in_ear and self.parked:
+            self.parked = False
+            threading.Thread(target=self._back, args=(key,), daemon=True).start()
+
+    def _profile(self, key):
+        for blk in pactl("list", "cards").split("\n\n"):
+            if "bluez_card." + key in blk:
+                for ln in blk.splitlines():
+                    if "Active Profile:" in ln:
+                        return ln.split(":", 1)[1].strip()
+        return ""
+
+    def _back(self, key):
+        """Назад на AirPods. Порядок важен (18.10): сначала микрофон — WirePlumber из-за него переключит профиль
+        AAC → гарнитура; дождаться, пока профиль устоится, и только потом переносить звук. Одновременный перенос
+        ломал транспорт Bluetooth (spa.bluez5: Failure in Bluetooth audio transport) — звук хрипел до переподключения."""
+        mic = next((n for n in self._names("sources") if n.startswith("bluez_input.")), None)
+        if self.mic_moved and mic:
+            self.mic_moved = False
+            if not DRY:
+                pactl("set-default-source", mic)
+            self._move("source", self.MIC, mic)
+            prof, same = self._profile(key), 0
+            for _ in range(16):                       # до 4 с: профиль не менялся 1 с подряд
+                time.sleep(0.25)
+                cur = self._profile(key)
+                same = same + 1 if cur == prof else 0
+                prof = cur
+                if same >= 4 and prof.startswith("headset"):
+                    break
+            time.sleep(0.5)
+        out = next((n for n in self._names("sinks") if n.startswith("bluez_output." + key)), None)
+        if not out:
+            return
+        log("наушник в ухе → звук снова на", out)
+        cur = pactl("get-default-sink")
+        self.remember(cur)
+        if not DRY:
+            pactl("set-default-sink", out)
+        if cur and not cur.startswith("bluez_"):
+            self._move("sink", cur, out)
+
+
+CASE_ROUTE = CaseRoute()
 
 
 class BatteryNotify:
@@ -197,7 +392,9 @@ BATTERY = BatteryNotify(dry=DRY)
 
 
 def screen_locked():
-    return subprocess.run(["pgrep", "-x", "hyprlock"], stdout=subprocess.DEVNULL).returncode == 0
+    # экран Quickshell (флаг yumi-locked) или запасной hyprlock — см. yumi-lock --status
+    return subprocess.run([os.path.expanduser("~/.local/bin/yumi-lock"), "--status"],
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
 
 
 RESUME = []                                # плееры, поставленные на паузу при блокировке
@@ -328,6 +525,7 @@ def serve(mac):
     os.chmod(path, 0o600)
     lst.listen(4)
     cache, clients = {}, []
+    mode_seen = None
     takeover = Takeover(s)
     heard, hs_tries, hs_at = False, 0, time.monotonic()
     log("канал AAP открыт:", mac)
@@ -350,6 +548,14 @@ def serve(mac):
                 resume()
             was_locked = locked
             takeover.tick()
+            global CASE_SINCE
+            if CASE_SINCE is not None and time.monotonic() - CASE_SINCE >= CASE_OFF_S:
+                CASE_SINCE = None
+                if aap.load_prefs().get("case_disconnect", True):
+                    log(f"оба наушника в кейсе {CASE_OFF_S} с → отключаю Bluetooth")
+                    if not DRY:
+                        subprocess.Popen(["bluetoothctl", "disconnect", mac], stdout=subprocess.DEVNULL,
+                                         stderr=subprocess.DEVNULL)
             if not heard and not locked and time.monotonic() - hs_at >= SILENT_S:
                 if hs_tries >= SILENT_TRIES:
                     raise OSError("наушники не отвечают — переоткрываю канал AAP")
@@ -368,17 +574,33 @@ def serve(mac):
                         break
                     if not data:
                         raise OSError("канал закрыт наушниками")
-                    heard = True
                     key = cache_key(data)
                     if key is not None:
                         cache[key] = data
                     op = int.from_bytes(data[4:6], "little") if data.startswith(aap.HDR) else None
                     if op == aap.OP_STEM:
-                        on_stem(data)
+                        if len(data) >= 7 and aap.STEM_PRESS.get(data[6]) == "long":
+                            cycle_mode(s, cache)
+                        else:
+                            on_stem(data)
                     elif op == aap.OP_EAR:
-                        on_ear(data, ear_pause)
+                        on_ear(data, ear_pause, mac)
+                    elif op == aap.OP_CONTROL and len(data) > 7 and data[6] == aap.S_MODE:
+                        # 30.10: смена режима шумоподавления → пузырь острова. Наушник сам скачет «выкл → прежний»,
+                        # когда его вынимают/надевают, — поэтому пузырь через 1 с тишины и только если режим
+                        # правда другой, чем до пачки пакетов (первый пакет после подключения — без пузыря)
+                        if mode_seen is not None:
+                            MODE_POP.packet(data[7], mode_seen)
+                        mode_seen = data[7]
+                        takeover.packet(op, data)
                     elif op == aap.OP_BATTERY:
+                        # живой канал = пришла батарея (18.10): 18:02 канал открылся, шли служебные пакеты, а
+                        # батареи/ушей не было и режимы не применялись — считаем это молчанием и переоткрываем
+                        heard = True
                         try:
+                            st = aap.State()
+                            if st.handle(data):
+                                aap.remember_case(mac, st.battery)
                             BATTERY.packet(data)
                         except Exception as e:          # заряд — дополнение: не ронять канал из-за него
                             log("заряд: ошибка", e)
@@ -417,12 +639,64 @@ def serve(mac):
             pass
 
 
+def default_output_enabled():
+    try:
+        with open(aap.PREFS) as f:
+            return bool(json.load(f).get("default_output", True))
+    except (OSError, ValueError, AttributeError):
+        return True
+
+
+def make_default(mac):
+    """Сделать выход AirPods выходом по умолчанию: ждём узел bluez_output.<mac> до 10 с (появляется после профиля)."""
+    if not default_output_enabled():
+        return
+    prefix = "bluez_output." + mac.replace(":", "_")
+    for _ in range(20):
+        try:
+            sinks = subprocess.run(["pactl", "list", "short", "sinks"], capture_output=True, text=True,
+                                   timeout=3).stdout.split("\n")
+        except (OSError, subprocess.SubprocessError):
+            sinks = []
+        name = next((ln.split("\t")[1] for ln in sinks if "\t" + prefix in ln), None)
+        if name:
+            CASE_ROUTE.remember(pactl("get-default-sink"))     # куда вернуть звук, когда наушники уйдут в кейс
+            log("выход по умолчанию →", name)
+            if not DRY:
+                subprocess.run(["pactl", "set-default-sink", name], stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=3)
+            return
+        time.sleep(0.5)
+    log("выход AirPods так и не появился — выход по умолчанию не менялся")
+
+
+def notify_connected(mac):
+    """Уведомление «AirPods подключены» сверху по центру (Quickshell menus/airpods/AirPodsPopup.qml)."""
+    name = "AirPods"
+    try:
+        info = subprocess.run(["bluetoothctl", "info", mac], capture_output=True, text=True, timeout=5).stdout
+        name = next((ln.split(":", 1)[1].strip() for ln in info.splitlines() if ln.strip().startswith("Alias:")), name)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    log("уведомление: подключены", name)
+    if not DRY:
+        subprocess.Popen(["qs", "-c", "yumi", "ipc", "call", "--", "airpodsPopup", "show", name],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def main():
     last_err = None
+    was = connected_airpods()                  # уже подключены при старте службы — уведомление не показываем
+    if was:
+        threading.Thread(target=make_default, args=(was,), daemon=True).start()
     while True:
         mac = connected_airpods()
         if not mac:
             Takeover.taken = False             # наушники отключились — при следующем подключении забрать снова
+        elif mac != was:
+            threading.Thread(target=make_default, args=(mac,), daemon=True).start()
+            notify_connected(mac)
+        was = mac
         if mac:
             try:
                 serve(mac)

@@ -1,0 +1,154 @@
+#!/usr/bin/env -S python3 -I
+"""Бэкенд меню «Обои» для Quickshell (menus/wallpaper/WallpaperMenu.qml). Разовые вызовы, одна JSON-строка в stdout:
+  wallpaper list        {"type":"list","dir","current","dry","items":[{"path","name","coll","thumb"}]}
+                        обои из ~/Pictures/Wallpapers (YP_WP_DIR — другая папка), как list_walls() в yumi-menu-wallpaper;
+                        thumb — готовая миниатюра yumi-wallpaper (~/.cache/yumi/theme/thumbs/<sha1>.thmb) или "" (тогда сам файл).
+                        sha1 — общий кэш с GTK-меню: ~/.cache/yumi-panel/wall-hashes.json (путь+размер+время изменения).
+  wallpaper set ФАЙЛ    `yumi-wallpaper set ФАЙЛ` → {"type":"result","ok","out","current"}
+  wallpaper accents     по строке на обои: {"type":"acc","path","xa":[9 тонов],"deep","bg","btn","hov","mono"} — те же
+                        цвета, что посчитает yumi-accent (палитра из его кэша k-means; новые обои — magick, ~0,2 с)
+  list отдаёт и "colls": [{"name","preview"}] — стили (подпапки) с обложкой .preview.jpg (или "")
+YP_DRYRUN=1 — обои не меняются: команда пишется в stderr, результат имитируется через 0,9 с."""
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import time
+
+DRY = os.environ.get("YP_DRYRUN") == "1"
+HOME = os.path.expanduser("~")
+CACHE = os.path.join(HOME, ".cache/yumi/theme")
+THUMBS = os.path.join(CACHE, "thumbs")
+WALL_SET = os.path.join(CACHE, "wall.set")
+HASH_DB = os.path.join(HOME, ".cache/yumi-panel/wall-hashes.json")
+YUMI_WALLPAPER = os.path.join(HOME, ".local/bin/yumi-wallpaper")
+EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp")
+
+
+def out(d):
+    print(json.dumps(d, ensure_ascii=False), flush=True)
+
+
+def theme_dir():
+    return os.environ.get("YP_WP_DIR") or os.path.join(HOME, "Pictures/Wallpapers")
+
+
+def list_walls(d):
+    res = []
+    for root, dirs, files in os.walk(os.path.realpath(d)):
+        dirs[:] = [x for x in dirs if x != "logo" and not x.startswith(".")]
+        res += [os.path.join(root, f) for f in files if f.lower().endswith(EXTS) and not f.startswith(".")]
+    return sorted(res)
+
+
+def load_db():
+    try:
+        with open(HASH_DB) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def sha1(path, db, changed):
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    key = f"{st.st_size}:{int(st.st_mtime)}"
+    rec = db.get(path)
+    if rec and rec[0] == key:
+        return rec[1]
+    h = hashlib.sha1()
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+    except OSError:
+        return None
+    db[path] = [key, h.hexdigest()]
+    changed.append(path)
+    return h.hexdigest()
+
+
+def save_db(db, keep):
+    try:
+        os.makedirs(os.path.dirname(HASH_DB), exist_ok=True)
+        tmp = HASH_DB + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({p: v for p, v in db.items() if p in keep}, f)
+        os.replace(tmp, HASH_DB)
+    except OSError:
+        pass
+
+
+def cmd_list():
+    d = theme_dir()
+    base = os.path.realpath(d)
+    db, changed = load_db(), []
+    items = []
+    for p in list_walls(d):
+        h = sha1(p, db, changed)
+        th = os.path.join(THUMBS, f"{h}.thmb") if h else ""
+        rel = os.path.relpath(os.path.dirname(p), base)
+        items.append({"path": p, "name": os.path.splitext(os.path.basename(p))[0],
+                      "file": os.path.basename(p),
+                      "key": os.path.relpath(p, base).casefold(),          # поиск по имени и по коллекции
+                      "coll": "" if rel == "." else rel.split(os.sep)[0],
+                      "thumb": th if th and os.path.exists(th) else "",
+                      "big": big if h and os.path.exists(big := os.path.join(CACHE, "scaled", f"{h}-1920x1080.jpg")) else ""})
+    if changed and not os.environ.get("YP_WP_DIR"):
+        save_db(db, {it["path"] for it in items})
+    colls = []
+    for c in sorted({it["coll"] for it in items if it["coll"]}):
+        pv = os.path.join(base, c, ".preview.jpg")
+        colls.append({"name": c, "preview": pv if os.path.exists(pv) else ""})
+    out({"type": "list", "dir": d, "current": os.path.realpath(WALL_SET), "dry": DRY, "items": items, "colls": colls})
+
+
+def cmd_accents():
+    """Акцент и фоны каждых обоев заранее — для предпросмотра в виджете (расчёт как в main() yumi-accent)."""
+    from importlib.machinery import SourceFileLoader
+    ya = SourceFileLoader("yumi_accent", os.path.join(HOME, ".local/bin/yumi-accent")).load_module()
+    for p in list_walls(theme_dir()):
+        try:
+            pick = ya.pick_hue(ya.palette(p + "[0]"))
+        except Exception:  # noqa: BLE001
+            continue
+        if pick:
+            h = pick[0]
+            xa = [ya.hexrgb(h, s / 100, b / 100) for b, s in ya.CURVE]
+            tones = [ya.hexrgb(h, sat, val) for sat, val in ((0.38, 0.11), (0.34, 0.16), (0.30, 0.27), (0.30, 0.40))]
+        else:
+            xa = [ya.hexrgb(0, 0, b / 100) for b, _s in ya.CURVE]
+            tones = [ya.hexrgb(0, 0, val) for val in (0.11, 0.16, 0.27, 0.40)]
+        out({"type": "acc", "path": p, "xa": xa, "deep": tones[0], "bg": tones[1], "btn": tones[2], "hov": tones[3],
+             "mono": not pick})
+
+
+def cmd_set(path):
+    cmd = [YUMI_WALLPAPER, "set", path]
+    if DRY:
+        print("[dry-run]", " ".join(cmd), file=sys.stderr, flush=True)
+        time.sleep(0.9)
+        out({"type": "result", "ok": True, "out": "", "current": os.path.realpath(path), "dry": True})
+        return
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        ok, msg = r.returncode == 0, (r.stdout + r.stderr).strip()
+    except Exception as e:  # noqa: BLE001
+        ok, msg = False, str(e)
+    out({"type": "result", "ok": ok, "out": msg, "current": os.path.realpath(WALL_SET), "dry": False})
+
+
+if __name__ == "__main__":
+    a = sys.argv[1:]
+    if a[:1] == ["list"]:
+        cmd_list()
+    elif a[:1] == ["accents"]:
+        cmd_accents()
+    elif a[:1] == ["set"] and len(a) == 2:
+        cmd_set(a[1])
+    else:
+        print(__doc__, file=sys.stderr)
+        sys.exit(2)

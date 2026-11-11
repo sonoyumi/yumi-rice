@@ -1,0 +1,11 @@
+#!/bin/sh
+# yumi-greeter: экран входа greetd (после выхода из Hyprland) — цвета, акцент и обои как у экрана блокировки.
+# Обновляет копию в /var/lib/yumi-greeter (yumi-greeter-sync --quick) в фоне; одновременные запуски sync
+# выстраивает в очередь сам (flock). Откат: yumi-greeter-uninstall.
+[ -n "${YUMI_COLORS_WARM:-}" ] && exit 0     # прогрев кэша: wall.set временно указывает на чужие обои
+S="$HOME/.local/bin/yumi-greeter-sync"
+D="${YUMI_GREETER_ROOT:-/var/lib/yumi-greeter}"
+[ -x "$S" ] || exit 0
+[ -d "$D/home" ] && [ -w "$D/home" ] || exit 0   # экран входа не установлен (или откачен) — молча
+setsid -f nice -n 10 "$S" --quick >/dev/null 2>&1 </dev/null
+exit 0

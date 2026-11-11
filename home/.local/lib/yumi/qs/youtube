@@ -1,0 +1,484 @@
+#!/usr/bin/python3 -I
+"""YumiTube — бэкенд YouTube-клиента (menus/youtube). Печатает одну JSON-строку на запрос.
+
+  youtube search <запрос> [n]        поиск через yt-dlp
+  youtube feed [--refresh]           лента подписок (RSS каналов, кэш 10 мин; запасной путь — yt-dlp)
+  youtube channel <id>               последние видео канала
+  youtube sub add <ссылка|@handle|UC…> | sub rm <id> | subs
+  youtube import <файл|папка>        Google Takeout: subscriptions.csv, watch-history.json, CSV плейлистов
+                                     («Смотреть позже» / Watch later) — можно дать всю распакованную папку Takeout
+  youtube rec                        рекомендации аккаунта (нужен вход: settings account, напр. "chromium+gnomekeyring")
+  youtube account check | account import   проверить вход / забрать из аккаунта историю, «Позже» и каналы
+  youtube later add <json> | later rm <id> | later
+  youtube history | history clear
+  youtube settings [<json>]          прочитать / записать (слить) настройки
+  youtube play <id> [quality] [audio] [json]  записать в историю и запустить mpv (exec)
+Данные: ~/.config/yumi/youtube/*.json, кэш ленты: ~/.cache/yumi/youtube/feed.json
+"""
+import csv, json, os, re, subprocess, sys, time
+import urllib.request
+import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+
+HOME = os.path.expanduser("~")
+CFG = os.path.join(HOME, ".config/yumi/youtube")
+CACHE = os.path.join(HOME, ".cache/yumi/youtube")
+YTDLP = os.path.join(HOME, ".local/bin/yt-dlp") if os.path.exists(os.path.join(HOME, ".local/bin/yt-dlp")) else "yt-dlp"
+FEED_TTL = 600
+UA = "Mozilla/5.0 (X11; Linux aarch64) Gecko/20100101 Firefox/140.0"
+
+QUALITY = {
+    "720":  "bestvideo[height<=?720][vcodec^=av01]+bestaudio/bestvideo[height<=?720]+bestaudio/best",
+    "1080": "bestvideo[height<=?1080][vcodec^=av01]+bestaudio/bestvideo[height<=?1080]+bestaudio/best",
+    "1440": "bestvideo[height<=?1440][vcodec^=av01]+bestaudio/bestvideo[height<=?1440]+bestaudio/best",
+    "2160": "bestvideo[height<=?2160][vcodec^=av01]+bestaudio/bestvideo+bestaudio/best",
+}
+DEFAULTS = {"quality": "1080", "shorts": False, "account": "", "volume": 100, "autoplay": True}   # account: браузер для --cookies-from-browser
+
+
+def out(obj):
+    sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+
+def load(name, default):
+    try:
+        with open(os.path.join(CFG, name + ".json"), encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return default
+
+
+def save(name, data):
+    os.makedirs(CFG, exist_ok=True)
+    p = os.path.join(CFG, name + ".json")
+    tmp = p + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, p)
+
+
+def thumb(vid):
+    return f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg"
+
+
+def account():
+    """Браузер для --cookies-from-browser. Без «:профиль» — профиль Chromium с самыми свежими cookies
+    (у пользователя это «Profile 1», а yt-dlp по умолчанию смотрит в Default)."""
+    acc = dict(DEFAULTS, **load("settings", {})).get("account") or ""
+    if acc.startswith("chromium") and ":" not in acc:
+        base = os.path.join(HOME, ".config/chromium")
+        try:
+            profs = [p for p in os.listdir(base) if os.path.exists(os.path.join(base, p, "Cookies"))]
+        except OSError:
+            profs = []
+        if profs:
+            acc += ":" + max(profs, key=lambda p: os.path.getmtime(os.path.join(base, p, "Cookies")))
+    return acc
+
+
+def ytdlp_json(args, timeout=60, auth=False):
+    if auth:
+        if not account():
+            raise RuntimeError("аккаунт не подключён")
+        args = ["--cookies-from-browser", account(), *args]
+    r = subprocess.run([YTDLP, "--no-warnings", "--flat-playlist", "-J", *args],
+                       capture_output=True, text=True, timeout=timeout)
+    if r.returncode != 0:
+        msg = (r.stderr.strip().splitlines() or ["yt-dlp: ошибка"])[-1]
+        raise RuntimeError(msg.replace("ERROR: ", ""))
+    return json.loads(r.stdout)
+
+
+def norm_entry(e, ch=None, chid=None):
+    vid = e.get("id") or ""
+    url = e.get("url") or ""
+    return {
+        "id": vid,
+        "title": e.get("title") or "",
+        "channel": e.get("channel") or e.get("uploader") or ch or "",
+        "channelId": e.get("channel_id") or chid or "",
+        "duration": int(e["duration"]) if e.get("duration") else 0,
+        "views": e.get("view_count") or 0,
+        "live": e.get("live_status") == "is_live",
+        "short": "/shorts/" in url,
+        "ts": int(e.get("timestamp") or e.get("release_timestamp") or 0),
+        "thumb": thumb(vid),
+    }
+
+
+# ---------- поиск / канал ----------
+def search(q, n=30):
+    d = ytdlp_json([f"ytsearch{n}:{q}"])
+    items = [norm_entry(e) for e in d.get("entries") or [] if e.get("id") and e.get("ie_key", "Youtube") == "Youtube"]
+    return {"ok": True, "kind": "search", "query": q, "items": items}
+
+
+NS = {"a": "http://www.w3.org/2005/Atom", "yt": "http://www.youtube.com/xml/schemas/2015",
+      "media": "http://search.yahoo.com/mrss/"}
+
+
+def rss(chid):
+    req = urllib.request.Request(f"https://www.youtube.com/feeds/videos.xml?channel_id={chid}", headers={"User-Agent": UA})
+    with urllib.request.urlopen(req, timeout=12) as r:
+        root = ET.fromstring(r.read())
+    name = root.findtext("a:title", "", NS)
+    items = []
+    for e in root.findall("a:entry", NS):
+        vid = e.findtext("yt:videoId", "", NS)
+        link = e.find("a:link", NS)
+        stats = e.find("media:group/media:community/media:statistics", NS)
+        pub = e.findtext("a:published", "", NS)
+        try:
+            ts = int(datetime.fromisoformat(pub).timestamp())
+        except ValueError:
+            ts = 0
+        items.append({
+            "id": vid, "title": e.findtext("a:title", "", NS), "channel": name, "channelId": chid,
+            "duration": 0, "views": int(stats.get("views", 0)) if stats is not None else 0, "live": False,
+            "short": link is not None and "/shorts/" in link.get("href", ""), "ts": ts, "thumb": thumb(vid),
+        })
+    return name, items
+
+
+def channel_ytdlp(chid, n=20):
+    d = ytdlp_json(["-I", f"1:{n}", f"https://www.youtube.com/channel/{chid}/videos"])
+    name = d.get("channel") or d.get("uploader") or ""
+    return name, [norm_entry(e, name, chid) for e in d.get("entries") or [] if e.get("id")]
+
+
+def channel(chid):
+    try:
+        name, items = channel_ytdlp(chid)       # здесь есть длительность и просмотры
+    except Exception:
+        name, items = rss(chid)
+    subs = load("subs", [])
+    return {"ok": True, "kind": "channel", "id": chid, "name": name, "items": items,
+            "subscribed": any(s["id"] == chid for s in subs)}
+
+
+def feed(refresh=False):
+    cp = os.path.join(CACHE, "feed.json")
+    subs = load("subs", [])
+    if not refresh:
+        try:
+            if time.time() - os.path.getmtime(cp) < FEED_TTL:
+                with open(cp, encoding="utf-8") as f:
+                    c = json.load(f)
+                if c.get("subs") == [s["id"] for s in subs]:
+                    c["cached"] = True
+                    return c
+        except (OSError, ValueError):
+            pass
+
+    def one(s):
+        try:
+            return rss(s["id"])[1], None
+        except Exception:
+            try:
+                return channel_ytdlp(s["id"], 8)[1], None
+            except Exception as e:
+                return [], f'{s.get("name", s["id"])}: {e}'
+
+    items, errors = [], []
+    with ThreadPoolExecutor(8) as ex:
+        for got, err in ex.map(one, subs):
+            items += got
+            if err:
+                errors.append(err)
+    items.sort(key=lambda x: x["ts"], reverse=True)
+    res = {"ok": True, "kind": "feed", "items": items[:300], "errors": errors,
+           "subs": [s["id"] for s in subs], "time": int(time.time())}
+    os.makedirs(CACHE, exist_ok=True)
+    with open(cp + ".tmp", "w", encoding="utf-8") as f:
+        json.dump(res, f, ensure_ascii=False)
+    os.replace(cp + ".tmp", cp)
+    return res
+
+
+# ---------- подписки ----------
+def resolve(s):
+    s = s.strip()
+    if re.fullmatch(r"UC[\w-]{22}", s):
+        url = f"https://www.youtube.com/channel/{s}"
+    elif s.startswith("@"):
+        url = f"https://www.youtube.com/{s}"
+    elif s.startswith("http"):
+        url = s
+    else:
+        url = f"https://www.youtube.com/@{s}"
+    if "/watch" in url or "youtu.be/" in url:
+        d = ytdlp_json(["--no-playlist", url])
+    else:
+        d = ytdlp_json(["-I", "1:1", url.rstrip("/") + ("" if url.rstrip("/").endswith("/videos") else "/videos")])
+    chid = d.get("channel_id") or ""
+    if not chid:
+        raise RuntimeError("канал не найден")
+    return {"id": chid, "name": d.get("channel") or d.get("uploader") or chid}
+
+
+def sub_add(arg, name=None):
+    ch = {"id": arg, "name": name} if name and re.fullmatch(r"UC[\w-]{22}", arg) else resolve(arg)
+    subs = load("subs", [])
+    if not any(s["id"] == ch["id"] for s in subs):
+        subs.append(ch)
+        subs.sort(key=lambda s: s["name"].lower())
+        save("subs", subs)
+    return {"ok": True, "kind": "subs", "added": ch, "items": subs}
+
+
+def sub_rm(chid):
+    subs = [s for s in load("subs", []) if s["id"] != chid]
+    save("subs", subs)
+    return {"ok": True, "kind": "subs", "items": subs}
+
+
+def import_csv(path):
+    subs = load("subs", [])
+    have = {s["id"] for s in subs}
+    n = 0
+    with open(path, encoding="utf-8-sig") as f:
+        for row in csv.reader(f):
+            if len(row) >= 3 and re.fullmatch(r"UC[\w-]{22}", row[0].strip()) and row[0].strip() not in have:
+                subs.append({"id": row[0].strip(), "name": row[2].strip()})
+                have.add(row[0].strip())
+                n += 1
+    subs.sort(key=lambda s: s["name"].lower())
+    save("subs", subs)
+    return {"ok": True, "kind": "subs", "imported": n, "items": subs}
+
+
+# ---------- аккаунт (вход из браузера) ----------
+def rec():
+    d = ytdlp_json(["-I", "1:48", ":ytrec"], timeout=120, auth=True)
+    items = [norm_entry(e) for e in d.get("entries") or [] if e.get("id")]
+    return {"ok": True, "kind": "rec", "items": items}
+
+
+def account_check():
+    d = ytdlp_json(["-I", "1:3", ":ytrec"], timeout=120, auth=True)
+    n = len(d.get("entries") or [])
+    if not n:
+        raise RuntimeError("вход не найден — войди в YouTube в браузере")
+    return {"ok": True, "kind": "account", "account": account(), "sample": [e.get("title") for e in d["entries"]]}
+
+
+def merge(name, new, cap=None):
+    old = load(name, [])
+    have = {x["id"] for x in old}
+    add = [x for x in new if x["id"] not in have]
+    lst = old + add if name == "later" else sorted(old + add, key=lambda x: x.get("watched", 0), reverse=True)
+    save(name, lst[:cap] if cap else lst)
+    return len(add)
+
+
+def account_import():
+    res = {"ok": True, "kind": "account"}
+    hist = ytdlp_json(["-I", "1:300", ":ythistory"], timeout=300, auth=True)
+    now = int(time.time())
+    # порядок истории — от новых к старым; точного времени просмотра yt-dlp не даёт → убывающие отметки
+    items = [dict(norm_entry(e), watched=now - i * 60) for i, e in enumerate(hist.get("entries") or []) if e.get("id")]
+    res["history"] = merge("history", items, 1000)
+    later = ytdlp_json([":ytwatchlater"], timeout=300, auth=True)
+    res["later"] = merge("later", [norm_entry(e) for e in later.get("entries") or [] if e.get("id")])
+    subs_feed = ytdlp_json(["-I", "1:400", ":ytsubs"], timeout=300, auth=True)
+    subs = load("subs", [])
+    have = {s["id"] for s in subs}
+    n = 0
+    for e in subs_feed.get("entries") or []:
+        cid, name = e.get("channel_id"), e.get("channel") or e.get("uploader")
+        if cid and name and cid not in have:
+            subs.append({"id": cid, "name": name})
+            have.add(cid)
+            n += 1
+    subs.sort(key=lambda s: s["name"].lower())
+    save("subs", subs)
+    res["subs"] = n
+    return res
+
+
+# ---------- Google Takeout ----------
+WATCHED_PREFIX = re.compile(r"^(Watched|Вы посмотрели|Ви переглянули|Вы смотрели)\s+")
+VID_RE = re.compile(r"(?:v=|youtu\.be/|shorts/)([\w-]{11})")
+
+
+def oembed_titles(ids):
+    def one(vid):
+        try:
+            req = urllib.request.Request(f"https://www.youtube.com/oembed?format=json&url=https://www.youtube.com/watch?v={vid}",
+                                         headers={"User-Agent": UA})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                j = json.load(r)
+            return vid, j.get("title", ""), j.get("author_name", "")
+        except Exception:
+            return vid, "", ""
+    with ThreadPoolExecutor(8) as ex:
+        return {v: (t, a) for v, t, a in ex.map(one, ids)}
+
+
+def import_history_json(path):
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    items = []
+    for e in data:
+        m = VID_RE.search(e.get("titleUrl") or "")
+        if not m or (e.get("header") not in (None, "YouTube")):
+            continue
+        sub = (e.get("subtitles") or [{}])[0]
+        cm = re.search(r"channel/(UC[\w-]{22})", sub.get("url") or "")
+        try:
+            ts = int(datetime.fromisoformat(e["time"].replace("Z", "+00:00")).timestamp())
+        except (KeyError, ValueError):
+            ts = 0
+        items.append({"id": m.group(1), "title": WATCHED_PREFIX.sub("", e.get("title") or ""), "channel": sub.get("name", ""),
+                      "channelId": cm.group(1) if cm else "", "duration": 0, "views": 0, "ts": 0, "watched": ts,
+                      "thumb": thumb(m.group(1)), "short": False, "live": False})
+    seen, uniq = set(), []
+    for x in sorted(items, key=lambda x: x["watched"], reverse=True):
+        if x["id"] not in seen:
+            seen.add(x["id"])
+            uniq.append(x)
+    return merge("history", uniq, 1000)
+
+
+def import_playlist_csv(path):
+    ids = []
+    with open(path, encoding="utf-8-sig") as f:
+        for row in csv.reader(f):
+            if row and re.fullmatch(r"[\w-]{11}", row[0].strip()):
+                ids.append(row[0].strip())
+    names = oembed_titles(ids)
+    items = [{"id": v, "title": names[v][0], "channel": names[v][1], "channelId": "", "duration": 0, "views": 0, "ts": 0,
+              "thumb": thumb(v), "short": False, "live": False} for v in ids if names[v][0]]
+    return merge("later", items)
+
+
+def import_takeout(path):
+    path = os.path.expanduser(path)
+    files = [path] if os.path.isfile(path) else [os.path.join(r, f) for r, _, fs in os.walk(path) for f in fs]
+    res = {"ok": True, "kind": "import", "subs": 0, "history": 0, "later": 0}
+    for p in files:
+        low = os.path.basename(p).lower()
+        if low.endswith(".csv") and ("subscri" in low or "подписк" in low):
+            res["subs"] += import_csv(p)["imported"]
+        elif low.endswith(".json") and ("history" in low or "истори" in low) and "search" not in low and "поиск" not in low:
+            res["history"] += import_history_json(p)
+        elif low.endswith(".csv") and ("watch later" in low or "смотреть позже" in low or "переглянути пізніше" in low):
+            res["later"] += import_playlist_csv(p)
+    return res
+
+
+# ---------- позже / история ----------
+def later_add(item):
+    lst = [x for x in load("later", []) if x["id"] != item["id"]]
+    lst.insert(0, item)
+    save("later", lst)
+    return {"ok": True, "kind": "later", "items": lst}
+
+
+def later_rm(vid):
+    lst = [x for x in load("later", []) if x["id"] != vid]
+    save("later", lst)
+    return {"ok": True, "kind": "later", "items": lst}
+
+
+def history_add(item):
+    item = dict(item, watched=int(time.time()))
+    lst = [x for x in load("history", []) if x["id"] != item["id"]]
+    lst.insert(0, item)
+    save("history", lst[:500])
+
+
+def watched(info):
+    """Встроенный плеер открыл видео: в историю (наверх), вернуть сохранённую позицию для продолжения."""
+    item = json.loads(info)
+    old = next((x for x in load("history", []) if x["id"] == item["id"]), {})
+    pos, dur = old.get("pos", 0), old.get("dur", 0)
+    item = dict(item, pos=pos, dur=dur or item.get("duration", 0))
+    history_add(item)
+    resume = pos if pos > 20 and (not dur or pos < dur - 30) else 0
+    return {"ok": True, "kind": "watched", "id": item["id"], "pos": resume}
+
+
+def progress(vid, pos, dur):
+    lst = load("history", [])
+    for x in lst:
+        if x["id"] == vid:
+            x["pos"], x["dur"] = round(float(pos)), round(float(dur))
+            if not x.get("duration") and x["dur"]:
+                x["duration"] = x["dur"]
+            break
+    save("history", lst)
+    return {"ok": True, "kind": "progress"}
+
+
+def play(vid, quality, audio, info):
+    if not re.fullmatch(r"[\w-]{11}", vid):
+        raise RuntimeError("неверный id видео")
+    try:
+        history_add(json.loads(info) if info else {"id": vid, "title": "", "channel": "", "thumb": thumb(vid)})
+    except (ValueError, OSError):
+        pass
+    args = ["mpv", "--force-window=immediate", f"--ytdl-format={QUALITY.get(quality, QUALITY['1080'])}"]
+    if audio:
+        args = ["mpv", "--no-video", "--force-window=no", "--ytdl-format=bestaudio"]
+    args.append(f"https://www.youtube.com/watch?v={vid}")
+    os.execvp(args[0], args)
+
+
+def main(a):
+    if not a:
+        print(__doc__)
+        return
+    cmd = a[0]
+    try:
+        if cmd == "search":
+            out(search(a[1], int(a[2]) if len(a) > 2 else 30))
+        elif cmd == "feed":
+            out(feed("--refresh" in a))
+        elif cmd == "channel":
+            out(channel(a[1]))
+        elif cmd == "subs":
+            out({"ok": True, "kind": "subs", "items": load("subs", [])})
+        elif cmd == "sub" and a[1] == "add":
+            out(sub_add(a[2], a[3] if len(a) > 3 else None))
+        elif cmd == "sub" and a[1] == "rm":
+            out(sub_rm(a[2]))
+        elif cmd == "import":
+            out(import_takeout(a[1]))
+        elif cmd == "watched":
+            out(watched(a[1]))
+        elif cmd == "progress":
+            out(progress(a[1], a[2], a[3]))
+        elif cmd == "rec":
+            out(rec())
+        elif cmd == "account":
+            out(account_check() if a[1] == "check" else account_import())
+        elif cmd == "later":
+            if len(a) > 1 and a[1] == "add":
+                out(later_add(json.loads(a[2])))
+            elif len(a) > 1 and a[1] == "rm":
+                out(later_rm(a[2]))
+            else:
+                out({"ok": True, "kind": "later", "items": load("later", [])})
+        elif cmd == "history":
+            if len(a) > 1 and a[1] == "clear":
+                save("history", [])
+            out({"ok": True, "kind": "history", "items": load("history", [])})
+        elif cmd == "settings":
+            st = dict(DEFAULTS, **load("settings", {}))
+            if len(a) > 1:
+                st.update(json.loads(a[1]))
+                save("settings", st)
+            out({"ok": True, "kind": "settings", "settings": st})
+        elif cmd == "play":
+            play(a[1], a[2] if len(a) > 2 else "1080", len(a) > 3 and a[3] == "audio", a[4] if len(a) > 4 else "")
+        else:
+            out({"ok": False, "error": f"неизвестная команда {cmd}"})
+    except Exception as e:  # noqa: BLE001 — любая ошибка уходит в QML строкой
+        out({"ok": False, "kind": cmd, "error": str(e)})
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

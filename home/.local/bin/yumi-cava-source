@@ -1,0 +1,132 @@
+#!/usr/bin/env -S python3 -I
+"""Звук для cava — ТОЛЬКО музыка (18.10).
+Раньше cava слушала монитор выхода целиком: голоса друзей в Discord, уведомления, звонки тоже двигали
+эквалайзер. Теперь звук берётся с одного потока плеера (pw-record --target <поток>) и подаётся cava
+в stdin (cava: method = fifo, source = /dev/stdin, 48000 Гц, 16 бит, 2 канала).
+Какой поток: mpv/yumi-music → иначе любой другой играющий (браузер, Spotify…), кроме Discord/Vesktop,
+Telegram и служебных звуков. Нет музыки или пауза — cava получает тишину. Выход (динамики, AirPods,
+джек) неважен: поток слушается напрямую, смена выхода и переподключение наушников не мешают.
+Безопасность: pw-record с node.dont-fallback — если потока нет, он НЕ цепляется к микрофону
+(микрофон BT переводит наушники в HFP, см. Eq.qml).
+  yumi-cava-source             — какой поток слушался бы сейчас (отладка)
+  yumi-cava-source --run CONF  — запустить cava -p CONF и кормить её музыкой (до SIGTERM / смерти cava)
+Используют: ~/.config/quickshell/yumi/services/Cava.qml, ~/.config/touchbar/plugins/cava/plugin.py"""
+import ctypes
+import json
+import os
+import select
+import signal
+import subprocess
+import sys
+import threading
+import time
+
+MUSIC = ("yumi-music", "mpv", "spotify", "yumi-player")
+SKIP = ("vesktop", "discord", "webcord", "telegram", "speech-dispatcher", "libcanberra", "pw-cat", "pw-play",
+        "paplay", "notification", "swaync", "quickshell", "yumi-cava")
+RATE, CH, BYTES = 48000, 2, 2
+CHUNK_S = 0.04
+SILENCE = bytes(int(RATE * CHUNK_S) * CH * BYTES)
+TAP = "{ node.dont-fallback = true node.dont-reconnect = true node.passive = true node.name = yumi-cava-tap }"
+
+
+def die_with_parent():
+    ctypes.CDLL("libc.so.6", use_errno=True).prctl(1, signal.SIGKILL)   # PR_SET_PDEATHSIG
+
+
+def pj(what):
+    try:
+        out = subprocess.run(["pactl", "-f", "json", "list", what], capture_output=True, text=True, timeout=3).stdout
+        return json.loads(out or "[]")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return []
+
+
+def pick():
+    """object.serial играющего потока музыки (индекс pactl = serial) или None."""
+    sinks = {s["index"] for s in pj("sinks")}
+    best = None
+    for si in pj("sink-inputs"):
+        if si.get("sink") not in sinks or si.get("corked"):     # служебные потоки фильтров; пауза
+            continue
+        p = si.get("properties", {})
+        app = " ".join(str(p.get(k, "")) for k in ("application.name", "application.process.binary",
+                                                      "media.name", "node.name")).lower()
+        if any(s in app for s in SKIP) or p.get("media.role") in ("event", "phone", "communication", "notification"):
+            continue
+        rank = 0 if any(m in app for m in MUSIC) else 1
+        if best is None or rank < best[0]:
+            best = (rank, si["index"])
+    return best[1] if best else None
+
+
+class Feeder:
+    def __init__(self, conf):
+        self.cava = subprocess.Popen(["cava", "-p", conf], stdin=subprocess.PIPE, preexec_fn=die_with_parent)
+        self.want, self.tap, self.cur = pick(), None, None
+        self.stop = False
+        threading.Thread(target=self.watch, daemon=True).start()
+
+    def watch(self):
+        while not self.stop:
+            sub = subprocess.Popen(["pactl", "subscribe"], stdout=subprocess.PIPE, text=True,
+                                   preexec_fn=die_with_parent)
+            for line in sub.stdout:
+                if "sink-input" in line or "'sink'" in line or "server" in line:
+                    self.want = pick()
+            sub.wait()
+            time.sleep(2)
+            self.want = pick()
+
+    def retap(self):
+        if self.tap:
+            self.tap.kill()
+            self.tap.wait()
+            self.tap = None
+        self.cur = self.want
+        if self.cur is not None:
+            self.tap = subprocess.Popen(
+                ["pw-record", "--raw", "--target", str(self.cur), "--format", "s16", "--rate", str(RATE),
+                 "--channels", str(CH), "--latency", "20ms", "-P", TAP, "-"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, preexec_fn=die_with_parent)
+            os.set_blocking(self.tap.stdout.fileno(), False)
+
+    def run(self):
+        out = self.cava.stdin
+        try:
+            while not self.stop and self.cava.poll() is None:
+                if self.want != self.cur or (self.tap and self.tap.poll() is not None and self.cur is not None):
+                    if self.tap and self.tap.poll() is not None and self.want == self.cur:
+                        time.sleep(0.5)                     # поток пропал/pw-record упал — не крутиться
+                        self.want = pick()
+                    self.retap()
+                data = b""
+                if self.tap:
+                    r, _, _ = select.select([self.tap.stdout], [], [], CHUNK_S)
+                    if r:
+                        data = self.tap.stdout.read() or b""
+                else:
+                    time.sleep(CHUNK_S)
+                out.write(data or SILENCE)                  # пауза/нет музыки — тишина, столбики оседают
+                out.flush()
+        except (BrokenPipeError, OSError):
+            pass
+        finally:
+            self.close()
+
+    def close(self):
+        self.stop = True
+        for p in (self.tap, self.cava):
+            if p and p.poll() is None:
+                p.kill()
+                p.wait()
+
+
+if __name__ == "__main__":
+    if len(sys.argv) >= 3 and sys.argv[1] == "--run":
+        f = Feeder(sys.argv[2])
+        signal.signal(signal.SIGTERM, lambda *_: setattr(f, "stop", True))
+        signal.signal(signal.SIGINT, lambda *_: setattr(f, "stop", True))
+        f.run()
+    else:
+        print(pick())

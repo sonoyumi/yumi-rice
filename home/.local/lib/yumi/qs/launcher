@@ -1,0 +1,349 @@
+#!/usr/bin/env -S python3 -I
+"""launcher — бэкенд меню «Программы и файлы» для Quickshell (yumi-rice 3.1). Логика и подписи — как у
+~/.local/bin/yumi-menu-launcher; разбор .desktop, нечёткий поиск, частота запусков, поиск файлов — общие функции
+~/.local/lib/yumi/panel/yumiapps.py (импортируются без GTK и без побочных эффектов). Список строит бэкенд (как render()
+в GTK-меню), QML только показывает строки. Процесс печатает JSON-строки в stdout и читает команды JSON-строками из stdin.
+
+stdout:
+  {"type":"rows", mode, rows:[…], sub}   строки: {section} | {hint} | {i, name, sub, badge, icons:[имена]|path, dir}
+  {"type":"toast", text, error}          {"type":"done"} — запустили, меню можно закрыть (в YP_DRYRUN не шлётся)
+  {"type":"hello", dry}
+stdin:
+  {"cmd":"reload"}                       перечитать программы, частоту и недавние (при каждом открытии)
+  {"cmd":"query","mode":"apps"|"files","q":…}   новый поиск / вкладка
+  {"cmd":"act","i":n,"shift":bool}       Enter / щелчок по строке n (Shift — открыть папку файла)
+  {"cmd":"folder","i":n}                 кнопка «папка» у файла
+  {"cmd":"quit"}
+Проверка: YP_DRYRUN=1 — команды запуска только печатаются в stderr, счётчик запусков не пишется.
+Откат: yumi-uninstall quickshell"""
+import json
+import os
+import signal
+import subprocess
+import sys
+import threading
+
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi/panel"))
+from yumiapps import (load_apps, app_score, load_usage, usage_boost, save_usage, short,  # noqa: E402
+                      find_cmd, file_score, recent_files, file_gicon, default_app_id)
+
+HOME = os.path.expanduser("~")
+DRY = bool(os.environ.get("YP_DRYRUN"))
+APP_LIMIT = 120                # строк на экране за раз (как в GTK-меню)
+FILE_LIMIT = 60
+FIND_LIMIT = 400               # поиск файлов останавливаем после стольких совпадений
+OUT = threading.Lock()
+CHILD_ENV = {k: v for k, v in os.environ.items() if k != "LD_PRELOAD"}
+
+
+def die_with_parent():
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").prctl(1, signal.SIGTERM)       # PR_SET_PDEATHSIG: Quickshell закрылся — и мы
+    except Exception:
+        pass
+
+
+def emit(obj):
+    with OUT:
+        sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
+
+
+class Launcher:
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.apps, self.usage, self.recent = [], {}, None
+        self.mode, self.q = "apps", ""
+        self.acts = []                 # действия текущих строк: [(действие, действие с Shift)]
+        self.files, self.searching, self.truncated = [], False, False
+        self.find_gen = 0
+        self.find_proc = None
+        self.find_timer = None
+        self.render_timer = None
+
+    # ---------- данные ----------
+    def reload(self):
+        with self.lock:
+            self.apps = load_apps()
+            self.usage = load_usage()
+            self.recent = None
+
+    def query(self, mode, q):
+        with self.lock:
+            changed = mode != self.mode
+            self.mode, self.q = mode, q
+            if self.mode == "apps":
+                self.stop_find()
+                self.render()
+                return
+            if changed:
+                self.stop_find()
+                self.files = []
+            if q.strip():
+                self.searching = True                # до запуска поиска — «Ищу…», а не «Ничего не найдено»
+            if self.find_timer:                  # поиск файлов — после паузы в наборе (220 мс, как в GTK)
+                self.find_timer.cancel()
+            self.find_timer = threading.Timer(0.22, self.start_find)
+            self.find_timer.daemon = True
+            self.find_timer.start()
+            if changed or not q.strip():
+                self.render()
+
+    # ---------- список (как render_apps / render_files) ----------
+    def render(self):
+        with self.lock:
+            rows, self.acts = [], []
+            sub = self.render_apps(rows) if self.mode == "apps" else self.render_files(rows)
+            emit({"type": "rows", "mode": self.mode, "rows": rows, "sub": sub})
+
+    def add(self, rows, row, act, act_shift=None):
+        row["i"] = len(self.acts)
+        self.acts.append((act, act_shift))
+        rows.append(row)
+
+    def render_apps(self, rows):
+        q = " ".join(self.q.casefold().split())
+        if q:
+            scored = []
+            for a in self.apps:
+                s = app_score(a, q)
+                if s:
+                    scored.append((s + usage_boost(self.usage.get(a["id"])) * 0.5, a))
+            scored.sort(key=lambda x: (-x[0], x[1]["name"].casefold()))
+            apps = [a for _s, a in scored]
+        else:
+            used = sorted((a for a in self.apps if self.usage.get(a["id"])),
+                          key=lambda a: -usage_boost(self.usage.get(a["id"])))[:6]
+            if used:
+                rows.append({"section": "ЧАСТО"})
+                for a in used:
+                    self.app_row(rows, a)
+                rows.append({"section": "ВСЕ ПРОГРАММЫ"})
+            apps = self.apps
+        for a in apps[:APP_LIMIT]:
+            self.app_row(rows, a)
+        if not apps:
+            rows.append({"hint": "Ничего не найдено"})
+        return f"Найдено: {len(apps)}" if q else f"Программ: {len(self.apps)}"
+
+    # раздел программы для фишек сетки (по Categories из .desktop; первое совпадение по порядку)
+    GROUPS = (("Интернет", ("Network", "WebBrowser", "Chat", "InstantMessaging", "Email", "FileTransfer")),
+              ("Разработка", ("Development", "IDE", "TextEditor")),
+              ("Медиа", ("AudioVideo", "Audio", "Video", "Player", "Graphics", "Photography", "Music")),
+              ("Офис", ("Office", "Education", "Science")),
+              ("Система", ("System", "Settings", "Utility", "FileManager", "TerminalEmulator", "Monitor")))
+
+    def app_group(self, a):
+        cats = set(a.get("categories") or [])
+        for name, keys in self.GROUPS:
+            if cats & set(keys):
+                return name
+        return "Другое"
+
+    def app_row(self, rows, a):
+        sub = next((t for t in (a["generic"], a["comment"]) if t and t.casefold() != a["name"].casefold()), "")
+        badge = "flatpak" if a["flatpak"] else ("терминал" if a["terminal"] else "")
+        icon = a["icon"] or ""
+        row = {"name": a["name"], "sub": sub, "badge": badge, "key": "a:" + a["id"], "cat": self.app_group(a)}
+        if os.path.isabs(icon):
+            row["path"] = icon if os.path.exists(icon) else ""
+            row["icons"] = ["application-x-executable"]
+        else:
+            names = [icon] if icon else []
+            if icon.endswith((".png", ".svg", ".xpm")):
+                names.append(icon.rsplit(".", 1)[0])
+            row["icons"] = names + ["application-x-executable"]
+        self.add(rows, row, lambda a=a: self.launch(a))
+
+    def render_files(self, rows):
+        q = self.q.strip()
+        if not q:
+            if self.recent is None:
+                self.recent = recent_files()
+            if self.recent:
+                rows.append({"section": "НЕДАВНИЕ"})
+                for p in self.recent:
+                    self.file_row(rows, p)
+            else:
+                rows.append({"hint": "Введите часть имени файла или папки — поиск по домашней папке"})
+            return "Недавние · поиск по домашней папке"
+        words = q.casefold().split()
+        scored = [(file_score(p, words), p) for p in self.files]
+        ranked = [p for _s, p in sorted(((s, p) for s, p in scored if s is not None), key=lambda x: (-x[0], x[1]))]
+        for p in ranked[:FILE_LIMIT]:
+            self.file_row(rows, p)
+        if not ranked:
+            rows.append({"hint": "Ищу…" if self.searching else "Ничего не найдено"})
+        n = len(ranked)
+        more = "+" if self.truncated else ""
+        if self.searching:
+            return f"Ищу… найдено {n}"
+        if n > FILE_LIMIT or self.truncated:
+            return f"Найдено: {n}{more} · показаны первые {min(n, FILE_LIMIT)} — уточните"
+        return f"Найдено: {n}"
+
+    def file_row(self, rows, path):
+        is_dir = os.path.isdir(path)
+        try:
+            names = list(file_gicon(path, is_dir).get_names())
+        except Exception:
+            names = []
+        names += ["folder"] if is_dir else ["text-x-generic", "application-x-generic"]
+        row = {"name": os.path.basename(path) + ("/" if is_dir else ""), "sub": short(os.path.dirname(path)),
+               "icons": names, "file": True, "key": "f:" + path}
+        self.add(rows, row, lambda: self.open_path(path), lambda: self.open_folder(path))
+
+    # ---------- поиск файлов в фоне ----------
+    def stop_find(self):
+        self.find_gen += 1
+        p, self.find_proc = self.find_proc, None
+        if p:
+            try:
+                p.kill()
+            except Exception:
+                pass
+        self.searching = False
+
+    def start_find(self):
+        with self.lock:
+            self.find_timer = None
+            self.stop_find()
+            self.files, self.truncated = [], False
+            words = self.q.strip().casefold().split()
+            if self.mode != "files" or not words:
+                self.render()
+                return
+            gen = self.find_gen
+            word = max(words, key=len)           # find ищет по самому длинному слову, остальные — фильтр
+            try:
+                self.find_proc = subprocess.Popen(find_cmd(word), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                                  stdin=subprocess.DEVNULL, text=True, errors="replace")
+            except OSError as e:
+                emit({"type": "toast", "text": f"Поиск не запустился: {e}", "error": True})
+                return
+            self.searching = True
+            self.render()
+            proc = self.find_proc
+        threading.Thread(target=self.read_find, args=(proc, gen), daemon=True).start()
+
+    def read_find(self, proc, gen):
+        for line in proc.stdout:
+            with self.lock:
+                if gen != self.find_gen:
+                    return
+                path = line.rstrip("\n").rstrip("/")
+                if path and path != HOME:
+                    self.files.append(path)
+                if len(self.files) >= FIND_LIMIT:
+                    self.truncated = True
+                    self.stop_find()
+                    self.render()
+                    return
+                self.schedule_render()
+        proc.wait()
+        with self.lock:
+            if gen != self.find_gen:
+                return
+            self.searching = False
+            self.find_proc = None
+            if self.render_timer:
+                self.render_timer.cancel()
+                self.render_timer = None
+            self.render()
+
+    def schedule_render(self):
+        """Список обновляем пачками (раз в 150 мс), а не на каждую найденную строку."""
+        if self.render_timer:
+            return
+
+        def fire():
+            with self.lock:
+                self.render_timer = None
+                self.render()
+        self.render_timer = threading.Timer(0.15, fire)
+        self.render_timer.daemon = True
+        self.render_timer.start()
+
+    # ---------- действия ----------
+    def act(self, i, shift=False, folder=False):
+        with self.lock:
+            if not 0 <= i < len(self.acts):
+                return
+            act, act_shift = self.acts[i]
+        if folder or shift:
+            (act_shift or act)()
+        else:
+            act()
+
+    def run(self, *cmd):
+        if DRY:
+            print("[dry-run]", " ".join(str(c) for c in cmd), file=sys.stderr, flush=True)
+            return
+        subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True, env=CHILD_ENV)
+
+    def launch(self, a):
+        try:
+            self.run("uwsm", "app", "--", a["id"])
+        except OSError as e:
+            emit({"type": "toast", "text": f"Не запустилось: {e}", "error": True})
+            return
+        save_usage(self.usage, a["id"])
+        self.done(f"Запуск: {a['name']}")
+
+    def open_path(self, path):
+        app = default_app_id(path)
+        try:
+            if app:
+                self.run("uwsm", "app", "--", app, path)
+            else:
+                self.run("uwsm", "app", "--", "xdg-open", path)
+        except OSError as e:
+            emit({"type": "toast", "text": f"Не открылось: {e}", "error": True})
+            return
+        self.done("Открываю " + os.path.basename(path))
+
+    def open_folder(self, path):
+        self.open_path(os.path.dirname(path) or HOME)
+
+    def done(self, msg):
+        emit({"type": "toast", "text": msg, "error": False})
+        if not DRY:                                # в проверке окно не закрываем — видно результат
+            emit({"type": "done"})
+
+
+def main():
+    die_with_parent()
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stdin.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+    L = Launcher()
+    emit({"type": "hello", "dry": DRY})
+    for line in sys.stdin:
+        try:
+            c = json.loads(line)
+        except ValueError:
+            continue
+        cmd = c.get("cmd")
+        try:
+            if cmd == "reload":
+                L.reload()
+            elif cmd == "query":
+                L.query("files" if c.get("mode") == "files" else "apps", str(c.get("q") or ""))
+            elif cmd == "act":
+                L.act(int(c.get("i", -1)), bool(c.get("shift")))
+            elif cmd == "folder":
+                L.act(int(c.get("i", -1)), folder=True)
+            elif cmd == "quit":
+                break
+        except Exception as e:                     # одна ошибка не роняет бэкенд
+            print("launcher:", type(e).__name__, e, file=sys.stderr, flush=True)
+    with L.lock:
+        L.stop_find()
+
+
+if __name__ == "__main__":
+    main()

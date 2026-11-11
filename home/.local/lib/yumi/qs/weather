@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+# Погода для экрана блокировки Quickshell (lock/LockSurface.qml): Open-Meteo без ключа.
+# Печатает одну JSON-строку: {now:{t, feels, code, icon, text, day}, hours:[{h, t, icon}×6], place, at, stale}.
+# Координаты — из ~/.config/yumi/weather.conf (строки lat=…, lon=…, place=…). Без файла (или без lat/lon) погоды нет:
+# {"error": "Погода не настроена: …", "unconfigured": true} — экран блокировки тогда прячет карточку погоды.
+# Кэш ~/.cache/yumi/weather.json: моложе 30 мин — отдаём без сети; сеть недоступна — отдаём кэш с stale=true.
+import json, os, sys, time, urllib.request, urllib.parse
+
+HOME = os.path.expanduser("~")
+CONF = os.path.join(HOME, ".config/yumi/weather.conf")
+CACHE = os.path.join(HOME, ".cache/yumi/weather.json")
+FRESH = 30 * 60
+
+# WMO-коды → (значок дня, значок ночи, подпись). Значки — Material Design из Nerd Font.
+I = lambda cp: chr(cp)
+CODES = {
+    0: (I(0xF0599), I(0xF0594), "Ясно"),
+    1: (I(0xF0599), I(0xF0594), "Преимущественно ясно"),
+    2: (I(0xF0595), I(0xF0F31), "Переменная облачность"),
+    3: (I(0xF0590), I(0xF0590), "Пасмурно"),
+    45: (I(0xF0591), I(0xF0591), "Туман"),
+    48: (I(0xF0591), I(0xF0591), "Изморозь и туман"),
+    51: (I(0xF0F33), I(0xF0597), "Слабая морось"),
+    53: (I(0xF0597), I(0xF0597), "Морось"),
+    55: (I(0xF0597), I(0xF0597), "Сильная морось"),
+    56: (I(0xF067F), I(0xF067F), "Ледяная морось"),
+    57: (I(0xF067F), I(0xF067F), "Ледяная морось"),
+    61: (I(0xF0F33), I(0xF0597), "Небольшой дождь"),
+    63: (I(0xF0597), I(0xF0597), "Дождь"),
+    65: (I(0xF0596), I(0xF0596), "Сильный дождь"),
+    66: (I(0xF067F), I(0xF067F), "Ледяной дождь"),
+    67: (I(0xF067F), I(0xF067F), "Сильный ледяной дождь"),
+    71: (I(0xF0598), I(0xF0598), "Небольшой снег"),
+    73: (I(0xF0598), I(0xF0598), "Снег"),
+    75: (I(0xF0F36), I(0xF0F36), "Сильный снег"),
+    77: (I(0xF0592), I(0xF0592), "Снежная крупа"),
+    80: (I(0xF0F33), I(0xF0597), "Ливень"),
+    81: (I(0xF0596), I(0xF0596), "Ливень"),
+    82: (I(0xF0596), I(0xF0596), "Сильный ливень"),
+    85: (I(0xF0598), I(0xF0598), "Снегопад"),
+    86: (I(0xF0F36), I(0xF0F36), "Сильный снегопад"),
+    95: (I(0xF0593), I(0xF0593), "Гроза"),
+    96: (I(0xF067E), I(0xF067E), "Гроза с градом"),
+    99: (I(0xF067E), I(0xF067E), "Гроза с сильным градом"),
+}
+
+
+NOT_SET = "Погода не настроена: ~/.config/yumi/weather.conf (lat=, lon=, place=)"
+
+
+def conf():
+    """Координаты из weather.conf; нет файла или lat/lon — None (погода не настроена)."""
+    c = {"lat": "", "lon": "", "place": ""}
+    try:
+        with open(CONF, encoding="utf-8") as f:
+            for line in f:
+                k, _, v = line.partition("=")
+                k, v = k.strip(), v.strip().strip('"')
+                if k in c and v:
+                    c[k] = v
+    except OSError:
+        return None
+    if not c["lat"] or not c["lon"]:
+        return None
+    float(c["lat"]); float(c["lon"])     # неверные координаты — пусть упадёт с понятной ошибкой
+    c["place"] = c["place"] or f'{c["lat"]}, {c["lon"]}'
+    return c
+
+
+def code(c, day):
+    d, n, text = CODES.get(int(c), (I(0xF0590), I(0xF0590), "—"))
+    return (d if day else n), text
+
+
+def fetch(c):
+    q = urllib.parse.urlencode({
+        "latitude": c["lat"], "longitude": c["lon"], "timezone": "auto", "forecast_days": 2,
+        "current": "temperature_2m,apparent_temperature,weather_code,is_day",
+        "hourly": "temperature_2m,weather_code,is_day",
+    })
+    with urllib.request.urlopen("https://api.open-meteo.com/v1/forecast?" + q, timeout=10) as r:
+        j = json.load(r)
+    cur = j["current"]
+    icon, text = code(cur["weather_code"], cur["is_day"])
+    now = {"t": round(cur["temperature_2m"]), "feels": round(cur["apparent_temperature"]),
+           "code": cur["weather_code"], "icon": icon, "text": text, "day": bool(cur["is_day"])}
+    h = j["hourly"]
+    start = cur["time"][:13]                     # «2026-10-15T21» — текущий час
+    i0 = next((i for i, t in enumerate(h["time"]) if t[:13] > start), 0)
+    hours = []
+    for i in range(i0, min(i0 + 6, len(h["time"]))):
+        ic, _ = code(h["weather_code"][i], h["is_day"][i])
+        hours.append({"h": h["time"][i][11:13], "t": round(h["temperature_2m"][i]), "icon": ic})
+    return {"now": now, "hours": hours, "place": c["place"], "at": int(time.time())}
+
+
+def main():
+    c = conf()
+    if c is None:
+        print(NOT_SET, file=sys.stderr)
+        print(json.dumps({"error": NOT_SET, "unconfigured": True}, ensure_ascii=False), flush=True)
+        return
+    old = None
+    try:
+        with open(CACHE, encoding="utf-8") as f:
+            old = json.load(f)
+    except (OSError, ValueError):
+        pass
+    force = "--force" in sys.argv
+    if old and not force and time.time() - old.get("at", 0) < FRESH and old.get("place") == c["place"]:
+        old["stale"] = False
+        print(json.dumps(old, ensure_ascii=False), flush=True)
+        return
+    try:
+        data = fetch(c)
+    except Exception as e:                       # офлайн / сбой сервиса — отдаём кэш с пометкой
+        print("weather:", e, file=sys.stderr)
+        if old:
+            old["stale"] = True
+            print(json.dumps(old, ensure_ascii=False), flush=True)
+        else:
+            print(json.dumps({"error": "Нет данных о погоде"}, ensure_ascii=False), flush=True)
+        return
+    os.makedirs(os.path.dirname(CACHE), exist_ok=True)
+    tmp = CACHE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+    os.replace(tmp, CACHE)
+    data["stale"] = False
+    print(json.dumps(data, ensure_ascii=False), flush=True)
+
+
+if __name__ == "__main__":
+    main()

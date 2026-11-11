@@ -22,17 +22,24 @@ collect() {
         case $s in ok) put doc "✔ всё хорошо";; *) put doc "⚠ проблем: $v, предупреждений: $w";; esac
     else put snap "—"; put doc "не проверялся (yumi-doctor)"; fi
     if [ ! -s "$RT/doctor.json" ] || [ -n "$(find "$RT/doctor.json" -mmin +10 2>/dev/null)" ]; then   # кэш пишет меню «Система»
-        ( "$HOME/.local/bin/yumi-doctor" --json > "$RT/doctor.json.tmp" 2>/dev/null && mv "$RT/doctor.json.tmp" "$RT/doctor.json" ) </dev/null >/dev/null 2>&1 &
+        # код выхода доктора 1 = есть предупреждения, JSON при этом верный — проверяем сам JSON;
+        # 7>&- — не держать блокировку кэша, иначе остальные строки fastfetch ждут доктора
+        ( "$HOME/.local/bin/yumi-doctor" --json > "$RT/doctor.json.tmp" 2>/dev/null
+          jq -e .status "$RT/doctor.json.tmp" >/dev/null 2>&1 && mv "$RT/doctor.json.tmp" "$RT/doctor.json" ) </dev/null >/dev/null 2>&1 7>&- &
     fi
     s=$(stat -c %W / 2>/dev/null); [ "${s:-0}" -gt 0 ] && put age "$(( ($(date +%s) - s) / 86400 )) дн. назад" || put age "—"
     # 機 машина
-    # нагрузка: ЦП — по /proc/stat за 0,2 с, ОЗУ — занято без кэша и буферов
+    # нагрузка: ЦП — по /proc/stat с прошлого сбора (снимок в cpu.stat; без снимка — за 0,1 с),
+    # ОЗУ — занято без кэша и буферов
     local c1 c2 i1 i2 mt ma
-    read -r _ a1 b1 c1 i1 w1 x1 y1 z1 _ < /proc/stat; sleep 0.2
+    if [ -s "$RT/cpu.stat" ]; then read -r _ a1 b1 c1 i1 w1 x1 y1 z1 _ < "$RT/cpu.stat"
+    else read -r _ a1 b1 c1 i1 w1 x1 y1 z1 _ < /proc/stat; sleep 0.1; fi
     read -r _ a2 b2 c2 i2 w2 x2 y2 z2 _ < /proc/stat
+    head -1 /proc/stat > "$RT/cpu.stat"
     local busy=$(( (a2+b2+c2+x2+y2+z2) - (a1+b1+c1+x1+y1+z1) )) idle=$(( (i2+w2) - (i1+w1) ))
     mt=$(awk '/^MemTotal:/{print $2}' /proc/meminfo); ma=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)
-    put load "ЦП $(( busy * 100 / (busy + idle > 0 ? busy + idle : 1) )) % · ОЗУ $(( (mt - ma) * 100 / mt )) %"
+    put cpu "CPU $(( busy * 100 / (busy + idle > 0 ? busy + idle : 1) ))%"
+    put load "CPU $(( busy * 100 / (busy + idle > 0 ? busy + idle : 1) ))% · RAM $(( (mt - ma) * 100 / mt ))%"
     local ssid sig vpn ts
     ssid=$(nmcli -t -f NAME,TYPE con show --active 2>/dev/null | awk -F: '$2=="802-11-wireless"{print $1; exit}')
     sig=$(awk 'NR==3{printf "%d", $3*100/70}' /proc/net/wireless 2>/dev/null)
@@ -47,38 +54,38 @@ collect() {
     printf '%s' "$o" > "$F.tmp" && mv "$F.tmp" "$F"
 }
 
-quote() {   # японская мудрость дня — иероглифы и перевод
+quote() {   # японская мудрость дня — иероглифы и перевод (англ.)
     local -a q=(
-        "一期一会|Одна встреча — одна жизнь: цени каждый момент"
-        "七転び八起き|Упади семь раз — поднимись восемь"
-        "猿も木から落ちる|Даже обезьяна падает с дерева"
-        "継続は力なり|Постоянство — это сила"
-        "石の上にも三年|И на камне за три года посидишь — согреешь"
-        "花より団子|Клёцки лучше цветов: польза важнее красоты"
-        "急がば回れ|Спешишь — иди в обход"
-        "雨降って地固まる|После дождя земля твердеет"
-        "塵も積もれば山となる|И пыль, собираясь, становится горой"
-        "千里の道も一歩から|Путь в тысячу ри начинается с шага"
-        "出る杭は打たれる|Торчащий гвоздь забивают"
-        "十人十色|Десять человек — десять цветов"
-        "以心伝心|От сердца к сердцу, без слов"
-        "知らぬが仏|Не знаешь — спокоен, как Будда"
-        "井の中の蛙大海を知らず|Лягушка в колодце не знает о море"
-        "案ずるより産むが易し|Сделать легче, чем бояться"
-        "門前の小僧習わぬ経を読む|Мальчик у ворот храма читает сутры, которых не учил"
-        "月とすっぽん|Луна и черепаха: как небо и земля"
-        "初心忘るべからず|Не забывай дух новичка"
-        "笑う門には福来る|В дом, где смеются, приходит счастье"
-        "能ある鷹は爪を隠す|Умный сокол прячет когти"
-        "弘法も筆の誤り|И мастер каллиграфии ошибается кистью"
-        "明日は明日の風が吹く|Завтра подует завтрашний ветер"
-        "花鳥風月|Цветы, птицы, ветер и луна — красота природы"
-        "木を見て森を見ず|За деревьями не видеть леса"
-        "郷に入っては郷に従え|В чужой деревне живи по её обычаям"
-        "時は金なり|Время — деньги"
-        "灯台下暗し|Под маяком темнее всего"
-        "百聞は一見に如かず|Лучше один раз увидеть, чем сто раз услышать"
-        "諦めなければ道は開ける|Не сдашься — путь откроется"
+        "一期一会|One encounter, one chance: treasure every moment"
+        "七転び八起き|Fall seven times, stand up eight"
+        "猿も木から落ちる|Even monkeys fall from trees"
+        "継続は力なり|Persistence is power"
+        "石の上にも三年|Sit on a stone for three years and it grows warm"
+        "花より団子|Dumplings over flowers: substance over style"
+        "急がば回れ|If in a hurry, take the long way round"
+        "雨降って地固まる|After the rain, the ground hardens"
+        "塵も積もれば山となる|Even dust, piled up, becomes a mountain"
+        "千里の道も一歩から|A journey of a thousand ri begins with one step"
+        "出る杭は打たれる|The nail that sticks out gets hammered down"
+        "十人十色|Ten people, ten colors"
+        "以心伝心|Heart to heart, without words"
+        "知らぬが仏|Not knowing is the peace of Buddha"
+        "井の中の蛙大海を知らず|A frog in a well knows nothing of the sea"
+        "案ずるより産むが易し|Doing is easier than worrying"
+        "門前の小僧習わぬ経を読む|The boy at the temple gate recites sutras he never learned"
+        "月とすっぽん|The moon and a turtle: worlds apart"
+        "初心忘るべからず|Never forget the beginner's mind"
+        "笑う門には福来る|Fortune comes to a house of laughter"
+        "能ある鷹は爪を隠す|The clever hawk hides its talons"
+        "弘法も筆の誤り|Even the master calligrapher slips with the brush"
+        "明日は明日の風が吹く|Tomorrow, tomorrow's wind will blow"
+        "花鳥風月|Flower, bird, wind and moon: the beauty of nature"
+        "木を見て森を見ず|Seeing the trees but not the forest"
+        "郷に入っては郷に従え|In the village, follow the village's ways"
+        "時は金なり|Time is money"
+        "灯台下暗し|It is darkest at the foot of the lighthouse"
+        "百聞は一見に如かず|Seeing once beats hearing a hundred times"
+        "諦めなければ道は開ける|Don't give up and the way will open"
     )
     local i=$(( 10#$(date +%j) % ${#q[@]} ))
     printf '%s  —  %s' "${q[$i]%%|*}" "${q[$i]#*|}"
@@ -97,8 +104,30 @@ tip() {
     printf 'совет: %s' "${t[$(( 10#$(date +%j) % ${#t[@]} ))]}"
 }
 
+eng() {   # eng N day → «1 day» / «5 days»
+    [ "$1" -eq 1 ] && printf '1 %s' "$2" || printf '%d %ss' "$1" "$2"
+}
+up() {   # 時 — сколько в сети с последней загрузки (англ.)
+    local s d h m
+    read -r s _ < /proc/uptime; s=${s%.*}
+    d=$(( s / 86400 )); h=$(( s % 86400 / 3600 )); m=$(( s % 3600 / 60 ))
+    if [ "$d" -gt 0 ]; then printf '%s %dh' "$(eng "$d" day)" "$h"
+    elif [ "$h" -gt 0 ]; then printf '%dh %dm' "$h" "$m"
+    else printf '%dm' "$m"; fi
+}
+life() {   # 齢 — сколько живёт система: от рождения корня / (stat %W), англ.
+    local b n y mo
+    b=$(stat -c %W / 2>/dev/null); [ "${b:-0}" -gt 0 ] || { printf '—'; return; }
+    n=$(( ($(date +%s) - b) / 86400 ))
+    if [ "$n" -ge 365 ]; then y=$(( n / 365 )); mo=$(( n % 365 / 30 ))
+        eng "$y" year; [ "$mo" -gt 0 ] && printf ' %s' "$(eng "$mo" month)"
+    else eng "$n" day; fi
+}
+
 case "${1:-}" in
 quote) quote; exit ;;
+up) up; exit ;;
+life) life; exit ;;
 tip) tip; exit ;;
 "") collect; exit ;;
 esac

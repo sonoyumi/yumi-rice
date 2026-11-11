@@ -1,0 +1,90 @@
+#!/usr/bin/env -S python3 -I
+"""island-rest — данные «покоя» центрального острова (island/IslandState.qml), когда музыка не играет (30.10).
+Печатает одну JSON-строку: {weather:{icon,t,text}|null, next:{icon,text,when}|null}
+  weather — из ~/.local/lib/yumi/qs/weather (Open-Meteo, кэш 30 мин; не настроена/нет сети и кэша — null)
+  next    — что будет дальше: ближайший план календаря (не выполнен, в ближайшие 48 ч; «весь день» — пока день не кончился),
+            иначе ближайший таймер yumi (бэкап, музыка) в ближайшие 24 ч.
+Проверка: YP_CAL_NOW=2026-10-30T09:00 — подменить «сейчас» (как у календаря)."""
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime, timedelta
+
+HOME = os.path.expanduser("~")
+sys.path.insert(0, os.path.join(HOME, ".local/lib/yumi/calendar"))
+import calstore as cs  # noqa: E402
+
+TIMERS = {                                   # таймер → (значок, подпись); остальные (служебные) не показываем
+    "yumi-backup.timer": ("\U000f0be8", "Бэкап"),
+    "yumi-music-sync.timer": ("\U000f075a", "Синхронизация музыки"),
+    "yumi-music-update.timer": ("\U000f075a", "Обновление музыки"),
+}
+DAYS = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
+
+
+def when(dt, now, allday=False):
+    d = (dt.date() - now.date()).days
+    day = "" if d == 0 else "завтра" if d == 1 else DAYS[dt.weekday()]
+    if allday:
+        return day or "сегодня"
+    return (day + " " if day else "") + dt.strftime("%H:%M")
+
+
+def weather():
+    try:
+        out = subprocess.run([sys.executable, "-I", os.path.join(HOME, ".local/lib/yumi/qs/weather")],
+                             capture_output=True, text=True, timeout=20).stdout
+        n = json.loads(out.strip().splitlines()[-1]).get("now")
+        return {"icon": n["icon"], "t": round(n["t"]), "text": n.get("text", "")} if n else None
+    except (OSError, ValueError, KeyError, IndexError, subprocess.SubprocessError):
+        return None
+
+
+def calendar(now):
+    best = None
+    for ev in cs.load():
+        if ev.get("done"):
+            continue
+        try:
+            allday = not ev.get("time")
+            dt = cs.base_dt(ev)
+            end = datetime.combine(dt.date(), datetime.max.time()) if allday else dt
+        except (ValueError, KeyError):
+            continue
+        if end < now or dt > now + timedelta(hours=48):
+            continue
+        if best is None or dt < best[0]:
+            best = (dt, allday, ev)
+    if not best:
+        return None
+    dt, allday, ev = best
+    return {"icon": "\U000f00ed", "text": ev.get("text", "").strip()[:60], "when": when(dt, now, allday)}
+
+
+def timer(now):
+    try:
+        rows = json.loads(subprocess.run(["systemctl", "--user", "list-timers", "--output=json", "--no-pager"],
+                                         capture_output=True, text=True, timeout=5).stdout or "[]")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    best = None
+    for r in rows:
+        if r.get("unit") not in TIMERS or not r.get("next"):
+            continue
+        dt = datetime.fromtimestamp(r["next"] / 1e6)
+        if now <= dt <= now + timedelta(hours=24) and (best is None or dt < best[0]):
+            best = (dt, r["unit"])
+    if not best:
+        return None
+    icon, text = TIMERS[best[1]]
+    return {"icon": icon, "text": text, "when": when(best[0], now)}
+
+
+def main():
+    now = cs.now()
+    print(json.dumps({"weather": weather(), "next": calendar(now) or timer(now)}, ensure_ascii=False), flush=True)
+
+
+if __name__ == "__main__":
+    main()

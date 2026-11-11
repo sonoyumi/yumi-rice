@@ -39,7 +39,7 @@ while :; do
         key_prev=$key
         name=$(playerctl -l 2>/dev/null | head -1)   # через playerctld имя плеера не видно
         name=${name%%.*}
-        pkill -RTMIN+14 -x waybar 2>/dev/null   # перерисовать круглую обложку
+        qs -c yumi ipc call bar refresh cover >/dev/null 2>&1   # перерисовать круглую обложку в Quickshell
     fi
     if [ "$st" != Playing ] && [ "$st" != Paused ]; then
         out='{"text":"","class":"stopped"}'

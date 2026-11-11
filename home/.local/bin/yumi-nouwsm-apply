@@ -1,0 +1,12 @@
+#!/bin/sh
+# yumi-nouwsm-apply (18.10): greetd запускает сеанс через yumi-hyprland-session вместо uwsm (остальное уже на месте).
+# Откат: yumi-nouwsm-undo
+set -e
+D="$HOME/.config/quickshell/yumi/docs/boot/greetd/config.toml"
+grep -q yumi-hyprland-session "$D" || { echo "В $D нет yumi-hyprland-session — стоп"; exit 1; }
+[ -x "$HOME/.local/bin/yumi-hyprland-session" ] || { echo "Нет ~/.local/bin/yumi-hyprland-session — стоп"; exit 1; }
+sudo cp -n /etc/greetd/config.toml /etc/greetd/config.toml.bak-nouwsm-20261018
+sudo install -m644 "$D" /etc/greetd/config.toml
+systemctl --user daemon-reload
+grep -n '^command' /etc/greetd/config.toml
+echo "ГОТОВО: со следующей загрузки сеанс без uwsm. Проверка после входа: yumi-session status. Откат: yumi-nouwsm-undo"

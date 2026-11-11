@@ -33,6 +33,7 @@ send() {     # send urgency icon summary body
     [[ $1 == critical ]] && args+=(-t 0)
     [[ -n $nid ]] && args+=(-r "$nid")
     nid=$(notify-send "${args[@]}" "$3" "$4" 2>/dev/null) || nid=""
+    "$HOME/.local/bin/yumi-light" pulse battery >/dev/null 2>&1 &   # 11.11: клавиши MacBook «дышат»
 }
 
 close_last() {

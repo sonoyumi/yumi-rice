@@ -1,0 +1,211 @@
+#!/usr/bin/env -S python3 -I
+"""websearch — бэкенд меню «Веб-поиск» для Quickshell (yumi-rice 3.1). Логика и подписи — как у
+~/.local/bin/yumi-menu-websearch: поисковики (websearch.lst + свой ~/.config/yumi/panel/websearch.lst), «имя:запрос»,
+адреса, главная страница, история запросов. Функции данных (load_engines, find_engine, resolve, load_history,
+save_history) берутся из самого GTK-скрипта: исполняется только его часть до проверки `--resolve` (без GTK, без окна).
+Процесс печатает JSON-строки в stdout и читает команды JSON-строками из stdin.
+
+stdout:
+  {"type":"engines", engines:[{key, icon, name, alias, tip}], dry}
+  {"type":"state", text?, current, shown, plan:{kind, icon, text, url}, hist:[{q, meta}], histTitle, sub}
+      text — только если бэкенд сам поменял строку ввода (↑/↓ при «имя:»)
+  {"type":"toast", text, error}   {"type":"done"} — браузер открыт, меню можно закрыть (в YP_DRYRUN не шлётся)
+stdin:
+  {"cmd":"reload"}   {"cmd":"text","text":…}   {"cmd":"cycle","dir":1|-1}   {"cmd":"pick","key":…}
+  {"cmd":"go"}   {"cmd":"hist","i":n}   {"cmd":"quit"}
+Проверка: YP_DRYRUN=1 — адрес только печатается в stderr, история не пишется (если не задан YP_WEBSEARCH_CACHE).
+Откат: yumi-uninstall quickshell"""
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import time
+import types
+
+GTK_SCRIPT = os.path.join(os.path.dirname(os.path.realpath(__file__)), "core/websearch.py")   # ядро бывшего yumi-menu-websearch
+MARK = '\nif "--resolve" in sys.argv:'
+CHILD_ENV = {k: v for k, v in os.environ.items() if k != "LD_PRELOAD"}
+HIST_SHOWN = 30
+
+
+def load_ws():
+    """Часть GTK-скрипта до `--resolve` — чистые функции и настройки (пути, поисковик по умолчанию)."""
+    src = open(GTK_SCRIPT, encoding="utf-8").read()
+    m = types.ModuleType("yumi_websearch")
+    m.__file__ = os.path.realpath(GTK_SCRIPT)     # DATA_DIR ищется и рядом со скриптом
+    exec(compile(src.split(MARK, 1)[0], GTK_SCRIPT, "exec"), m.__dict__)
+    return m
+
+
+ws = load_ws()
+
+
+def emit(obj):
+    sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+
+def ago(ts):
+    d = max(0, int(time.time()) - int(ts or 0))
+    if d < 60:
+        return "только что"
+    if d < 3600:
+        return f"{d // 60} мин назад"
+    if d < 86400:
+        return f"{d // 3600} ч назад"
+    if d < 86400 * 30:
+        return f"{d // 86400} дн назад"
+    return time.strftime("%d.%m.%Y", time.localtime(ts))
+
+
+class WebSearch:
+    def __init__(self):
+        self.reload()
+
+    def reload(self):
+        self.engines = ws.load_engines()
+        self.history = ws.load_history()
+        last = self.history[0]["e"] if self.history else ws.DEFAULT_ENGINE
+        self.current = (ws.find_engine(self.engines, last) or ws.find_engine(self.engines, ws.DEFAULT_ENGINE)
+                        or self.engines[0])
+        self.text = ""
+        self.shown_hist = []
+        emit({"type": "engines", "dry": ws.DRY, "engines": [
+            {"key": e.key, "icon": e.icon, "name": e.name, "alias": e.aliases[0] if e.aliases else "",
+             "tip": f"{e.name} — «{e.key}:запрос»" + (f" или «{e.aliases[0]}:запрос»" if e.aliases else "")}
+            for e in self.engines]})
+
+    def update(self, new_text=None):
+        kind, e, q, url = ws.resolve(self.text, self.engines, self.current)
+        shown = e if e is not None else self.current
+        if kind == "url":
+            plan = {"kind": kind, "icon": "󰌹", "text": "Открыть адрес", "url": url}
+        elif kind == "home":
+            plan = {"kind": kind, "icon": e.icon, "text": f"Открыть {e.name}", "url": url}
+        elif kind == "search":
+            plan = {"kind": kind, "icon": e.icon, "text": f"Найти «{q}» — {e.name}", "url": url}
+        else:
+            plan = {"kind": kind, "icon": "󰖟", "text": "", "url": ""}
+        self.plan = (kind, e, q, url)
+        hq = (q if kind == "search" else "").lower()
+        items = [h for h in self.history if not hq or hq in h["q"].lower()][:HIST_SHOWN]
+        self.shown_hist = []
+        hist = []
+        for h in items:
+            he = ws.find_engine(self.engines, h.get("e", "")) or self.current
+            self.shown_hist.append((he, h["q"]))
+            hist.append({"q": h["q"], "meta": f"{he.icon} {he.name} · {ago(h.get('t'))}"})
+        empty = ""
+        if not items:
+            empty = "Ничего похожего в истории" if hq and self.history else "Истории пока нет — запросы появятся здесь"
+        n = len(self.history)
+        out = {"type": "state", "current": self.current.key, "shown": shown.key, "plan": plan, "hist": hist,
+               "empty": empty, "histTitle": f"НЕДАВНИЕ ЗАПРОСЫ  ·  {n}" if n else "НЕДАВНИЕ ЗАПРОСЫ",
+               "sub": f"Поисковик: {self.current.name} · всего {len(self.engines)} · имя:запрос"}
+        if new_text is not None:
+            out["text"] = new_text
+        emit(out)
+
+    def set_text(self, text):
+        self.text = text
+        self.update()
+
+    def cycle(self, d):
+        """↑/↓ — сменить поисковик; был префикс «имя:» — заменить на новый."""
+        i = self.engines.index(self.current)
+        self.current = self.engines[(i + (1 if d > 0 else -1)) % len(self.engines)]
+        new_text = None
+        m = re.match(r"^([^\s:/]{1,30}):(?!//)", self.text.strip())
+        if m and ws.find_engine(self.engines, m.group(1)):
+            new_text = self.text = self.current.key + ":" + self.text.split(":", 1)[1]
+        self.update(new_text)
+
+    def pick(self, key):
+        """Щелчок по поисковику: есть запрос — искать в нём сразу, нет — просто выбрать."""
+        e = next((x for x in self.engines if x.key == key), None)
+        if not e:
+            return
+        self.current = e
+        kind, _e, q, _url = ws.resolve(self.text, self.engines, e)
+        if kind == "search" and q:
+            self.open_search(e, q)
+            return
+        self.update()
+
+    def go(self):
+        kind, e, q, url = self.plan
+        if kind == "search" and e is not None:
+            self.open_search(e, q)
+        elif kind in ("url", "home"):
+            self.open_url(url, f"Открываю {url}")
+
+    def hist(self, i):
+        if 0 <= i < len(self.shown_hist):
+            e, q = self.shown_hist[i]
+            self.open_search(e, q)
+
+    def open_search(self, e, q):
+        self.current = e
+        self.history = ws.save_history(self.history, e.key, q)
+        self.open_url(e.search_url(q), f"{e.name}: {q}")
+
+    def open_url(self, url, what):
+        cmd = (["uwsm", "app", "--"] if shutil.which("uwsm") else []) + ["xdg-open", url]
+        if ws.DRY:
+            print("[dry-run]", " ".join(cmd), file=sys.stderr, flush=True)
+            emit({"type": "toast", "text": f"Имитация: {what}", "error": False})
+            self.update()
+            return
+        try:
+            subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True, env=CHILD_ENV)
+        except OSError as e:
+            emit({"type": "toast", "text": f"Не открылось: {e}", "error": True})
+            return
+        emit({"type": "done"})
+
+
+def main():
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").prctl(1, signal.SIGTERM)       # PR_SET_PDEATHSIG
+    except Exception:
+        pass
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stdin.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+    W = WebSearch()
+    W.update()
+    for line in sys.stdin:
+        try:
+            c = json.loads(line)
+        except ValueError:
+            continue
+        cmd = c.get("cmd")
+        try:
+            if cmd == "reload":
+                W.reload()
+                W.update()
+            elif cmd == "text":
+                W.set_text(str(c.get("text") or ""))
+            elif cmd == "cycle":
+                W.cycle(int(c.get("dir", 1)))
+            elif cmd == "pick":
+                W.pick(str(c.get("key") or ""))
+            elif cmd == "go":
+                W.go()
+            elif cmd == "hist":
+                W.hist(int(c.get("i", -1)))
+            elif cmd == "quit":
+                break
+        except Exception as e:
+            print("websearch:", type(e).__name__, e, file=sys.stderr, flush=True)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,4 @@
+TrayMenu 1.0 TrayMenu.qml
+TrayEntries 1.0 TrayEntries.qml
+singleton TrayBus 1.0 TrayBus.qml
+AppDot 1.0 AppDot.qml

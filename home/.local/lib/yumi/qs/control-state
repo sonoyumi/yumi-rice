@@ -1,0 +1,129 @@
+#!/usr/bin/env -S python3 -I
+"""control-state — состояния плиток центра управления Quickshell потоком JSON-строк (без root).
+Печатает {"wifi":{"on":…,"sub":…}, "bt":…, "vpn":…, "saver":…, "caffeine":…, "ppd":"balanced"} при старте
+и при событиях: NetworkManager (nmcli monitor) → wifi+vpn, BlueZ (gdbus) → bt, power-profiles-daemon (gdbus) → saver+ppd,
+файл $XDG_RUNTIME_DIR/yumi-caffeine.pid (inotifywait) → caffeine. Микрофон QML берёт из PipeWire сам.
+stdin: «refresh <ключ|all>» — перечитать. Пачка событий склеивается (0.4 с тишины), как в yumi-bar-events.
+Команды чтения — те же, что в yumi-menu-control. Откат: yumi-uninstall quickshell"""
+import json
+import os
+import queue
+import subprocess
+import sys
+import threading
+import time
+
+HOME = os.path.expanduser("~")
+BIN = os.path.join(HOME, ".local/bin")
+RUN = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+KEYS = ("wifi", "bt", "vpn", "saver", "caffeine", "ppd")
+q = queue.Queue()
+
+
+def sh(*cmd, timeout=2):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout.strip()
+    except Exception:
+        return ""
+
+
+def st_wifi():
+    if sh("nmcli", "radio", "wifi") != "enabled":
+        return {"on": False, "sub": "Выключен"}
+    for line in sh("nmcli", "-t", "-f", "NAME,TYPE", "con", "show", "--active").splitlines():
+        name, _, kind = line.rpartition(":")
+        if kind == "802-11-wireless":
+            return {"on": True, "sub": name.replace("\\:", ":") or "Подключено"}
+    return {"on": True, "sub": "Не подключено"}
+
+
+def st_bt():
+    on = "true" in sh("busctl", "get-property", "org.bluez", "/org/bluez/hci0", "org.bluez.Adapter1", "Powered")
+    if not on:
+        return {"on": False, "sub": "Выключен"}
+    names = [p[2] for p in (l.split(" ", 2) for l in sh("bluetoothctl", "devices", "Connected").splitlines()) if len(p) == 3]
+    return {"on": True, "sub": names[0] if len(names) == 1 else f"{len(names)} устр." if names else "Включён"}
+
+
+def st_vpn():
+    name = sh(os.path.join(BIN, "yumi-vpn"), "state", timeout=1.5)
+    return {"on": bool(name), "sub": name.removeprefix("VPN ") if name else "Отключён"}
+
+
+def st_ppd():
+    return sh(os.path.expanduser("~/.local/bin/yumi-power-profile"), "get") or "balanced"   # 29.10: вместо powerprofilesctl
+
+
+def st_saver(ppd=None):
+    on = (ppd or st_ppd()) == "power-saver"
+    return {"on": on, "sub": "Включена" if on else "Выключена"}
+
+
+def st_caffeine():
+    on = sh(os.path.join(BIN, "yumi-caffeine"), "state") == "true"
+    return {"on": on, "sub": "Не засыпать" if on else "Обычный сон"}
+
+
+def read(keys):
+    out = {}
+    if "wifi" in keys:
+        out["wifi"] = st_wifi()
+    if "bt" in keys:
+        out["bt"] = st_bt()
+    if "vpn" in keys:
+        out["vpn"] = st_vpn()
+    if "ppd" in keys or "saver" in keys:
+        out["ppd"] = st_ppd()
+        out["saver"] = st_saver(out["ppd"])
+    if "caffeine" in keys:
+        out["caffeine"] = st_caffeine()
+    return out
+
+
+def watch(cmd, keys, match=None):
+    """Поток: читает строки команды-монитора, на каждую кладёт ключи в очередь."""
+    def run():
+        while True:
+            try:
+                p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                for line in p.stdout:
+                    if line.startswith("Monitoring"):     # заставка gdbus monitor — не событие
+                        continue
+                    if match is None or match in line:
+                        q.put(keys)
+            except Exception:
+                pass
+            time.sleep(3)                                   # монитор упал — поднять
+    threading.Thread(target=run, daemon=True).start()
+
+
+def stdin_reader():
+    for line in sys.stdin:
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] == "refresh":
+            q.put(KEYS if parts[1] == "all" else tuple(k for k in parts[1:] if k in KEYS))
+    os._exit(0)                                            # родитель закрыл stdin — выходим
+
+
+def main():
+    print(json.dumps(read(KEYS), ensure_ascii=False), flush=True)
+    watch(["nmcli", "monitor"], ("wifi", "vpn"))
+    watch(["gdbus", "monitor", "--system", "--dest", "org.bluez"], ("bt",))
+    # 29.10: режим — yumi-power-profile (пишет ~/.config/yumi/power/profile при смене), а не power-profiles-daemon
+    watch(["inotifywait", "-m", "-q", "-e", "close_write,moved_to", "--format", "%f", os.path.expanduser("~/.config/yumi/power")],
+          ("saver", "ppd"), match="profile")
+    watch(["inotifywait", "-m", "-q", "-e", "create,delete,moved_to", "--format", "%f", RUN],
+          ("caffeine",), match="yumi-caffeine.pid")
+    threading.Thread(target=stdin_reader, daemon=True).start()
+    pending = set()
+    while True:
+        try:
+            pending.update(q.get(timeout=0.4))
+        except queue.Empty:
+            if pending:
+                print(json.dumps(read(pending), ensure_ascii=False), flush=True)
+                pending = set()
+
+
+if __name__ == "__main__":
+    main()

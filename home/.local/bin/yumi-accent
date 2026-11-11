@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""yumi-accent — живой цвет акцента из обоев для yumi-panel, yumi-player, Waybar, hyprlock, swaync.
+"""yumi-accent — живой цвет акцента из обоев для yumi-panel, yumi-player, Quickshell, hyprlock.
 
 Wallbash HyDE строит акценты от САМОГО ТЁМНОГО цвета палитры (pry1) — у большинства обоев это
 сероватая синева, и акцент почти всегда сиреневый. Здесь акцент берётся из самого «живого» цвета
@@ -8,9 +8,9 @@ Wallbash HyDE строит акценты от САМОГО ТЁМНОГО цв�
 
   yumi-accent [картинка]     пересчитать (по умолчанию текущие обои ~/.cache/yumi/theme/wall.set) и записать файлы
   yumi-accent --print FILE   только показать выбранный цвет (проверка)
-  yumi-accent --from-wallbash  вызов из шаблона wallbash: единственный перезапуск Waybar и swaync на смену обоев
+  yumi-accent --from-wallbash  вызов из шаблона wallbash (бар Quickshell перекрашивается сам по accent.txt)
 Выход: ~/.config/yumi/player/accent.css (меню и плеер подхватывают на лету),
-       ~/.config/waybar/yumi-accent.css, ~/.cache/yumi-accent/accent.{conf,txt}
+       ~/.cache/yumi-accent/accent.{conf,txt}
 Откат: yumi-uninstall accent"""
 import colorsys
 import os
@@ -189,9 +189,6 @@ def main():
           f"@define-color yp-accent {rgba(acc)};\n@define-color yp-border {rgba(acc5)};\n"
           f"@define-color yp-bg {rgba(bg, 0.85)};\n@define-color yp-on-acc {rgba(deep)};\n"
           f"@define-color yp-btn {rgba(btn, 0.55)};\n@define-color yp-hover {rgba(hov, 0.8)};\n")
-    write(os.path.join(HOME, ".config/waybar/yumi-accent.css"), head +
-          f"@define-color yb-acc #{acc};\n@define-color yb-acc5 #{acc5};\n"
-          f"@define-color yb-bg #{btn};\n@define-color yb-deep #{deep};\n@define-color yb-hover #{hov};\n")
     write(os.path.join(OUT, "accent.conf"), "# yumi-accent (hyprlock)\n" +
           "".join(f"$yumi_xa{i+1} = {rgba(c, 0.95)}\n" for i, c in enumerate(xa)) +
           f"$yumi_acc = {rgba(acc, 0.95)}\n$yumi_card = {rgba(deep, 0.42)}\n$yumi_deep = {rgba(deep, 0.95)}\n")
@@ -213,20 +210,6 @@ def main():
           + kitty_readable(bg))
     if not os.environ.get("YUMI_COMMIT_QUEUE"):     # при смене обоев kitty перечитывает цвета ОДИН раз (хук kitty)
         subprocess.run(["pkill", "-USR1", "-x", "kitty"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    if "--from-wallbash" in sys.argv:
-        # ЕДИНСТВЕННЫЙ перезапуск бара на смену обоев — СРАЗУ, как только его цвета записаны (theme.css пишет
-        # yumi-colors до хуков, yumi-accent.css — выше), а не после хуков ниже: так бар меняется вместе с kitty.
-        # Перечитывание стиля сигналом не годится: утечка памяти и «мёртвые» процессы модулей (проверено 13.10).
-        q = os.environ.get("YUMI_COMMIT_QUEUE")
-        if q:                                        # смена обоев yumi-colors: в общий момент со всеми
-            with open(q, "a") as f:
-                f.write("/usr/bin/systemctl --user restart waybar.service\n/usr/bin/swaync-client -rs\n")
-        else:
-            theme = os.path.join(HOME, ".config/waybar/theme.css")
-            wait = (f'for i in $(seq 30); do [ "{theme}" -nt "{os.path.realpath(WALL)}" ] && break; sleep 0.2; done; '
-                    'systemctl --user restart waybar.service; swaync-client -rs')
-            subprocess.Popen(["sh", "-c", wait], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                             start_new_session=True)
     # хуки: ~/.config/yumi/accent/hooks.d/* (исполняемые) — перекрасить приложения, рамки окон, VS Code…
     # Видимые сейчас — дождаться; программы, которых нет на экране, — в фоне (см. split_hooks ниже)
     hooks = os.path.join(HOME, ".config/yumi/accent/hooks.d")
@@ -249,8 +232,13 @@ def main():
         if bg:
             q = env.get("YUMI_COMMIT_QUEUE", "")
             benv = {k: v for k, v in env.items() if k != "YUMI_COMMIT_QUEUE"}
-            benv["PATH"] = ":".join(x for x in benv.get("PATH", "").split(":") if not x.endswith("yumi-colors/defer"))
-            wait = (f'for i in $(seq 200); do [ -e "{q}.done" ] && break; sleep 0.05; done; ' if q else "")
+            benv["PATH"] = ":".join(x for x in benv.get("PATH", "").split(":") if not x.endswith("yumi/colors/defer"))
+            # 19.10: пока ждали общий момент, обои могли сменить снова — тогда хуки этих (уже прошлых) обоев не
+            # запускать, иначе VS Code/Telegram/Zen/hyprtoolkit красились в цвета прошлых обоев
+            ws = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.join(HOME, ".cache"), "yumi/theme/wall.set")
+            mine = os.path.realpath(ws)
+            wait = (f'for i in $(seq 200); do [ -e "{q}.done" ] && break; sleep 0.05; done; '
+                    f'[ "$(readlink -f "{ws}")" = "{mine}" ] || exit 0; ' if q else "")
             run = " ".join(f'"{os.path.join(hooks, n)}" & ' for n in bg) + "wait"
             subprocess.Popen(["sh", "-c", wait + run], env=benv, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL, start_new_session=True)
@@ -258,7 +246,9 @@ def main():
 
 # Какие хуки ждать (их результат виден сейчас), а какие — в фон. Хук программы из VISIBLE_ONLY ждём, только
 # если её окно сейчас на экране (рабочий стол, открытый на одном из мониторов). Новые хуки без правила — ждём.
-BACKGROUND = ("25-hyprtoolkit", "restart")                 # окно пароля polkit, скрытые программы — их не видно
+WARM_SKIP = ("80-touchbar", "85-keyboard")                # прогрев (экраны погашены): железо не перекрашивать
+BACKGROUND = ("25-hyprtoolkit", "restart", "85-keyboard")  # окно пароля polkit, скрытые программы; клавиатура — после
+                                                           # общего момента: OpenRGB не должен задерживать смену обоев (16.10)
 VISIBLE_ONLY = {
     "50-vscode": ("code", "code-oss", "com.microsoft.vscode", "vscodium"),
     "70-telegram": ("org.telegram.desktop", "telegramdesktop", "telegram-desktop"),
@@ -283,7 +273,8 @@ def visible_classes():
 
 def split_hooks(names):
     if os.environ.get("YUMI_COLORS_WARM"):                # прогрев кэша: всё сразу, кроме перезапуска программ
-        return [n for n in names if "restart" not in n], []
+        # и кроме живого железа: тачбар и подсветка клавиатуры (их нет в комплекте — они красятся в общий момент)
+        return [n for n in names if "restart" not in n and n not in WARM_SKIP], []
     vis = visible_classes()
     fg, bg = [], []
     for n in names:

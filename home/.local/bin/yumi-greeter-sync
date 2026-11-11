@@ -1,0 +1,65 @@
+#!/bin/sh
+# yumi-greeter-sync (19.10.2026) — копия экрана блокировки для экрана входа greetd (greeter.qml): домашний каталог
+# закрыт (700), а экран входа работает от пользователя greeter. Копирует в $YUMI_GREETER_ROOT/home (по умолчанию
+# /var/lib/yumi-greeter/home) только то, что нужно LockSurface: конфиг Quickshell без .git/docs/бэкапов, цвета,
+# акцент, текущие обои, аватар и цитаты, скрипты погоды/сети, шрифты Inter и YumiIcons.
+#   yumi-greeter-sync          всё
+#   yumi-greeter-sync --quick  только цвета, акцент и обои (хук смены обоев 90-greeter)
+# Запускают: хук ~/.config/yumi/accent/hooks.d/90-greeter, служба yumi-greeter-sync.path (правки lock/), вход в сеанс.
+# Откат: yumi-greeter-uninstall (в архиве uninstall).
+set -eu
+ROOT=${YUMI_GREETER_ROOT:-/var/lib/yumi-greeter}
+H=$ROOT/home
+[ -d "$H" ] && [ -w "$H" ] || { echo "yumi-greeter-sync: нет доступа к $H (sudo-шаг установки не сделан)" >&2; exit 1; }
+umask 022
+# хук обоев и полный sync могут прийти одновременно — выстраиваются в очередь
+exec 9>"$ROOT/.sync.lock"; flock 9
+
+quick() {
+    mkdir -p "$H/.config/yumi/quickshell" "$H/.cache/yumi-accent" "$H/.cache/yumi/theme"
+    cp -f "$HOME/.config/yumi/quickshell/colors.json" "$H/.config/yumi/quickshell/colors.json"
+    cp -rfL "$HOME/.cache/yumi-accent/." "$H/.cache/yumi-accent/" 2>/dev/null || true
+    # обои — сам файл, не ссылка (домашний каталог greeter не прочитает); через .tmp, чтобы экран не взял половину
+    if [ -e "$HOME/.cache/yumi/theme/wall.set" ]; then
+        cp -fL "$HOME/.cache/yumi/theme/wall.set" "$H/.cache/yumi/theme/wall.set.tmp"
+        mv -f "$H/.cache/yumi/theme/wall.set.tmp" "$H/.cache/yumi/theme/wall.set"
+    fi
+}
+
+full() {
+    quick
+    # конфиг Quickshell: без .git, docs, бэкапов и сохранённых вариантов (1,1 ГБ → ~4 МБ)
+    mkdir -p "$H/.config/quickshell"
+    rm -rf "$H/.config/quickshell/yumi.new"; mkdir -p "$H/.config/quickshell/yumi.new"
+    tar -C "$HOME/.config/quickshell/yumi" --exclude=.git --exclude=docs --exclude='*.bak*' --exclude='*variant*' \
+        --exclude='dev-*.qml' -cf - . | tar -C "$H/.config/quickshell/yumi.new" -xf -
+    rm -rf "$H/.config/quickshell/yumi.old"
+    [ -d "$H/.config/quickshell/yumi" ] && mv "$H/.config/quickshell/yumi" "$H/.config/quickshell/yumi.old"
+    mv "$H/.config/quickshell/yumi.new" "$H/.config/quickshell/yumi"
+    rm -rf "$H/.config/quickshell/yumi.old"
+    # аватар и цитаты (как у hyprlock), скрипты погоды и пилюль сети, panel — модули бэкенда плеера (yumilyrics, yumimeta)
+    mkdir -p "$H/.config/hypr/hyprlock" "$H/.local/lib/yumi"
+    for f in avatar.jpg quotes.txt; do [ -f "$HOME/.config/hypr/hyprlock/$f" ] && cp -f "$HOME/.config/hypr/hyprlock/$f" "$H/.config/hypr/hyprlock/"; done
+    for d in qs bar panel; do
+        rm -rf "$H/.local/lib/yumi/$d"
+        tar -C "$HOME/.local/lib/yumi" --exclude='*.bak*' --exclude=__pycache__ -cf - "$d" | tar -C "$H/.local/lib/yumi" -xf -
+    done
+    # конфиг sway экрана входа (мониторы, масштаб)
+    rm -rf "$H/.config/yumi/greeter"; mkdir -p "$H/.config/yumi"
+    cp -rf "$HOME/.config/yumi/greeter" "$H/.config/yumi/greeter"
+    [ -f "$HOME/.config/yumi/weather.conf" ] && { mkdir -p "$H/.config/yumi"; cp -f "$HOME/.config/yumi/weather.conf" "$H/.config/yumi/"; }
+    # шрифты не из системы: Inter (часы, имя), YumiIcons (значки), Onest («Остров»)
+    mkdir -p "$H/.local/share/fonts"
+    cp -rf "$HOME/.local/share/fonts/Inter" "$H/.local/share/fonts/" 2>/dev/null || true
+    cp -f "$HOME/.local/share/fonts/YumiIcons.otf" "$H/.local/share/fonts/" 2>/dev/null || true
+    cp -rf "$HOME/.local/share/fonts/onest" "$H/.local/share/fonts/" 2>/dev/null || true   # «Остров» (29.10): основной шрифт
+    # запускатель — рядом с копией (greeter не запустит файл из закрытого домашнего каталога)
+    cp -f "$HOME/.local/bin/yumi-greeter" "$ROOT/yumi-greeter.tmp" && chmod 755 "$ROOT/yumi-greeter.tmp" && mv -f "$ROOT/yumi-greeter.tmp" "$ROOT/yumi-greeter"
+    chmod -R a+rX "$H/.config" "$H/.local" 2>/dev/null || true
+}
+
+case "${1:-}" in
+    --quick) quick ;;
+    *) full ;;
+esac
+chmod -R a+rX "$H/.config/yumi" "$H/.cache/yumi-accent" "$H/.cache/yumi/theme" 2>/dev/null || true

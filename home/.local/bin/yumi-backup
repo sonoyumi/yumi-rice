@@ -1,0 +1,219 @@
+#!/usr/bin/env bash
+# yumi-backup — инкрементальный зашифрованный бэкап через borg (rootless, 24.10.2026).
+# Без root: бэкапит $HOME на LUKS-флешку, дедуп + сжатие + своё шифрование borg.
+#
+#   yumi-backup setup     после разблокировки флешки: определить её, прописать REPO, init + первый бэкап
+#   yumi-backup init      создать репозиторий (один раз; генерит и сохраняет парольную фразу)
+#   yumi-backup run       сделать бэкап (create + prune + compact) — вызывается и из systemd
+#   yumi-backup status    когда был последний бэкап, доступен ли репозиторий, сколько архивов
+#   yumi-backup list      список архивов в репозитории
+#   yumi-backup mounted   код возврата 0, если репозиторий доступен (для скриптов/бара)
+#
+# Конфиг:        ~/.config/yumi-backup/config   (ЗАДАЙ REPO = путь к репо на флешке)
+# Парольная фраза: ~/.config/yumi-backup/passphrase  (chmod 600; потом копию — в Vaultwarden)
+# Состояние для бара: ~/.local/state/yumi-backup/{last,status}; пока идёт run — status=running, pid, progress (JSON)
+set -uo pipefail
+
+BORG="$HOME/.local/bin/borg"
+CFGDIR="${XDG_CONFIG_HOME:-$HOME/.config}/yumi-backup"
+CFG="${YUMI_BACKUP_CONFIG:-$CFGDIR/config}"
+PASSFILE="$(dirname "$CFG")/passphrase"
+EXCLUDES="$HOME/.local/src/yumi-backup/files/yumi-backup.excludes"
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/yumi-backup"
+
+say()  { printf '\033[1;35m▸\033[0m %s\n' "$*"; }
+err()  { printf '\033[1;31m✗\033[0m %s\n' "$*" >&2; }
+note() { command -v notify-send >/dev/null 2>&1 && notify-send -a "yumi-backup" "$@" || true; }
+
+[ -x "$BORG" ] || { err "нет бинарника borg: $BORG"; exit 1; }
+
+# значения по умолчанию (перекрываются конфигом)
+REPO=""
+SOURCES=("$HOME")
+KEEP_DAILY=7; KEEP_WEEKLY=4; KEEP_MONTHLY=6
+COMPRESSION="zstd,6"
+OVERDUE_DAYS=4            # через сколько дней без бэкапа напоминать «воткни флешку»
+
+[ -f "$CFG" ] && . "$CFG"
+export BORG_REPO="$REPO"
+[ -f "$PASSFILE" ] && export BORG_PASSCOMMAND="cat $PASSFILE"
+# не задавать лишних вопросов в автоматическом режиме
+export BORG_RELOCATED_REPO_ACCESS_IS_OK=no
+export BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK=no
+
+mkdir -p "$STATE"
+
+repo_reachable() {
+    [ -n "$REPO" ] || return 1
+    # borg repo — это каталог; доступен, если он есть или его родитель — примонтированная флешка.
+    # 30.10: раньше хватало существующего родителя — пустая точка монтирования /mnt/yumi-backup без флешки
+    # считалась «доступно», и суточный таймер ронял службу (borg: Repository does not exist)
+    [ -d "$REPO" ] || mountpoint -q "$(dirname "$REPO")"
+}
+
+# прогресс для пилюли бара: $STATE/progress (JSON, пишется атомарно), пока идёт run; pid — в $STATE/pid
+STARTED=0
+progress() {   # фаза процент(-1 = неизвестно) сделано_байт всего_байт файлов
+    printf '{"phase":"%s","pct":%s,"done":%s,"total":%s,"files":%s,"started":%s}\n' \
+        "$1" "$2" "$3" "$4" "$5" "$STARTED" > "$STATE/progress.tmp" && mv -f "$STATE/progress.tmp" "$STATE/progress"
+    island_progress "$1" "$2" "$3" "$4"
+}
+# 30.10: Dynamic Island (yumi-island, тихо и в фоне — нет IPC острова = ничего не происходит)
+island() { [ -x "$HOME/.local/bin/yumi-island" ] && { "$HOME/.local/bin/yumi-island" "$@" >/dev/null 2>&1 & } ; return 0; }
+island_progress() {   # фаза процент сделано всего
+    local sub trail p=""
+    case "$1" in prepare) sub="подготовка";; create) sub="копирование";; prune) sub="прореживание";; compact) sub="уплотнение";; *) sub="$1";; esac
+    if [ "$2" -ge 0 ] 2>/dev/null; then p=$(awk -v x="$2" 'BEGIN{printf "%.2f", x/100}'); trail="$2 %"; else trail="…"; fi
+    [ "${4:-0}" -gt 0 ] 2>/dev/null && sub="$sub · $(awk -v d="$3" -v t="$4" 'BEGIN{printf "%.1f из %.1f ГБ", d/1e9, t/1e9}')"
+    island update backup --title "Бэкап" --sub "$sub" --trail "$trail" ${p:+--progress "$p"}
+}
+bar_refresh() { command -v qs >/dev/null 2>&1 && timeout 3 qs -c yumi ipc call bar refresh backup >/dev/null 2>&1 || true; }
+run_cleanup() {
+    [ "$(cat "$STATE/status" 2>/dev/null)" = running ] && echo error > "$STATE/status"   # прервали на полпути
+    case "$(cat "$STATE/status" 2>/dev/null)" in
+        ok) island end backup --done "Бэкап готов" ;;
+        error) island update backup --title "Бэкап не удался" --tone bad --sub "подробности: yumi-backup status"
+               { sleep 5; "$HOME/.local/bin/yumi-island" end backup >/dev/null 2>&1; } >/dev/null 2>&1 & ;;
+        *) island end backup ;;
+    esac
+    rm -f "$STATE/pid" "$STATE/progress" "$STATE/progress.tmp"
+    bar_refresh
+}
+# stderr borg create --log-json: archive_progress → $STATE/progress (раз в 2 с), остальное — обычным текстом в журнал
+create_filter() {
+    local total=$1 last=0 kind done files pct l
+    jq -rR --unbuffered '(fromjson? // {type: "raw", message: .})
+        | if .type == "archive_progress" then (if .finished then empty else "P \(.original_size // 0) \(.nfiles // 0)" end)
+          elif .type == "file_status" then "\(.status) \(.path)"
+          else (.message // empty) end' \
+    | while IFS= read -r l; do
+        if [[ "$l" == "P "* ]]; then
+            read -r kind done files <<< "$l"
+            [ $((SECONDS - last)) -lt 2 ] && continue
+            last=$SECONDS
+            if [ "$total" -gt 0 ]; then pct=$(( done * 100 / total )); [ "$pct" -gt 98 ] && pct=98; else pct=-1; fi
+            progress create "$pct" "$done" "$total" "$files"
+        else
+            printf '%s\n' "$l" >&2
+        fi
+    done
+}
+
+cmd_init() {
+    [ -n "$REPO" ] || { err "в конфиге $CFG не задан REPO (путь к репо на флешке)"; exit 1; }
+    repo_reachable || { err "флешка не примонтирована (нет $(dirname "$REPO"))"; exit 1; }
+    if [ ! -f "$PASSFILE" ]; then
+        umask 077
+        head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 40 > "$PASSFILE"
+        chmod 600 "$PASSFILE"
+        say "сгенерирована парольная фраза: $PASSFILE (сохрани копию! потом — в Vaultwarden)"
+        export BORG_PASSCOMMAND="cat $PASSFILE"
+    fi
+    say "создаю репозиторий $REPO (repokey-blake2)…"
+    "$BORG" init --encryption=repokey-blake2 || { err "borg init не удался"; exit 1; }
+    say "готово. Ключ хранится в самом репозитории + защищён парольной фразой."
+    say "ВАЖНО: выгрузи ключ в надёжное место:  borg key export :: $CFGDIR/key-backup.txt"
+}
+
+cmd_run() {
+    if ! repo_reachable; then
+        # тихо выходим, но если давно не было бэкапа — напоминаем
+        local last=0; [ -f "$STATE/last" ] && last=$(cat "$STATE/last")
+        local age=$(( ( $(date +%s) - last ) / 86400 ))
+        if [ "$last" -gt 0 ] && [ "$age" -ge "$OVERDUE_DAYS" ]; then
+            echo overdue > "$STATE/status"
+            note "Бэкап устарел ($age дн.)" "Воткни и разблокируй флешку для бэкапа"
+        fi
+        say "репозиторий недоступен (флешка не воткнута) — пропускаю"
+        exit 0
+    fi
+    # второй запуск, пока идёт первый (двойной клик по пилюле), — не ошибка: borg всё равно не даст взять блокировку
+    if [ -f "$STATE/pid" ] && kill -0 "$(cat "$STATE/pid" 2>/dev/null)" 2>/dev/null; then
+        say "бэкап уже идёт (pid $(cat "$STATE/pid")) — пропускаю"
+        note "Бэкап уже идёт" "Прогресс — в пилюле бара"
+        exit 0
+    fi
+    echo $$ > "$STATE/pid"; echo running > "$STATE/status"
+    STARTED=$(date +%s)
+    trap 'run_cleanup' EXIT
+    "$HOME/.local/bin/yumi-island" start backup --title "Бэкап" --sub "подготовка" --icon backup --prio 4 --progress 0 \
+        --open "qs -c yumi ipc call menu toggle backup" >/dev/null 2>&1 || true   # старт — синхронно, раньше update
+    progress prepare -1 0 0 0; bar_refresh
+
+    local name; name="home-$(date +%Y-%m-%d_%H%M%S)"
+    # сколько ждать: исходный размер прошлого архива (borg не знает объём заранее) — по нему считаем проценты
+    local total
+    total=$("$BORG" info --json --last 1 --glob-archives 'home-*' --lock-wait 5 2>/dev/null \
+            | jq -r '.archives[0].stats.original_size // 0' 2>/dev/null)
+    [[ "$total" =~ ^[0-9]+$ ]] || total=0
+    say "бэкап → $REPO :: $name"
+    progress create -1 0 "$total" 0; bar_refresh
+    local rc
+    {
+        "$BORG" create \
+            --verbose --filter=AME --stats --show-rc --progress --log-json \
+            --compression "$COMPRESSION" \
+            --exclude-caches \
+            ${EXCLUDES:+--exclude-from "$EXCLUDES"} \
+            "::$name" "${SOURCES[@]}" 2>&1 1>&3 | create_filter "$total"
+        rc=${PIPESTATUS[0]}
+    } 3>&1
+    if [ $rc -ne 0 ] && [ $rc -ne 1 ]; then   # 1 = предупреждения (норм), >1 — ошибка
+        err "borg create вернул $rc"
+        echo error > "$STATE/status"; note "Бэкап не удался" "borg create rc=$rc"
+        exit $rc
+    fi
+    say "прореживание (храню ${KEEP_DAILY}д/${KEEP_WEEKLY}н/${KEEP_MONTHLY}м)…"
+    progress prune 99 "$total" "$total" 0; bar_refresh
+    "$BORG" prune --list --glob-archives 'home-*' \
+        --keep-daily "$KEEP_DAILY" --keep-weekly "$KEEP_WEEKLY" --keep-monthly "$KEEP_MONTHLY"
+    progress compact 99 "$total" "$total" 0; bar_refresh
+    "$BORG" compact
+    date +%s > "$STATE/last"; echo ok > "$STATE/status"
+    say "готово."
+    note "Бэкап готов" "$name"
+}
+
+cmd_status() {
+    echo "Репозиторий: ${REPO:-<не задан>}"
+    if repo_reachable; then echo "Доступен:    да"; else echo "Доступен:    нет (воткни флешку)"; fi
+    if [ -f "$STATE/last" ]; then
+        local last age; last=$(cat "$STATE/last"); age=$(( ( $(date +%s) - last ) / 86400 ))
+        echo "Последний:   $(date -d "@$last" '+%Y-%m-%d %H:%M') (${age} дн. назад)"
+    else
+        echo "Последний:   ещё не было"
+    fi
+    echo "Статус:      $(cat "$STATE/status" 2>/dev/null || echo —)"
+    if repo_reachable && [ -d "$REPO" ]; then
+        echo "---"; "$BORG" list --short 2>/dev/null | tail -5
+    fi
+}
+
+cmd_setup() {   # после того как флешка воткнута и РАЗБЛОКИРОВАНА: определить её, прописать REPO, init + первый бэкап
+    if ! repo_reachable; then
+        local base="/run/media/$(id -un)" mounts=() d
+        [ -d "$base" ] && for d in "$base"/*/; do [ -d "$d" ] && mounts+=("${d%/}"); done
+        if [ "${#mounts[@]}" -eq 0 ]; then
+            err "не вижу разблокированной флешки под $base — воткни и разблокируй LUKS-флешку (файловый менеджер)"; exit 1
+        elif [ "${#mounts[@]}" -gt 1 ]; then
+            err "несколько носителей: ${mounts[*]} — задай REPO в $CFG вручную"; exit 1
+        fi
+        REPO="${mounts[0]}/borg-yumi"
+        if grep -q '^REPO=' "$CFG" 2>/dev/null; then sed -i "s#^REPO=.*#REPO=\"$REPO\"#" "$CFG"
+        else echo "REPO=\"$REPO\"" >> "$CFG"; fi
+        export BORG_REPO="$REPO"
+        say "REPO установлен: $REPO"
+    fi
+    [ -d "$REPO" ] || cmd_init
+    cmd_run
+}
+
+case "${1:-run}" in
+    init)    cmd_init ;;
+    setup)   cmd_setup ;;
+    run|"")  cmd_run ;;
+    status)  cmd_status ;;
+    list)    repo_reachable && "$BORG" list || { err "репозиторий недоступен"; exit 1; } ;;
+    mounted) repo_reachable ;;
+    *)       err "неизвестно: $1"; grep '^#' "$0" | sed 's/^# \?//' | head -12; exit 1 ;;
+esac

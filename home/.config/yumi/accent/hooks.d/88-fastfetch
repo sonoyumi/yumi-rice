@@ -1,0 +1,3 @@
+#!/bin/sh
+# fastfetch «Свиток» в цветах обоев — пересобрать config.jsonc из шаблона (~/.local/lib/yumi/fetch/theme)
+exec timeout 5 "$HOME/.local/lib/yumi/fetch/theme"

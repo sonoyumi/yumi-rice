@@ -17,11 +17,11 @@ UID = os.getuid()
 TICK = os.sysconf("SC_CLK_TCK")
 # Системное и сама оболочка: закрыть из меню нельзя
 PROTECTED = re.compile(
-    r"^(Hyprland|Xwayland|waybar|swaync|hypridle|hyprlock|hyprpaper|swww.*|pipewire.*|wireplumber|"
+    r"^(Hyprland|Xwayland|hypridle|hyprlock|hyprpaper|swww.*|pipewire.*|wireplumber|"
     r"kitty|systemd.*|dbus.*|sddm.*|polkit.*|xdg-.*|rofi|earlyoom|NetworkManager|bluetoothd|upowerd)$"
 )
 # Приложения, которые не показывать в пилюле и меню: по одному имени на строку, # — комментарий
-HIDE_FILE = os.path.expanduser("~/.config/waybar/top-hide")
+HIDE_FILE = os.path.expanduser("~/.config/yumi/top-hide")
 
 
 def hidden():

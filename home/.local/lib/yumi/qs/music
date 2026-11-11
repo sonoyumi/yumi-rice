@@ -1,0 +1,553 @@
+#!/usr/bin/env -S python3 -I
+"""Бэкенд меню «Музыка» Quickshell (menus/music/MusicMenu.qml) — та же логика, что у ~/.local/bin/yumi-menu-music:
+медиатека yumi-music (playlists.json + кэш pl-*.json, added.json через yumi-music pl-add/pl-remove/pl-new),
+поиск YouTube Music / SoundCloud (yumi-music search / search-sc), импорт плейлиста по ссылке, воспроизведение
+(yumi-music play/add/sync), очередь и «Сейчас играет» по сокету mpv yumi-music, «Недавние» (recent.json),
+обложки — квадратные уменьшенные копии в том же кэше, что у GTK-меню (~/.cache/yumi-music/menu-thumbs/<px>/<ключ>.jpg).
+Сеть и тяжёлые команды — в потоках: меню не замирает.
+Протокол: stdin — команды JSON, stdout — JSON-строки (type: lib | tracks | mqueue | recent | results | now | cover | toast).
+  {"cmd":"lib"}  {"cmd":"tracks","id"}  {"cmd":"queue"}  {"cmd":"recent"}  {"cmd":"watch","on":bool}
+  {"cmd":"search","src":"yt|sc","text"}  {"cmd":"import","text"}  {"cmd":"play","id","n"?,"shuffle"}  {"cmd":"sync","id"}
+  {"cmd":"add","target","now"}  {"cmd":"pl-add","pid","track"}  {"cmd":"pl-new","name","track"}  {"cmd":"pl-remove","pid","key"}
+  {"cmd":"index","n"}  {"cmd":"pause"}  {"cmd":"prev"}  {"cmd":"next"}  {"cmd":"seek","t"}  {"cmd":"shuffle"}  {"cmd":"repeat"}
+  {"cmd":"volume","v":0..100}  {"cmd":"cover","key","px"}
+YP_DRYRUN=1 — команды плееру и изменения плейлистов только печатаются (поиск и обложки работают).
+Откат: yumi-uninstall quickshell"""
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import threading
+import time
+import urllib.request
+
+HOME = os.path.expanduser("~")
+sys.path.insert(0, os.path.join(HOME, ".local/lib/yumi/panel"))
+import yumimeta  # noqa: E402
+
+DRY = bool(os.environ.get("YP_DRYRUN"))
+RUN = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+CONFIG = os.environ.get("XDG_CONFIG_HOME", os.path.join(HOME, ".config"))
+CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.join(HOME, ".cache")), "yumi-music")
+CLI = os.path.join(HOME, ".local/bin/yumi-music")
+SOCK = os.path.join(RUN, "yumi-music.sock")
+PLAYLISTS = os.path.join(CONFIG, "yumi/music/playlists.json")
+COVERS = os.path.join(CACHE, "covers")
+MINI = os.path.join(CACHE, "mini")
+SCALED = os.path.join(CACHE, "menu-thumbs")
+RECENT = os.path.join(CACHE, "recent.json")
+PROXY = "http://127.0.0.1:40080"
+OUT = threading.Lock()
+
+
+def emit(obj):
+    with OUT:
+        sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
+
+
+def toast(text, hold=2, err=False):
+    emit({"type": "toast", "text": text, "hold": hold, "error": err})
+
+
+def load_json(path, default):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return default
+
+
+def ipc(*command):
+    if DRY and command[0] != "get_property":
+        print("[dry-run] mpv", command, file=sys.stderr, flush=True)
+        return None
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as c:
+            c.settimeout(1.5)
+            c.connect(SOCK)
+            c.sendall((json.dumps({"command": list(command), "request_id": 7}) + "\n").encode())
+            buf = b""
+            while True:
+                chunk = c.recv(1 << 20)
+                if not chunk:
+                    return None
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    msg = json.loads(line or b"{}")
+                    if msg.get("request_id") == 7:
+                        return msg.get("data")
+    except (OSError, ValueError):
+        return None
+
+
+def cli(*args, cb=None):
+    """Команда yumi-music в фоне, cb(ok, вывод). В YP_DRYRUN команды, меняющие плеер/плейлисты, только печатаются."""
+    if DRY and args[0] in ("play", "add", "sync", "import", "pl-add", "pl-new", "pl-remove"):
+        print("[dry-run] yumi-music", *args, file=sys.stderr, flush=True)
+        if cb:
+            fake = {"pl-add": json.dumps({"name": "[проверка]", "dup": False}),
+                    "pl-new": json.dumps({"id": "dry"}), "import": json.dumps({"name": "[проверка]", "count": 0})}
+            cb(True, fake.get(args[0], ""))
+        return
+
+    def work():
+        try:
+            r = subprocess.run([CLI, *args], capture_output=True, text=True, timeout=120)
+            ok, out = r.returncode == 0, (r.stdout if r.returncode == 0 else r.stderr).strip()
+        except (OSError, subprocess.SubprocessError) as e:
+            ok, out = False, str(e)
+        if cb:
+            cb(ok, out)
+    threading.Thread(target=work, daemon=True).start()
+
+
+def track_source(t):
+    u = t.get("url") or t.get("play") or ""
+    if "soundcloud.com" in u:
+        return "sc"
+    if "youtube.com" in u or "youtu.be" in u or (t.get("id") and not u):
+        return "yt"
+    return ""
+
+
+_proxy = [0.0, False]
+
+
+def proxy_up():
+    if time.monotonic() - _proxy[0] > 30:
+        try:
+            with socket.create_connection(("127.0.0.1", 40080), timeout=0.3):
+                _proxy[1] = True
+        except OSError:
+            _proxy[1] = False
+        _proxy[0] = time.monotonic()
+    return _proxy[1]
+
+
+# ---------- обложки: как Covers в GTK-меню (квадрат по центру, под физические px, кэш menu-thumbs) ----------
+class Covers:
+    def __init__(self):
+        self.todo, self.workers, self.lock, self.thumbs = [], 0, threading.Lock(), {}
+        self.done = set()
+        try:
+            for line in open(os.path.join(CACHE, "thumbs.tsv")):
+                k, _, url = line.rstrip("\n").partition("\t")
+                if k and url:
+                    self.thumbs[k] = url
+        except OSError:
+            pass
+
+    def has(self, k):
+        return bool(k) and (os.path.exists(os.path.join(COVERS, k + ".jpg")) or k in self.thumbs)
+
+    def want(self, key, size):
+        out = os.path.join(SCALED, str(size), key + ".jpg")
+        if os.path.exists(out) and os.path.getsize(out) > 0:
+            return emit({"type": "cover", "key": key, "px": size, "path": out})
+        with self.lock:
+            if (key, size) in self.todo:
+                self.todo.remove((key, size))
+            self.todo.insert(0, (key, size))      # последние запрошенные — первыми: они сейчас на экране
+            start = self.workers < 4
+            if start:
+                self.workers += 1
+        if start:
+            threading.Thread(target=self.worker, daemon=True).start()
+
+    def worker(self):
+        while True:
+            with self.lock:
+                if not self.todo:
+                    self.workers -= 1
+                    return
+                key, size = self.todo.pop(0)
+            try:
+                path = self.make(key, size)
+            except Exception as e:  # noqa: BLE001 — сеть/битый файл: просто без обложки
+                path = None
+                print(f"cover {key[:40]} {size}: {e}", file=sys.stderr, flush=True)
+            if path:
+                emit({"type": "cover", "key": key, "px": size, "path": path})
+
+    def make(self, key, size):
+        out = os.path.join(SCALED, str(size), key + ".jpg")
+        if os.path.exists(out) and os.path.getsize(out) > 0:
+            return out
+        src, letterbox = None, False
+        for p in (os.path.join(COVERS, key + ".jpg"), os.path.join(COVERS, key + ".yt.jpg"), os.path.join(MINI, key + ".jpg")):
+            if os.path.exists(p) and os.path.getsize(p) > 0:
+                src, letterbox = p, p.endswith(".yt.jpg")
+                break
+        if not src or (src.startswith(MINI) and size > 120):
+            got = self.download(key)
+            if got:
+                src, letterbox = got
+        if not src:
+            return None
+        import gi
+        gi.require_version("GdkPixbuf", "2.0")
+        from gi.repository import GdkPixbuf
+        pb = GdkPixbuf.Pixbuf.new_from_file(src)
+        w, h = pb.get_width(), pb.get_height()
+        side = min(w, h)
+        if letterbox:                              # миниатюра ролика 4:3 с полосами — центр без полос
+            side = min(side, round(w * 9 / 16))
+        sub = pb.new_subpixbuf((w - side) // 2, (h - side) // 2, side, side)
+        interp = GdkPixbuf.InterpType.HYPER if side > size else GdkPixbuf.InterpType.BILINEAR
+        sq = sub.scale_simple(size, size, interp)
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        sq.savev(out + ".tmp", "jpeg", ["quality"], ["92"])
+        os.replace(out + ".tmp", out)
+        return out
+
+    def download(self, key):
+        url, letterbox = self.thumbs.get(key), False
+        if url:
+            url = re.sub(r"=w\d+-h\d+", "=w544-h544", url).replace("-large", "-t500x500")
+        elif not key.startswith("http"):
+            url, letterbox = f"https://i.ytimg.com/vi/{key}/hqdefault.jpg", True
+        else:
+            return None
+        handler = urllib.request.ProxyHandler({"https": PROXY, "http": PROXY}) \
+            if "sndcdn.com" in url and proxy_up() else urllib.request.ProxyHandler({})
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.build_opener(handler).open(req, timeout=8) as r:
+            data = r.read()
+        os.makedirs(COVERS, exist_ok=True)
+        out = os.path.join(COVERS, key + (".yt.jpg" if letterbox else ".jpg"))
+        with open(out + ".tmp", "wb") as f:
+            f.write(data)
+        os.replace(out + ".tmp", out)
+        return out, letterbox
+
+
+COV = Covers()
+
+
+# ---------- медиатека ----------
+def playlists():
+    out = []
+    for p in load_json(PLAYLISTS, []):
+        d = load_json(os.path.join(CACHE, f"pl-{p['id']}.json"), {})
+        name = (d.get("name") or p.get("name") or p["id"]).replace(" (SoundCloud)", "")
+        src = {"sc": "SoundCloud", "mix": "SoundCloud + Apple Music", "local": "Мой плейлист"}.get(p.get("src"), "YouTube Music") \
+            if not (p.get("src") == "mix" and all(x.get("type") == "apple" for x in p.get("sources", []))) \
+            else "Apple Music → SoundCloud"
+        out.append({"id": p["id"], "name": name, "short": name.split("/")[0].strip(), "src": src,
+                    "tracks": d.get("tracks") or []})
+    return out
+
+
+def tkey(t):
+    return t.get("key") or t.get("id")
+
+
+def first_key(tracks):
+    for t in tracks[:40]:
+        if COV.has(tkey(t)):
+            return tkey(t)
+    return tkey(tracks[0]) if tracks else ""
+
+
+def mosaic_keys(tracks):
+    keys = []
+    for t in tracks[:80]:
+        k = tkey(t)
+        if COV.has(k) and k not in keys:
+            keys.append(k)
+        if len(keys) == 4:
+            break
+    return keys or [tkey(t) for t in tracks[:1] if tkey(t)]
+
+
+def row(t, extra=None):
+    """Строка трека для QML: ключ, подписи, источник и сам трек (для pl-add)."""
+    r = {"key": tkey(t) or "", "title": t.get("title") or "", "artist": t.get("artist") or "", "dur": int(t.get("dur") or 0),
+         "src": track_source(t), "url": t.get("url") or "", "id": t.get("id") or "",
+         "track": {k: t.get(k) for k in ("id", "url", "key", "title", "artist", "dur", "thumb") if t.get(k)}}
+    if extra:
+        r.update(extra)
+    return r
+
+
+def emit_lib():
+    pls = playlists()
+    emit({"type": "lib", "playlists": [{"id": p["id"], "name": p["name"], "short": p["short"], "src": p["src"],
+                                        "count": len(p["tracks"]), "keys": mosaic_keys(p["tracks"]),
+                                        "first": first_key(p["tracks"])} for p in pls]})
+
+
+def emit_tracks(pid):
+    p = next((x for x in playlists() if x["id"] == pid), None)
+    if not p:
+        return emit({"type": "tracks", "id": pid, "missing": True, "items": []})
+    total = sum(int(t.get("dur") or 0) for t in p["tracks"])
+    srcs = [track_source(t) for t in p["tracks"]]
+    by_src = " · ".join(f"{name} {srcs.count(k)}" for k, name in (("sc", "SoundCloud"), ("yt", "YouTube"))
+                        if srcs.count(k)) if len(set(srcs)) > 1 else ""
+    sub = f"{len(p['tracks'])} треков · {total // 3600} ч {total % 3600 // 60} мин" + (f"  ·  {by_src}" if by_src else "")
+    items = [row(t, {"n": i, "rm": bool(t.get("added"))}) for i, t in enumerate(p["tracks"])]
+    emit({"type": "tracks", "id": pid, "src": p["src"], "short": p["short"], "sub": sub,
+          "keys": mosaic_keys(p["tracks"]), "items": items})
+
+
+def queue_rows():
+    pl = ipc("get_property", "playlist") or []
+    q, cur = [], -1
+    for i, e in enumerate(pl):
+        url = e.get("filename", "")
+        m = yumimeta.lookup(url)
+        if m and m["title"]:
+            title, artist, dur = m["title"], m["artist"], m["dur"]
+        else:
+            raw = e.get("title") or os.path.basename(url)
+            artist, _, title = raw.partition(" — ") if " — " in raw else ("", "", raw)
+            dur = 0
+        key = yumimeta.key_for(url) or ""
+        q.append({"i": i, "url": url, "key": key, "title": title, "artist": artist, "dur": int(dur or 0),
+                  "src": track_source({"url": url}),
+                  "track": {k: v for k, v in (("id", key), ("key", key), ("url", url), ("title", title),
+                                              ("artist", artist), ("dur", int(dur or 0))) if v}})
+        if e.get("current"):
+            cur = i
+    return q, cur
+
+
+def emit_queue():
+    q, cur = queue_rows()
+    src = ""
+    if q:
+        k0 = q[0]["key"]
+        src = next((p["short"] for p in playlists() if any(tkey(t) == k0 for t in p["tracks"][:400])), "")
+    emit({"type": "mqueue", "items": q, "cur": cur, "from": src})
+
+
+def emit_recent():
+    emit({"type": "recent", "items": [row(t) for t in load_json(RECENT, [])]})
+
+
+def remember(url, key, title, artist, dur):
+    rec = [t for t in load_json(RECENT, []) if t.get("url") != url]
+    rec.insert(0, {"url": url, "key": key, "title": title, "artist": artist, "dur": dur})
+    try:
+        with open(RECENT + ".tmp", "w") as f:
+            json.dump(rec[:60], f, ensure_ascii=False)
+        os.replace(RECENT + ".tmp", RECENT)
+    except OSError:
+        pass
+
+
+# ---------- «Сейчас играет»: опрос mpv раз в секунду, пока меню открыто ----------
+class Now:
+    def __init__(self):
+        self.on, self.key, self.cur = False, None, None
+        self.cond = threading.Condition()
+        threading.Thread(target=self.loop, daemon=True).start()
+
+    def set(self, on):
+        with self.cond:
+            self.on = on
+            self.cond.notify()
+
+    def kick(self):
+        with self.cond:
+            self.cond.notify()
+
+    def loop(self):
+        while True:
+            with self.cond:
+                while not self.on:
+                    self.cond.wait()
+                self.cond.wait(1.0)
+            if self.on:
+                try:
+                    self.poll()
+                except Exception as e:  # noqa: BLE001
+                    print("now:", e, file=sys.stderr, flush=True)
+
+    def poll(self):
+        path = ipc("get_property", "path")
+        pos = ipc("get_property", "playlist-pos")
+        pause = ipc("get_property", "pause")
+        if not path:
+            self.key = None
+            return emit({"type": "now", "has": False})
+        m = yumimeta.lookup(path)
+        title = (m and m["title"]) or ipc("get_property", "media-title") or os.path.basename(path)
+        artist = (m and m["artist"]) or ""
+        key = yumimeta.key_for(path) or ""
+        if key != self.key:
+            self.key = key
+            if not DRY:
+                remember(path, key, title, artist, (m and m["dur"]) or 0)
+        dur = ipc("get_property", "duration") or (m and m["dur"]) or 0
+        t = ipc("get_property", "time-pos") or 0
+        v = ipc("get_property", "ao-volume")
+        loop = ipc("get_property", "loop-playlist")
+        cur = pos if isinstance(pos, int) else -1
+        emit({"type": "now", "has": True, "title": title, "artist": artist, "key": key, "path": path,
+              "playing": not pause, "dur": dur, "pos": t, "cur": cur,
+              "vol": round((max(v, 0) / 100) ** (1 / 3) * 100) if v is not None else -1,
+              "loop": loop not in (False, "no", None)})
+        if cur != self.cur:
+            self.cur = cur
+            emit_queue()
+
+
+NOW = Now()
+
+
+# ---------- действия ----------
+def after_change(delay=0.6):
+    def go():
+        emit_queue()
+        NOW.kick()
+        emit({"type": "changed"})
+    threading.Timer(delay, go).start()
+
+
+def handle(c):
+    cmd = c.get("cmd")
+    if cmd == "lib":
+        emit_lib()
+    elif cmd == "tracks":
+        emit_tracks(c["id"])
+    elif cmd == "queue":
+        threading.Thread(target=emit_queue, daemon=True).start()
+    elif cmd == "recent":
+        emit_recent()
+    elif cmd == "watch":
+        NOW.set(bool(c.get("on")))
+        if c.get("on"):
+            NOW.cur = None
+            NOW.kick()
+    elif cmd == "cover":
+        if c.get("key"):
+            COV.want(c["key"], int(c["px"]))
+    elif cmd == "search":
+        tab, text = c["src"], c["text"]
+        toast("Ищу…", 20)
+
+        def done(ok, out):
+            if not ok:
+                emit({"type": "results", "src": tab, "items": None})
+                return toast("Поиск не удался", 3, True)
+            try:
+                res = json.loads(out or "[]")
+            except ValueError:
+                res = []
+            items = []
+            for r in res:
+                key = r.get("key") or r["id"]
+                if r.get("thumb"):
+                    COV.thumbs.setdefault(key, r["thumb"])
+                items.append(row(dict(r, key=key), {"target": r["url"] if tab == "sc" else r["id"]}))
+                items[-1]["track"] = r
+            emit({"type": "results", "src": tab, "items": items})
+            toast(f"Найдено: {len(items)}", 2)
+        cli("search" if tab == "yt" else "search-sc", text, cb=done)
+    elif cmd == "import":
+        toast("Загружаю плейлист…", 60)
+
+        def done(ok, out):
+            if not ok:
+                return toast(f"Ошибка: {out[:60]}", 4, True)
+            try:
+                d = json.loads(out)
+                toast(f"Добавлен «{d['name']}» — {d['count']} треков", 4)
+            except (ValueError, KeyError):
+                toast("Плейлист добавлен", 3)
+            emit({"type": "imported"})
+            emit_lib()
+        cli("import", c["text"], cb=done)
+    elif cmd == "play":
+        toast("Загружаю плейлист…", 10)
+        args = ["play", c["id"]] + ([str(c["n"])] if c.get("n") is not None else []) + (["--shuffle"] if c.get("shuffle") else [])
+        cli(*args, cb=lambda ok, out: (toast("Играет" if ok else f"Ошибка: {out[:60]}", 3, not ok), after_change()))
+    elif cmd == "sync":
+        toast("Обновляю плейлист…", 60)
+        pid = c["id"]
+        cli("sync", pid, cb=lambda ok, out: (toast((out or "Обновлено") if ok else "Не удалось обновить", 3, not ok),
+                                             emit_lib(), emit_tracks(pid)))
+    elif cmd == "add":
+        now = bool(c.get("now"))
+        cli("add", c["target"], *(["--now"] if now else []),
+            cb=lambda ok, out: (toast(("Включаю…" if now else "Будет следующим") if ok else "Не удалось", 3, not ok),
+                                after_change()))
+    elif cmd == "pl-add":
+        pl_add(c["pid"], c.get("track") or {})
+    elif cmd == "pl-new":
+        track = c.get("track") or {}
+
+        def done(ok, out):
+            if not ok:
+                return toast(f"Не удалось: {out[-60:]}", 4, True)
+            pl_add(json.loads(out)["id"], track)
+        cli("pl-new", c["name"], cb=done)
+    elif cmd == "pl-remove":
+        pid = c["pid"]
+        cli("pl-remove", pid, c["key"], cb=lambda ok, out: (toast("Убрано из плейлиста" if ok else "Не удалось", 2, not ok),
+                                                          emit_lib(), emit_tracks(pid)))
+    elif cmd == "index":
+        ipc("playlist-play-index", int(c["n"]))
+        ipc("set_property", "pause", False)
+        after_change(0.4)
+    elif cmd == "pause":
+        ipc("cycle", "pause")
+        after_change(0.25)
+    elif cmd in ("prev", "next"):
+        ipc("playlist-" + cmd)
+        after_change(0.25)
+    elif cmd == "seek":
+        ipc("seek", max(float(c["t"]), 0), "absolute")
+    elif cmd == "shuffle":
+        q, _ = queue_rows()
+        if q:
+            ipc("playlist-shuffle")
+            ipc("playlist-play-index", 0)
+            toast("Очередь перемешана", 2)
+            after_change(0.4)
+    elif cmd == "repeat":
+        on = ipc("get_property", "loop-playlist") not in (False, "no", None)
+        ipc("set_property", "loop-playlist", "no" if on else "inf")
+        toast("Повтор выключен" if on else "Повтор плейлиста", 2)
+        after_change(0.25)
+    elif cmd == "volume":
+        # громкость потока mpv в PipeWire: проценты «слуховые» (кубическая шкала), ao-volume линейный → (v/100)³
+        v = min(max(float(c["v"]), 0), 100)
+        ipc("set_property", "ao-volume", round((v / 100) ** 3 * 100, 3))
+
+
+def pl_add(pid, track):
+    t = {k: track.get(k) for k in ("id", "url", "key", "title", "artist", "dur", "thumb") if track.get(k)}
+    toast("Добавляю…", 10)
+
+    def done(ok, out):
+        if not ok:
+            return toast(f"Не удалось: {out[-60:]}", 4, True)
+        d = json.loads(out)
+        name = d["name"].replace(" (SoundCloud)", "")
+        toast(f"Уже есть в «{name}»" if d["dup"] else f"Добавлено в «{name}»", 3)
+        emit_lib()
+        emit({"type": "changed-pl", "id": pid})
+    cli("pl-add", pid, json.dumps(t, ensure_ascii=False), cb=done)
+
+
+def main():
+    emit({"type": "hello", "dry": DRY})
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            handle(json.loads(line))
+        except (ValueError, KeyError, TypeError) as e:
+            print("music: плохая команда:", line, e, file=sys.stderr, flush=True)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,46 @@
+# Необязательные пакеты. ./install.sh спрашивает про каждую группу (строка «## название»).
+# Пакет из репозиториев ставится через pacman, остальные — через AUR (paru/yay).
+# Формат: пакет  # зачем. Без этих пакетов рис работает — пропадает только названная возможность.
+
+## Удобства рабочего стола
+hyprshutdown                 # аккуратно закрывает окна при выходе из Hyprland (yumi/events.lua)
+nwg-displays                 # настройка мониторов мышью → ~/.config/hypr/monitors.lua (hyprland.lua его подхватывает)
+kate                         # KWrite — текстовый редактор на SUPER+SHIFT+C
+qt5ct                        # цвета обоев и для старых программ на Qt5 (шаблон qtct)
+udiskie                      # значок и монтирование флешек (служба yumi-udiskie.service, по умолчанию выключена)
+
+## Распознавание текста на скриншотах (yumi-screenshot → OCR)
+tesseract                    # распознавание текста
+tesseract-data-eng           # английский язык
+tesseract-data-rus           # русский язык (другие языки — tesseract-data-<код>)
+
+## Терминал: дополнительные команды
+bat                          # cat с подсветкой (functions/bat.zsh включается, если bat есть)
+duf                          # df в виде таблицы (functions/duf.zsh)
+
+## Музыка: прокси WARP для SoundCloud (yumi-music-proxy.service)
+wireproxy                    # прокси WireGuard в пространстве пользователя (127.0.0.1:40080)
+python-cryptography          # ключи для регистрации своего устройства WARP (warp-register.py)
+
+## Периферия Logitech
+solaar                       # заряд и DPI мыши в меню «Мышь»
+openrgb                      # подсветка клавиатуры в цвет бара (хук 85-keyboard; без клавиатуры молча выходит)
+
+## Сеть: Tailscale
+tailscale                    # адрес и состояние в меню Wi-Fi и в fastfetch
+
+## Снимки системы и память (для ./rice push-system)
+snapper                      # снимок /etc перед применением системных файлов, yumi-setup-snapshots
+snap-pac                     # снимки до и после каждого pacman
+earlyoom                     # защита от зависания при нехватке памяти (/etc/default/earlyoom)
+zram-generator               # сжатый своп в памяти (/etc/systemd/zram-generator.conf)
+
+## Программы с темой в цветах обоев
+telegram-desktop             # Telegram (yumi-telegram-theme)
+zen-browser-bin              # браузер Zen (AUR; обёртка ~/.local/bin/zen-browser, yumi-zen-theme)
+python-pywalfox              # цвета обоев в Zen/Firefox (AUR; хук 90-zen)
+visual-studio-code-bin       # VS Code (AUR; своё расширение темы ~/.local/share/yumi-vscode-theme)
+vesktop-bin                  # Discord-клиент Vesktop (AUR; yumi-vesktop-theme)
+
+## Локальная модель для команды ai
+ollama-bin                   # команда ai (~/.local/bin/ai); на Arch ARM нет в репозиториях — сборка из AUR

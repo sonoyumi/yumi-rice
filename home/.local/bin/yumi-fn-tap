@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""yumi-fn-tap — tap the physical Fn key to switch the keyboard layout.
+
+Holding Fn keeps working exactly as before (touchbard shows the F1–F12 layer);
+this daemon only reacts to a *tap*: Fn pressed and released within TAP_MS with
+no other key pressed in between.
+
+It never grabs a device, so it can run next to touchbard and the compositor.
+
+  yumi-fn-tap              run as a service
+  yumi-fn-tap --simulate   run the event logic against synthetic events
+  yumi-fn-tap -v           log every Fn event
+"""
+
+import os
+import select
+import subprocess
+import sys
+import time
+
+import evdev
+from evdev import ecodes
+
+TAP_MS = 300
+# Physical keyboards that can produce Fn. The Touch Bar virtual keyboard also
+# reports KEY_FN, but Fn must stay a physical key, so it is only watched for
+# "other keys" (Fn + a Touch Bar key must not count as a tap).
+FN_SOURCES = ("Apple SPI Keyboard",)
+OTHER_SOURCES = ("Touch Bar Virtual Keyboard",)
+SWITCHER = os.path.expanduser("~/.local/bin/yumi-kb-switch")
+RESCAN_S = 5.0
+
+
+def log(msg):
+    if VERBOSE:
+        print(f"yumi-fn-tap: {msg}", file=sys.stderr, flush=True)
+
+
+class TapDetector:
+    def __init__(self, on_tap):
+        self.on_tap = on_tap
+        self.fn_down = None  # monotonic timestamp of Fn press
+        self.used = False  # another key was pressed while Fn was held
+
+    def key(self, code, value, now=None):
+        now = time.monotonic() if now is None else now
+
+        if code == ecodes.KEY_FN:
+            if value == 1:
+                self.fn_down = now
+                self.used = False
+                log("fn down")
+            elif value == 0:
+                down = self.fn_down
+                self.fn_down = None
+                if down is None:
+                    return
+                held = (now - down) * 1000.0
+                if self.used:
+                    log(f"fn up after {held:.0f} ms, but another key was used")
+                elif held > TAP_MS:
+                    log(f"fn up after {held:.0f} ms, hold — no switch")
+                else:
+                    log(f"fn tap after {held:.0f} ms -> switch")
+                    self.on_tap()
+            return
+
+        # Any other key press while Fn is held cancels the tap.
+        if value == 1 and self.fn_down is not None and not self.used:
+            self.used = True
+            log(f"key {ecodes.KEY.get(code, code)} pressed while fn held")
+
+
+def switch_layout():
+    env = dict(os.environ, KB_SWITCH_QUIET="1")
+    try:
+        subprocess.run([SWITCHER, "next"], env=env, check=False, timeout=5)
+    except Exception as exc:  # pragma: no cover - best effort
+        print(f"yumi-fn-tap: switch failed: {exc}", file=sys.stderr, flush=True)
+
+
+def open_devices(known, want_fn):
+    """Open matching devices that are not in `known` yet; close the rest."""
+    found = []
+    for path in evdev.list_devices():
+        if path in known:
+            continue
+        try:
+            dev = evdev.InputDevice(path)
+        except (PermissionError, OSError):
+            continue
+        if any(name in dev.name for name in want_fn):
+            found.append(dev)
+        else:
+            dev.close()
+    return found
+
+
+def run():
+    detector = TapDetector(switch_layout)
+    fn_devs = {}
+    other_devs = {}
+
+    def rescan():
+        for dev in open_devices(fn_devs, FN_SOURCES):
+            if dev.path not in fn_devs:
+                fn_devs[dev.path] = dev
+                print(f"yumi-fn-tap: watching {dev.name} ({dev.path})", file=sys.stderr, flush=True)
+        for dev in open_devices(other_devs, OTHER_SOURCES):
+            if dev.path not in other_devs:
+                other_devs[dev.path] = dev
+                print(f"yumi-fn-tap: watching {dev.name} ({dev.path})", file=sys.stderr, flush=True)
+
+    rescan()
+    if not fn_devs:
+        print("yumi-fn-tap: no Fn-capable keyboard found yet, waiting", file=sys.stderr, flush=True)
+
+    last_rescan = time.monotonic()
+    while True:
+        devices = list(fn_devs.values()) + list(other_devs.values())
+        if not devices:
+            time.sleep(1.0)
+            if time.monotonic() - last_rescan >= RESCAN_S:
+                rescan()
+                last_rescan = time.monotonic()
+            continue
+
+        try:
+            ready, _, _ = select.select([d.fd for d in devices], [], [], 1.0)
+        except (OSError, ValueError):
+            ready = []
+
+        for dev in devices:
+            if dev.fd not in ready:
+                continue
+            try:
+                events = list(dev.read())
+            except OSError:
+                # Device vanished (suspend, unplug): drop it and rescan later.
+                for table in (fn_devs, other_devs):
+                    if table.get(dev.path) is dev:
+                        del table[dev.path]
+                try:
+                    dev.close()
+                except OSError:
+                    pass
+                continue
+            for ev in events:
+                if ev.type != ecodes.EV_KEY:
+                    continue
+                detector.key(ev.code, ev.value)
+
+        if time.monotonic() - last_rescan >= RESCAN_S:
+            rescan()
+            last_rescan = time.monotonic()
+
+
+def simulate():
+    calls = []
+    d = TapDetector(lambda: calls.append(time.monotonic()))
+
+    # 1. plain tap -> switch
+    d.key(ecodes.KEY_FN, 1, now=0.0)
+    d.key(ecodes.KEY_FN, 0, now=0.12)
+    assert len(calls) == 1, calls
+
+    # 2. long hold -> no switch
+    d.key(ecodes.KEY_FN, 1, now=10.0)
+    d.key(ecodes.KEY_FN, 0, now=10.8)
+    assert len(calls) == 1, calls
+
+    # 3. tap with another key in between -> no switch
+    d.key(ecodes.KEY_FN, 1, now=20.0)
+    d.key(ecodes.KEY_F1, 1, now=20.05)
+    d.key(ecodes.KEY_F1, 0, now=20.06)
+    d.key(ecodes.KEY_FN, 0, now=20.1)
+    assert len(calls) == 1, calls
+
+    # 4. release without press -> ignored
+    d.key(ecodes.KEY_FN, 0, now=30.0)
+    assert len(calls) == 1, calls
+
+    # 5. tap right at the threshold boundary -> still a tap
+    d.key(ecodes.KEY_FN, 1, now=40.0)
+    d.key(ecodes.KEY_FN, 0, now=40.29)
+    assert len(calls) == 2, calls
+
+    print("yumi-fn-tap: simulate OK")
+
+
+if __name__ == "__main__":
+    VERBOSE = "-v" in sys.argv or "--verbose" in sys.argv
+    if "--simulate" in sys.argv:
+        VERBOSE = True
+        simulate()
+    else:
+        try:
+            run()
+        except KeyboardInterrupt:
+            pass

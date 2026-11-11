@@ -129,6 +129,7 @@ def load_apps():
                     "comment": kf_str(kf, "Comment", True), "keywords": kf_list(kf, "Keywords", True),
                     "exec": exec_name(cmd), "icon": kf_str(kf, "Icon"),
                     "flatpak": "flatpak/exports" in path, "terminal": kf_bool(kf, "Terminal"),
+                    "categories": kf_list(kf, "Categories"),
                 }
     apps = [a for a in found.values() if a]
     apps.sort(key=lambda a: a["name"].casefold())

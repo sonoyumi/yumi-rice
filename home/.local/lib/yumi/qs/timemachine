@@ -1,0 +1,520 @@
+#!/usr/bin/env -S python3 -I
+"""Бэкенд «Машины времени» для Quickshell (menus/timemachine/TimeMachine.qml): снимки snapper (btrfs), без root.
+Команды в stdin (по строке JSON), ответы — JSON-строки в stdout (поле "type"; "id" из команды возвращается как есть):
+  {"cmd":"snaps"}                         → {"type":"snaps","configs":{"home":{"sub":"/home","snaps":[…]},"root":{…}}}
+        снимок: {"n":304,"date":"2026-10-30 04:00:01","ts":сек,"kind":"single|pre|post","desc":"…","cleanup":"timeline"}
+  {"cmd":"ls","path":"/home/u/dir","hidden":false}
+                                          → {"type":"ls","path","parent","items":[{"name","path","dir","size","mtime","link"}]}
+  {"cmd":"versions","path":P}             → {"type":"versions","path","config","writable","current":{…}|null,"versions":[…]}
+        версия (от новой к старой): {"n":представитель (новейший снимок с этим содержимым),"snaps":[номера],
+        "from":ts,"to":ts,"exists","dir","size","mtime","same":совпадает с текущим}; одинаковые версии склеены
+        (файлы — размер+mtime, при совпадении размера ≤ 8 МБ — sha1; папки — список детей: имя+тип+размер+mtime)
+  {"cmd":"peek","path":P,"n":N} (N=0 — как сейчас) → {"type":"peek","path","n","src","kind":"dir|image|text|binary|missing", …}
+        dir:  "items":[{"name","dir","size","mtime","state":"same|changed|gone|new"}]  (gone — нет сейчас, new — появился позже)
+        text: "diff":[{"t":"@|-|+| ","s":строка}], "lines":[строки снимка], "same", "truncated"
+  {"cmd":"restore","path":P,"n":N,"mode":"replace|beside"}
+        replace — текущий файл/папка сначала переименовывается в «<имя>.before-restore-<дата>», затем копия из снимка;
+        beside  — копия рядом: «<имя> (из снимка <дата>)<.расш>». Только внутри $HOME и только конфиг home.
+        → {"type":"restored","ok","msg","target","backup","dry"}
+  {"cmd":"open","path":P,"n":N}           → xdg-open папки в снимке (для файла — его папки)
+YP_DRYRUN=1 — восстановление и xdg-open только печатаются (stderr). Выход — по EOF на stdin."""
+import difflib
+import hashlib
+import json
+import os
+import shutil
+import stat
+import subprocess
+import sys
+import time
+from datetime import datetime
+
+DRY = os.environ.get("YP_DRYRUN") == "1"
+HOME = os.path.realpath(os.path.expanduser("~"))
+IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".tif", ".tiff", ".ico", ".avif", ".jxl"}
+TEXT_MAX = 512 * 1024          # текст: читать не больше
+DIFF_MAX = 600                 # строк диффа
+LINES_MAX = 800                # строк «целиком»
+HASH_MAX = 8 * 1024 * 1024     # sha1 только для файлов до 8 МБ
+LS_MAX = 2000
+
+CONFIGS = {}                   # имя → {"sub": "/home", "snapdir": "/home/.snapshots", "snaps": [...]}
+
+
+def out(d):
+    try:
+        print(json.dumps(d, ensure_ascii=False), flush=True)
+    except BrokenPipeError:
+        os._exit(0)
+
+
+def log(*a):
+    print("timemachine:", *a, file=sys.stderr, flush=True)
+
+
+# ---------- снимки ----------
+def load_snaps():
+    CONFIGS.clear()
+    try:
+        r = subprocess.run(["snapper", "--jsonout", "list-configs"], capture_output=True, text=True, timeout=10)
+        cfgs = json.loads(r.stdout).get("configs", [])
+        names = [(c["config"], c["subvolume"]) for c in cfgs]
+    except Exception as e:  # noqa: BLE001
+        log("list-configs:", e)
+        names = [("home", "/home"), ("root", "/")]
+    for name, sub in names:
+        try:
+            r = subprocess.run(["snapper", "-c", name, "--jsonout", "list"], capture_output=True, text=True, timeout=20)
+            rows = json.loads(r.stdout).get(name, [])
+        except Exception as e:  # noqa: BLE001
+            log("list", name, e)
+            continue
+        snapdir = os.path.join(sub, ".snapshots")
+        snaps = []
+        for s in rows:
+            n = s.get("number", 0)
+            if not n:
+                continue
+            root = os.path.join(snapdir, str(n), "snapshot")
+            if not os.access(root, os.R_OK | os.X_OK):
+                continue
+            try:
+                ts = datetime.strptime(s.get("date", ""), "%Y-%m-%d %H:%M:%S").timestamp()
+            except ValueError:
+                ts = 0
+            snaps.append({"n": n, "date": s.get("date", ""), "ts": ts, "kind": s.get("type", ""),
+                          "desc": s.get("description", "") or "", "cleanup": s.get("cleanup", "") or ""})
+        snaps.sort(key=lambda x: x["n"])
+        CONFIGS[name] = {"sub": sub, "snapdir": snapdir, "snaps": snaps}
+
+
+def config_for(path):
+    """конфиг с самым длинным подходящим подтомом"""
+    best, blen = None, -1
+    for name, c in CONFIGS.items():
+        sub = c["sub"].rstrip("/")
+        if path == sub or path.startswith(sub + "/") or sub == "":
+            if len(sub) > blen:
+                best, blen = name, len(sub)
+    return best
+
+
+def norm(p):
+    p = os.path.normpath(os.path.expanduser(p or "~"))
+    return p if p.startswith("/") else os.path.join(HOME, p)
+
+
+def in_snapdir(path):
+    return "/.snapshots" in (path + "/") and any(path.startswith(c["snapdir"]) for c in CONFIGS.values())
+
+
+def snap_path(cfg, n, path):
+    c = CONFIGS[cfg]
+    sub = c["sub"].rstrip("/")
+    rel = path[len(sub):].lstrip("/")
+    return os.path.join(c["snapdir"], str(n), "snapshot", rel)
+
+
+def snap_by_n(cfg, n):
+    for s in CONFIGS[cfg]["snaps"]:
+        if s["n"] == n:
+            return s
+    return None
+
+
+# ---------- описание файла ----------
+def info(p):
+    try:
+        st = os.lstat(p)
+    except OSError:
+        return None
+    link = stat.S_ISLNK(st.st_mode)
+    isdir = stat.S_ISDIR(st.st_mode)
+    if link:
+        try:
+            isdir = os.path.isdir(p)
+        except OSError:
+            pass
+    return {"dir": isdir, "size": st.st_size, "mtime": int(st.st_mtime), "mtime_ns": st.st_mtime_ns, "link": link}
+
+
+def sha1(p):
+    h = hashlib.sha1()
+    try:
+        with open(p, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+    except OSError:
+        return None
+    return h.hexdigest()
+
+
+def dir_sig(p):
+    h = hashlib.sha1()
+    try:
+        with os.scandir(p) as it:
+            ents = sorted(it, key=lambda e: e.name)
+            for e in ents:
+                try:
+                    st = e.stat(follow_symlinks=False)
+                    # у вложенных папок — только имя и тип (их mtime меняется от любой правки внутри)
+                    sig = f"{st.st_size}\0{st.st_mtime_ns}" if not stat.S_ISDIR(st.st_mode) else ""
+                    h.update(f"{e.name}\0{stat.S_IFMT(st.st_mode)}\0{sig}\n".encode("utf-8", "surrogateescape"))
+                except OSError:
+                    h.update(e.name.encode("utf-8", "surrogateescape"))
+    except OSError:
+        return None
+    return h.hexdigest()
+
+
+def same_file(a, ia, b, ib):
+    """одинаковое ли содержимое (a, b — пути, ia, ib — info)"""
+    if ia is None or ib is None:
+        return ia is None and ib is None
+    if ia["dir"] != ib["dir"]:
+        return False
+    if ia["dir"]:
+        return dir_sig(a) == dir_sig(b)
+    if ia["link"] or ib["link"]:
+        try:
+            return os.readlink(a) == os.readlink(b)
+        except OSError:
+            return False
+    if ia["size"] != ib["size"]:
+        return False
+    if ia["mtime_ns"] == ib["mtime_ns"]:
+        return True
+    if ia["size"] > HASH_MAX:
+        return False
+    return sha1(a) == sha1(b)
+
+
+def pub(i):
+    if i is None:
+        return None
+    return {k: i[k] for k in ("dir", "size", "mtime", "link")}
+
+
+# ---------- команды ----------
+def cmd_snaps(_):
+    load_snaps()
+    out({"type": "snaps", "configs": {k: {"sub": v["sub"], "snaps": v["snaps"]} for k, v in CONFIGS.items()}})
+
+
+def listdir(p, hidden):
+    items = []
+    try:
+        with os.scandir(p) as it:
+            for e in it:
+                if not hidden and e.name.startswith("."):
+                    continue
+                if e.name == ".snapshots":
+                    continue
+                try:
+                    st = e.stat(follow_symlinks=True)
+                    isdir = stat.S_ISDIR(st.st_mode)
+                    size, mtime = st.st_size, int(st.st_mtime)
+                except OSError:
+                    isdir, size, mtime = False, 0, 0
+                items.append({"name": e.name, "dir": isdir, "size": size, "mtime": mtime, "link": e.is_symlink()})
+                if len(items) >= LS_MAX:
+                    break
+    except OSError as e:
+        return None, str(e.strerror or e)
+    items.sort(key=lambda x: (not x["dir"], x["name"].lower()))
+    return items, ""
+
+
+def cmd_ls(c):
+    path = norm(c.get("path"))
+    items, err = listdir(path, bool(c.get("hidden")))
+    parent = os.path.dirname(path) if path != "/" else ""
+    for it in items or []:
+        it["path"] = os.path.join(path, it["name"])
+    out({"type": "ls", "path": path, "parent": parent, "items": items or [], "error": err,
+         "config": config_for(path) or ""})
+
+
+def cmd_versions(c):
+    path = norm(c.get("path"))
+    cfg = config_for(path)
+    cur = info(path)
+    res = {"type": "versions", "path": path, "config": cfg or "", "current": pub(cur), "versions": [],
+           "writable": cfg == "home" and path.startswith(HOME + "/")}
+    if not cfg or in_snapdir(path):
+        res["error"] = "Нет снимков для этого места"
+        out(res)
+        return
+    groups = []          # [{rep path, info, snaps[]}], от старых к новым
+    for s in CONFIGS[cfg]["snaps"]:
+        sp = snap_path(cfg, s["n"], path)
+        i = info(sp)
+        if groups:
+            g = groups[-1]
+            if same_file(g["p"], g["i"], sp, i):
+                g["snaps"].append(s)
+                g["p"], g["i"] = sp, i
+                continue
+        groups.append({"p": sp, "i": i, "snaps": [s]})
+    vers = []
+    for g in groups:
+        # снимки, где этого ещё (или уже) не было — тоже точка на шкале («нет в снимке»)
+        last = g["snaps"][-1]
+        vers.append({"n": last["n"], "snaps": [s["n"] for s in g["snaps"]], "from": g["snaps"][0]["ts"], "to": last["ts"],
+                     "date": last["date"], "exists": g["i"] is not None, "dir": bool(g["i"] and g["i"]["dir"]),
+                     "size": g["i"]["size"] if g["i"] else 0, "mtime": g["i"]["mtime"] if g["i"] else 0,
+                     "same": same_file(g["p"], g["i"], path, cur)})
+    vers.reverse()
+    res["versions"] = vers
+    out(res)
+
+
+def classify(p, i):
+    if i is None:
+        return "missing"
+    if i["dir"]:
+        return "dir"
+    ext = os.path.splitext(p)[1].lower()
+    if ext in IMAGE_EXT:
+        return "image"
+    try:
+        with open(p, "rb") as f:
+            head = f.read(8192)
+    except OSError:
+        return "binary"
+    if b"\0" in head:
+        return "binary"
+    try:
+        head.decode("utf-8")
+    except UnicodeDecodeError as e:
+        if e.start < len(head) - 4:          # обрезанный многобайтный символ на краю — не повод
+            return "binary"
+    return "text"
+
+
+def read_lines(p):
+    try:
+        with open(p, "rb") as f:
+            data = f.read(TEXT_MAX + 1)
+    except OSError:
+        return [], False
+    trunc = len(data) > TEXT_MAX
+    return data[:TEXT_MAX].decode("utf-8", "replace").splitlines(), trunc
+
+
+def cmd_peek(c):
+    path = norm(c.get("path"))
+    n = int(c.get("n", 0))
+    cfg = config_for(path)
+    res = {"type": "peek", "path": path, "n": n, "id": c.get("id")}
+    if n and (not cfg or not snap_by_n(cfg, n)):
+        res.update(kind="missing", error="Снимок не найден")
+        out(res)
+        return
+    sp = snap_path(cfg, n, path) if n else path          # n = 0 — как сейчас
+    i = info(sp)
+    cur = info(path)
+    kind = classify(sp, i)
+    res.update(src=sp, kind=kind, info=pub(i), current=pub(cur))
+    if kind == "dir":
+        old, err = listdir(sp, bool(c.get("hidden")))
+        if not n:                                        # «сейчас» — без сравнения
+            now = [dict(x) for x in old or []]
+        elif cur and cur["dir"]:
+            now, _ = listdir(path, bool(c.get("hidden")))
+        else:                                            # сейчас этой папки нет — всё «нет сейчас»
+            now = []
+        nowmap = {x["name"]: x for x in now or []}
+        items = []
+        for x in old or []:
+            y = nowmap.pop(x["name"], None)
+            if y is None:
+                x["state"] = "gone"
+            elif x["dir"] != y["dir"] or (not x["dir"] and (x["size"] != y["size"] or x["mtime"] != y["mtime"])):
+                x["state"] = "changed"
+            else:
+                x["state"] = "same"
+            items.append(x)
+        for y in nowmap.values():
+            y["state"] = "new"
+            items.append(y)
+        items.sort(key=lambda x: (not x["dir"], x["name"].lower()))
+        res["items"] = items
+        res["error"] = err
+    elif kind == "text":
+        old, t1 = read_lines(sp)
+        res["lines"] = old[:LINES_MAX]
+        res["truncated"] = t1 or len(old) > LINES_MAX
+        res["total"] = len(old)
+        if n and cur and not cur["dir"] and classify(path, cur) == "text":
+            new, _ = read_lines(path)
+            d = []
+            for line in difflib.unified_diff(old, new, lineterm="", n=3):
+                if line.startswith("---") or line.startswith("+++"):
+                    continue
+                t = line[:1] if line[:1] in "@+- " else " "
+                d.append({"t": t, "s": line[1:] if t != "@" else line})
+                if len(d) >= DIFF_MAX:
+                    res["diffTrunc"] = True
+                    break
+            res["diff"] = d
+            res["same"] = not d
+        else:
+            res["diff"] = []
+            res["same"] = False
+            res["nocur"] = True
+    out(res)
+
+
+def stamp(ts):
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d_%H%M") if ts else datetime.now().strftime("%Y-%m-%d_%H%M")
+
+
+def unique(p):
+    if not os.path.lexists(p):
+        return p
+    base, ext = os.path.splitext(p)
+    k = 2
+    while os.path.lexists(f"{base} {k}{ext}"):
+        k += 1
+    return f"{base} {k}{ext}"
+
+
+def inside_home(p):
+    rp = os.path.realpath(os.path.dirname(p))
+    return (rp == HOME or rp.startswith(HOME + "/")) and not in_snapdir(rp) and not in_snapdir(p)
+
+
+def copy_any(src, dst):
+    if os.path.isdir(src) and not os.path.islink(src):
+        shutil.copytree(src, dst, symlinks=True)
+    else:
+        shutil.copy2(src, dst, follow_symlinks=False)
+
+
+def cmd_restore(c):
+    path = norm(c.get("path"))
+    n = int(c.get("n", 0))
+    mode = c.get("mode", "beside")
+    res = {"type": "restored", "ok": False, "dry": DRY, "path": path, "mode": mode, "target": "", "backup": ""}
+    cfg = config_for(path)
+    s = snap_by_n(cfg, n) if cfg else None
+    if cfg != "home" or not path.startswith(HOME + "/") or not s:
+        res["msg"] = "Восстанавливать можно только внутри домашней папки"
+        out(res)
+        return
+    if not inside_home(path):
+        res["msg"] = "Путь выходит за пределы домашней папки"
+        out(res)
+        return
+    src = snap_path(cfg, n, path)
+    if not os.path.lexists(src):
+        res["msg"] = "В этом снимке такого нет"
+        out(res)
+        return
+    st = stamp(s["ts"])
+    name = os.path.basename(path)
+    plan = []
+    if mode == "replace":
+        target = path
+        if os.path.lexists(path):
+            bk = unique(path + ".before-restore-" + datetime.now().strftime("%Y-%m-%d_%H%M%S"))
+            plan.append(("move", path, bk))
+            res["backup"] = bk
+        plan.append(("copy", src, target))
+    else:
+        if os.path.isdir(src) and not os.path.islink(src):
+            stem, ext = name, ""
+        else:
+            stem, ext = os.path.splitext(name)
+            if stem == "":           # «.bashrc»
+                stem, ext = name, ""
+        target = unique(os.path.join(os.path.dirname(path), f"{stem} (из снимка {st}){ext}"))
+        plan.append(("copy", src, target))
+    res["target"] = target
+    for op, a, b in plan:
+        if not inside_home(b):
+            res["msg"] = "Путь выходит за пределы домашней папки"
+            out(res)
+            return
+    if DRY:
+        for op, a, b in plan:
+            log("DRY", op, a, "→", b)
+        res["ok"] = True
+        res["msg"] = "Сухой прогон: " + "; ".join(f"{'переименовать' if op == 'move' else 'копировать'} {a} → {b}" for op, a, b in plan)
+        out(res)
+        return
+    try:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        for op, a, b in plan:
+            if op == "move":
+                os.rename(a, b)
+            else:
+                copy_any(a, b)
+        res["ok"] = True
+        res["msg"] = ("Восстановлено, прежняя версия — " + os.path.basename(res["backup"])) if res["backup"] \
+            else ("Восстановлено: " + os.path.basename(target))
+    except OSError as e:
+        # откат переименования, если копия не удалась
+        if res["backup"] and not os.path.lexists(path) and os.path.lexists(res["backup"]):
+            try:
+                os.rename(res["backup"], path)
+            except OSError:
+                pass
+        res["msg"] = "Не удалось: " + str(e.strerror or e)
+    out(res)
+
+
+def cmd_open(c):
+    path = norm(c.get("path"))
+    n = int(c.get("n", 0))
+    cfg = config_for(path)
+    if not cfg or not snap_by_n(cfg, n):
+        out({"type": "toast", "text": "Снимок не найден", "error": True})
+        return
+    sp = snap_path(cfg, n, path)
+    d = sp if os.path.isdir(sp) else os.path.dirname(sp)
+    while d and not os.path.isdir(d):
+        d = os.path.dirname(d)
+    if DRY:
+        log("DRY xdg-open", d)
+        out({"type": "toast", "text": "Сухой прогон: xdg-open " + d, "error": False})
+        return
+    subprocess.Popen(["xdg-open", d], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+    out({"type": "toast", "text": "Открыто в файловом менеджере", "error": False})
+
+
+CMDS = {"snaps": cmd_snaps, "ls": cmd_ls, "versions": cmd_versions, "peek": cmd_peek, "restore": cmd_restore, "open": cmd_open}
+
+
+def main():
+    load_snaps()
+    out({"type": "hello", "dry": DRY, "home": HOME})
+    out({"type": "snaps", "configs": {k: {"sub": v["sub"], "snaps": v["snaps"]} for k, v in CONFIGS.items()}})
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            c = json.loads(line)
+        except ValueError:
+            log("не JSON:", line)
+            continue
+        f = CMDS.get(c.get("cmd"))
+        if not f:
+            log("неизвестная команда:", c.get("cmd"))
+            continue
+        t0 = time.monotonic()
+        try:
+            f(c)
+        except Exception as e:  # noqa: BLE001
+            log(c.get("cmd"), "ошибка:", repr(e))
+            out({"type": "toast", "text": "Ошибка: " + str(e), "error": True})
+        dt = time.monotonic() - t0
+        if dt > 1:
+            log(f"{c.get('cmd')} {dt:.1f} с")
+
+
+if __name__ == "__main__":
+    main()

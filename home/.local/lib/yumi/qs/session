@@ -1,0 +1,152 @@
+#!/usr/bin/env -S python3 -I
+"""session — бэкенд меню «Питание системы» для Quickshell (yumi-rice 3.1). Команды те же, что у GTK-меню
+~/.local/bin/yumi-menu-session (оно остаётся рабочим): JSON-строки в stdout, команды JSON-строками из stdin.
+Отсчёт 5 с и клавиши — на стороне QML (menus/session/SessionMenu.qml).
+
+stdout:
+  {"type":"info", user, uptime, subtitle, dry}                 — «пользователь · в сети Ч:М», раз в 20 с
+  {"type":"commands", {действие: "строка команды"}}            — что выполнит каждое действие (как --commands)
+  {"type":"done", action, text}                                 — команда запущена (text — «экран заблокирован», …)
+  {"type":"dry", action, text, cmd}                             — YP_DRYRUN=1: команда не выполнена, только показана
+stdin:
+  {"cmd":"run","action":"lock|suspend|logout|reboot|poweroff"}  {"cmd":"quit"}
+ВНИМАНИЕ: lock запускает настоящий hyprlock (любой запуск/закрытие = неверный пароль для faillock) — проверять
+только с YP_DRYRUN=1. Откат: yumi-uninstall quickshell"""
+import json
+import os
+import pwd
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import threading
+import time
+
+DRY = os.environ.get("YP_DRYRUN") == "1"
+
+
+def logout_cmd():
+    """С 18.10 сеанс без uwsm (greetd → yumi-hyprland-session): выход — из Hyprland напрямую, службы сеанса
+    останавливает сам yumi-hyprland-session. `uwsm check is-active` тут не годится: он смотрит только на
+    graphical-session.target, а её теперь поднимает yumi-hyprland-session.target, — и `uwsm stop` ничего не делал.
+    uwsm stop — только если компоновщик и правда запущен через uwsm (после отката yumi-nouwsm-undo).
+    Lua-конфиг Hyprland 0.56: диспетчер — hl.dsp.exit() (старое `dispatch exit` не работает)."""
+    exit_cmd = ["hyprctl", "dispatch", "hl.dsp.exit()"]
+    try:
+        if subprocess.run(["systemctl", "--user", "is-active", "--quiet", "yumi-hyprland-session.target"],
+                          timeout=3).returncode == 0:
+            return exit_cmd
+    except Exception:
+        pass
+    if shutil.which("uwsm"):
+        try:
+            if subprocess.run(["systemctl", "--user", "is-active", "--quiet", "wayland-wm@*.service"],
+                              timeout=3).returncode == 0:
+                return ["uwsm", "stop"]
+        except Exception:
+            pass
+    return exit_cmd
+
+
+# действие → (значок, название, клавиши, опасное?, команда — список аргументов или строка для sh -c)
+ACTIONS = {
+    "lock":     ("󰌾", "Блокировка",   ("l", "Cyrillic_de"),   False, ["loginctl", "lock-session"]),
+    # сначала экран блокировки (hypridle → hyprlock), через секунду — сон; как в старом powermenu
+    "suspend":  ("󰤄", "Сон",          ("s", "Cyrillic_yeru"), False,
+                 "loginctl lock-session; sleep 1; systemctl suspend"),
+    "logout":   ("󰍃", "Выход",        ("e", "Cyrillic_u"),    True, None),       # logout_cmd() в момент выхода
+    "reboot":   ("󰜉", "Перезагрузка", ("r", "Cyrillic_ka"),   True, ["systemctl", "reboot", "--no-wall"]),
+    "poweroff": ("⏻", "Выключение",   ("p", "Cyrillic_ze"),   True, ["systemctl", "poweroff", "--no-wall"]),
+}
+DONE = {"lock": "экран заблокирован", "suspend": "компьютер уснул", "logout": "сеанс завершён",
+        "reboot": "перезагрузка", "poweroff": "выключение"}
+
+
+def command(action):
+    cmd = ACTIONS[action][4]
+    if action == "logout":
+        cmd = logout_cmd()
+    return ["sh", "-c", cmd] if isinstance(cmd, str) else cmd
+
+
+def uptime_text():
+    try:
+        with open("/proc/uptime") as f:
+            s = int(float(f.read().split()[0]))
+    except (OSError, ValueError, IndexError):
+        return ""
+    d, s = divmod(s, 86400)
+    t = f"{s // 3600:02d}:{s % 3600 // 60:02d}"
+    return f"{d} д {t}" if d else t
+
+
+def user_name():
+    try:
+        return pwd.getpwuid(os.getuid()).pw_name
+    except KeyError:
+        return os.environ.get("USER", "")
+
+
+def die_with_parent():
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").prctl(1, signal.SIGTERM)       # PR_SET_PDEATHSIG
+    except Exception:
+        pass
+
+
+def emit(**obj):
+    try:
+        sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
+    except (BrokenPipeError, OSError):
+        os._exit(0)
+
+
+def info():
+    up = uptime_text()
+    emit(type="info", user=user_name(), uptime=up, subtitle=f"{user_name()} · в сети {up}" if up else user_name(), dry=DRY)
+
+
+def run_action(action):
+    if action not in ACTIONS:
+        return
+    cmd = command(action)
+    if DRY:
+        print(f"session [dry-run] {ACTIONS[action][1]}: {shlex.join(cmd)}", file=sys.stderr, flush=True)
+        emit(type="dry", action=action, text=f"Имитация: {DONE[action]}",
+             cmd=f"Пробный режим, команда не выполнена:\n{shlex.join(cmd)}")
+        return
+    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    emit(type="done", action=action, text=DONE[action])
+
+
+def main():
+    signal.signal(signal.SIGTERM, lambda *_: os._exit(0))
+    info()
+    emit(type="commands", **{a: shlex.join(command(a)) for a in ACTIONS})
+
+    def ticker():
+        while True:
+            time.sleep(20)
+            info()
+    threading.Thread(target=ticker, daemon=True).start()
+    for line in sys.stdin:
+        if not line.strip():
+            continue
+        try:
+            j = json.loads(line)
+        except ValueError:
+            print("session: не JSON:", line.strip(), file=sys.stderr, flush=True)
+            continue
+        if j.get("cmd") == "run":
+            run_action(j.get("action", ""))
+        elif j.get("cmd") == "quit":
+            break
+    os._exit(0)
+
+
+if __name__ == "__main__":
+    die_with_parent()
+    main()

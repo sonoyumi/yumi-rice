@@ -1,0 +1,374 @@
+#!/usr/bin/env -S python3 -I
+"""downloads — готовые загрузки: остров «Загружено», раскладка по папкам, стопка последних (yumi-rice, 30.10.2026).
+
+Следит за ~/Downloads (inotifywait close_write,moved_to — только сама папка, не подпапки). Временные файлы
+(.part .crdownload .tmp .download, скрытые) пропускает; файл считается готовым, когда размер не меняется 1,5 с
+и рядом нет его .part/.crdownload. Файлы старше запуска службы не трогает (по mtime).
+Готовый файл → остров «Загружено · имя», размер; клик / «Открыть» — открыть файл, «В папке» — показать в Dolphin.
+Раскладка по правилам ~/.config/yumi/downloads.json — ВЫКЛЮЧЕНА по умолчанию («sort": false — только пишет в журнал,
+куда бы переложил). Включить: "sort": true. Распаковка архивов рядом — "extract_archives": true (тоже только при sort).
+Стопка: ~/.cache/yumi/downloads-recent.json — последние ~20 загрузок (путь после раскладки); её показывает
+menus/downloads/DownloadsStack.qml (qs -c yumi ipc call downloads toggle).
+
+  downloads run              демон (yumi-downloads.service)
+  downloads open <id|путь>   открыть файл (xdg-open)
+  downloads reveal <id|путь> показать в папке (org.freedesktop.FileManager1, иначе папка)
+  downloads forget <id>      убрать из стопки        downloads list   стопка (JSON, без исчезнувших файлов)
+  downloads test <имя>       куда бы лёг файл (JSON)
+Проверка: YUMI_DL_DIR=/tmp/dl-test — другая папка; YP_DRYRUN=1 — ничего не переносить/не открывать (только печать),
+YUMI_DL_RECENT=<файл> — другая стопка; YUMI_DL_CONF=<файл> — другие правила; YUMI_ISLAND_DRY=1 — остров только печатается.
+Откат: yumi-uninstall quickshell"""
+import json
+import os
+import re
+import secrets
+import select
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import time
+
+HOME = os.path.expanduser("~")
+SELF = os.path.realpath(__file__)
+ISLAND = os.path.join(HOME, ".local/bin/yumi-island")
+CONF = os.path.expanduser(os.environ.get("YUMI_DL_CONF", "~/.config/yumi/downloads.json"))
+RECENT = os.path.expanduser(os.environ.get("YUMI_DL_RECENT", "~/.cache/yumi/downloads-recent.json"))
+DRY = os.environ.get("YP_DRYRUN") == "1"
+AID = "dl-done"
+PARTIAL = re.compile(r"\.(part|crdownload|tmp|download|partial|!ut|opdownload)$|^\.|~$|^Unconfirmed \d+", re.I)
+STABLE, MAXWAIT = 1.5, 1800.0
+
+DEFAULTS = {
+    "sort": False,
+    "extract_archives": False,
+    "island": True,
+    "island_seconds": 25,
+    "recent_max": 20,
+    "dir": "~/Downloads",
+    "rules": [
+        {"name": "Установщики", "dest": "~/Downloads/Установщики",
+         "ext": [".pkg.tar.zst", ".pkg.tar.xz", ".pkg.tar.gz", ".appimage", ".deb", ".rpm", ".iso", ".img", ".flatpakref", ".flatpak"]},
+        {"name": "Архивы", "dest": "~/Downloads/Архивы", "archive": True,
+         "ext": [".zip", ".7z", ".rar", ".tar", ".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar.zst", ".tar.bz2", ".tbz2", ".gz", ".xz", ".bz2", ".zst"]},
+        {"name": "Картинки", "dest": "~/Pictures/Загрузки",
+         "ext": [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".svg", ".heic", ".heif", ".avif", ".tif", ".tiff", ".ico", ".jxl"]},
+        {"name": "Документы", "dest": "~/Documents/Загрузки",
+         "ext": [".pdf", ".doc", ".docx", ".docm", ".xls", ".xlsx", ".xlsm", ".ppt", ".pptx", ".odt", ".ods", ".odp", ".rtf",
+                 ".txt", ".md", ".epub", ".djvu", ".fb2", ".csv"]},
+        {"name": "Музыка", "dest": "~/Music/Загрузки",
+         "ext": [".mp3", ".flac", ".ogg", ".opus", ".m4a", ".wav", ".aac", ".alac", ".wma"]},
+        {"name": "Видео", "dest": "~/Videos/Загрузки",
+         "ext": [".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".wmv", ".flv"]},
+    ],
+}
+KIND_BY_RULE = {"Картинки": "image", "Документы": "doc", "Архивы": "archive", "Установщики": "pkg", "Музыка": "audio", "Видео": "video"}
+
+
+def log(*a):
+    print("downloads:", *a, file=sys.stderr, flush=True)
+
+
+def conf():
+    c = json.loads(json.dumps(DEFAULTS))
+    try:
+        with open(CONF, encoding="utf-8") as f:
+            u = json.load(f)
+        if isinstance(u, dict):
+            c.update({k: v for k, v in u.items() if k in DEFAULTS})
+    except (OSError, ValueError) as e:
+        if not isinstance(e, FileNotFoundError):
+            log("плохой", CONF, "—", e)
+    return c
+
+
+def watch_dir(c):
+    return os.path.realpath(os.path.expanduser(os.environ.get("YUMI_DL_DIR") or c.get("dir") or "~/Downloads"))
+
+
+def rule_for(name, c):
+    low = name.lower()
+    best = None
+    for r in c.get("rules") or []:
+        for e in r.get("ext") or []:
+            e = e.lower()
+            if low.endswith(e) and len(low) > len(e) and (best is None or len(e) > best[1]):
+                best = (r, len(e))                # самое длинное совпадение: .pkg.tar.zst важнее .zst
+    return best[0] if best else None
+
+
+def human(n):
+    for unit, k in (("ГБ", 1 << 30), ("МБ", 1 << 20), ("КБ", 1 << 10)):
+        if n >= k:
+            return f"{n / k:.1f} {unit}".replace(".", ",").replace(",0 ", " ")
+    return f"{n} Б"
+
+
+def unique(path):
+    if not os.path.exists(path):
+        return path
+    d, b = os.path.split(path)
+    m = re.match(r"^(.*?)((?:\.tar)?\.[^.]+)?$", b)
+    stem, ext = m.group(1), m.group(2) or ""
+    for i in range(2, 1000):
+        p = os.path.join(d, f"{stem} ({i}){ext}")
+        if not os.path.exists(p):
+            return p
+    return os.path.join(d, f"{stem} ({secrets.token_hex(3)}){ext}")
+
+
+# ---------------------------------------------------------------- стопка
+def load_recent():
+    try:
+        with open(RECENT, encoding="utf-8") as f:
+            l = json.load(f)
+        return l if isinstance(l, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def save_recent(l):
+    os.makedirs(os.path.dirname(RECENT), exist_ok=True)
+    tmp = RECENT + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(l, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, RECENT)
+
+
+def find(ref):
+    for e in load_recent():
+        if e.get("id") == ref:
+            return e.get("path")
+    return ref if ref.startswith("/") else None
+
+
+# ---------------------------------------------------------------- остров
+def island(*args):
+    try:
+        subprocess.run([ISLAND, *args], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, timeout=3,
+                       stderr=None if os.environ.get("YUMI_ISLAND_DRY") else subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
+def plural(n, one, few, many):
+    a, b = n % 10, n % 100
+    return one if a == 1 and b != 11 else few if 2 <= a <= 4 and not 12 <= b <= 14 else many
+
+
+# ---------------------------------------------------------------- обработка готового файла
+def handle(path, c, started):
+    name = os.path.basename(path)
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    if st.st_mtime < started - 2:
+        log("старше запуска службы — не трогаю:", name)
+        return None
+    r = rule_for(name, c)
+    kind = KIND_BY_RULE.get(r["name"], "file") if r else "file"
+    final, moved, folder = path, False, ""
+    if r:
+        dest_dir = os.path.expanduser(r["dest"])
+        if os.path.realpath(dest_dir) == os.path.dirname(os.path.realpath(path)):
+            dest_dir = ""
+        target = unique(os.path.join(dest_dir, name)) if dest_dir else path
+        if dest_dir and c.get("sort") and not DRY:
+            try:
+                os.makedirs(dest_dir, exist_ok=True)
+                target = unique(os.path.join(dest_dir, name))
+                shutil.move(path, target)
+                final, moved, folder = target, True, r["name"]
+                log("переложил:", name, "→", target)
+            except OSError as e:
+                log("не удалось переложить", name, "—", e)
+        elif dest_dir:
+            log(f"[сухо] переложил бы: {name} → {target}" + ("" if c.get("sort") else "  (раскладка выключена: \"sort\": false)"))
+        if r.get("archive") and c.get("extract_archives"):
+            out = re.sub(r"(\.tar)?\.[^./]+$", "", final) or final + ".d"
+            out = unique(out)
+            if c.get("sort") and not DRY:
+                try:
+                    os.makedirs(out)
+                    p = subprocess.run(["bsdtar", "-xf", final, "-C", out], capture_output=True, text=True, timeout=600)
+                    log("распаковал" if p.returncode == 0 else "ошибка распаковки", name, "→", out, p.stderr.strip()[:200])
+                except (OSError, subprocess.SubprocessError) as e:
+                    log("ошибка распаковки", name, "—", e)
+            else:
+                log(f"[сухо] распаковал бы: {name} → {out}")
+    e = {"id": secrets.token_hex(5), "name": os.path.basename(final), "path": final, "size": st.st_size,
+         "sizeText": human(st.st_size), "time": int(time.time()), "kind": kind, "moved": moved, "folder": folder}
+    l = [x for x in load_recent() if x.get("path") != final]
+    save_recent(([e] + l)[: int(c.get("recent_max", 20))])
+    return e
+
+
+def notify(entries, c):
+    if not c.get("island", True) or not entries:
+        return
+    e = entries[-1]
+    n = len(entries)
+    title = "Загружено" + (f" · {n}" if n > 1 else "")
+    sub = e["name"] + (f" → {e['folder']}" if e.get("moved") else "")
+    island("start", AID, "--title", title, "--sub", sub, "--trail", e["sizeText"], "--icon", "download", "--tone", "ok",
+           "--prio", "6", "--open", shlex.join([SELF, "open", e["id"]]),
+           "--primary", shlex.join([SELF, "reveal", e["id"]]), "--primary-label", "В папке")
+
+
+def die_with_parent():
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").prctl(1, signal.SIGTERM)
+    except Exception:
+        pass
+
+
+def cmd_run():
+    c = conf()
+    d = watch_dir(c)
+    started = time.time()
+    if not os.path.isdir(d):
+        log("нет папки", d)
+        return 1
+    log("слежу за", d, "· раскладка", "ВКЛ" if c.get("sort") and not DRY else "выкл (только журнал)",
+        "· распаковка", "вкл" if c.get("extract_archives") else "выкл")
+    w = subprocess.Popen(["inotifywait", "-m", "-q", "-e", "close_write,moved_to", "--format", "%e|%f", d],
+                         stdout=subprocess.PIPE, stdin=subprocess.DEVNULL, preexec_fn=die_with_parent)
+    signal.signal(signal.SIGTERM, lambda *_: (w.terminate(), sys.exit(0)))
+    fd, buf = w.stdout.fileno(), b""
+    cand = {}                                     # имя → [первый раз, размер, mtime, с какого момента не меняется]
+    shown, end_at = [], None
+    while True:
+        now = time.monotonic()
+        waits = []
+        if cand:
+            waits.append(0.5)
+        if end_at:
+            waits.append(max(0.0, end_at - now))
+        r, _, _ = select.select([fd], [], [], min(waits) if waits else None)
+        if r:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                log("inotifywait закончился")
+                return 1
+            buf += chunk
+            *lines, buf = buf.split(b"\n")
+            for l in lines:
+                ev, _, name = l.decode(errors="replace").partition("|")
+                if not name or "ISDIR" in ev or PARTIAL.search(name):
+                    continue
+                cand[name] = [time.monotonic(), -1, -1, time.monotonic()]
+        now = time.monotonic()
+        done = []
+        for name, s in list(cand.items()):
+            p = os.path.join(d, name)
+            try:
+                st = os.stat(p)
+            except OSError:
+                cand.pop(name)
+                continue
+            if not os.path.isfile(p) or now - s[0] > MAXWAIT:
+                cand.pop(name)
+                continue
+            if (st.st_size, st.st_mtime) != (s[1], s[2]):
+                s[1], s[2], s[3] = st.st_size, st.st_mtime, now
+                continue
+            busy = any(os.path.exists(p + x) for x in (".part", ".crdownload", ".download"))
+            if now - s[3] >= STABLE and st.st_size > 0 and not busy:
+                cand.pop(name)
+                done.append(p)
+        if done:
+            c = conf()
+            for p in done:
+                e = handle(p, c, started)
+                if e:
+                    log("готово:", e["name"], e["sizeText"], "→", e["path"])
+                    shown.append(e)
+            if shown:
+                notify(shown, c)
+                end_at = time.monotonic() + float(c.get("island_seconds", 25))
+        if end_at and time.monotonic() >= end_at:
+            end_at, shown = None, []
+            island("end", AID)
+
+
+def run_detached(args):
+    if DRY:
+        log("[dry-run]", shlex.join(args))
+        return
+    subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+def cmd_open(ref):
+    p = find(ref)
+    if p and os.path.exists(p):
+        run_detached(["xdg-open", p])
+    island("end", AID)
+
+
+def cmd_reveal(ref):
+    p = find(ref)
+    if not p:
+        return
+    if not os.path.exists(p):
+        p = os.path.dirname(p)
+        if os.path.isdir(p):
+            run_detached(["xdg-open", p])
+        return
+    uri = "file://" + __import__("urllib.parse").parse.quote(p)
+    if DRY:
+        log("[dry-run] FileManager1.ShowItems", uri)
+    else:
+        r = subprocess.run(["gdbus", "call", "--session", "--dest", "org.freedesktop.FileManager1",
+                            "--object-path", "/org/freedesktop/FileManager1", "--method",
+                            "org.freedesktop.FileManager1.ShowItems", f"['{uri}']", ""],
+                           capture_output=True, timeout=5)
+        if r.returncode != 0:
+            run_detached(["xdg-open", os.path.dirname(p)])
+    island("end", AID)
+
+
+def cmd_list():
+    l = [e for e in load_recent() if os.path.exists(e.get("path", ""))]
+    print(json.dumps(l, ensure_ascii=False))
+
+
+def cmd_forget(ref):
+    l = load_recent()
+    n = [e for e in l if e.get("id") != ref]
+    if len(n) != len(l):
+        save_recent(n)
+
+
+def main(argv):
+    if not argv:
+        print(__doc__.strip(), file=sys.stderr)
+        return 0
+    cmd, arg = argv[0], (argv[1] if len(argv) > 1 else "")
+    if cmd == "run":
+        return cmd_run()
+    if cmd == "open" and arg:
+        cmd_open(arg)
+    elif cmd == "reveal" and arg:
+        cmd_reveal(arg)
+    elif cmd == "list":
+        cmd_list()
+    elif cmd == "forget" and arg:
+        cmd_forget(arg)
+    elif cmd == "test" and arg:
+        c = conf()
+        r = rule_for(os.path.basename(arg), c)
+        print(json.dumps({"name": arg, "partial": bool(PARTIAL.search(os.path.basename(arg))), "rule": r and r["name"],
+                          "dest": r and os.path.expanduser(r["dest"]), "sort": bool(c.get("sort"))}, ensure_ascii=False))
+    else:
+        print(__doc__.strip(), file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        sys.exit(0)

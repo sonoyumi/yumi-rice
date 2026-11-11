@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# yumi fetch-theme — собирает ~/.config/fastfetch/config.jsonc из шаблона svitok.jsonc.in в цветах обоев:
+# @ACC@ — 7-й оттенок акцента (как @yumi_acc в GTK), @DIM@ — 3-й (валики свитка, разделители ┊).
+# Зовёт хук ~/.config/yumi/accent/hooks.d/88-fastfetch; без accent.txt — терракотовый по умолчанию.
+set -eu
+D="$HOME/.config/fastfetch"; IN="$D/svitok.jsonc.in"; A="$HOME/.cache/yumi-accent/accent.txt"
+[ -f "$IN" ] || exit 0
+rgb() { printf '38;2;%d;%d;%d' "0x${1:0:2}" "0x${1:2:2}" "0x${1:4:2}"; }
+acc='38;2;217;119;109'; dim='38;2;140;80;74'
+if [ -s "$A" ]; then
+    read -r -a s < "$A"
+    [ "${#s[@]}" -ge 7 ] && { acc=$(rgb "${s[6]}"); dim=$(rgb "${s[2]}"); }
+fi
+sed -e "s/@ACC@/$acc/g" -e "s/@DIM@/$dim/g" "$IN" > "$D/config.jsonc.tmp"
+mv "$D/config.jsonc.tmp" "$D/config.jsonc"

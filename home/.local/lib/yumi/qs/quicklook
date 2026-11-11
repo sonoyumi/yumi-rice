@@ -1,0 +1,332 @@
+#!/usr/bin/env -S python3 -I
+"""Бэкенд «Быстрого просмотра» (Quick Look) для Quickshell (menus/quicklook/QuickLook.qml).
+По запросу: quicklook <путь>  → одна строка JSON в stdout:
+  {"ok":true,"path","name","dir","kind":"image|pdf|video|audio|text|archive|folder|other","mime","size","sizeText",
+   "mtime","mtimeText","ctimeText","icon","siblings":[пути в той же папке по имени],"index":N, ...по виду:}
+  image:   {"w","h","src"}                          src — сам файл или PNG-копия в кэше (форматы, которые Qt не читает)
+  pdf:     {"pages","pageImgs":[png…],"title","author"} первые до 12 страниц (pdftoppm, ~110 dpi)
+  video:   {"thumb","duration","durationText","w","h","codec"}   (ffmpegthumbnailer + ffprobe)
+  audio:   {"cover","title","artist","album","duration","durationText","codec","bitrate"}
+  text:    {"text","lines","truncated","lang"}      первые 400 строк (до 256 КБ)
+  archive: {"entries":[{"name","dir"}],"count","truncated"}  bsdtar -tf (до 400 строк)
+  folder:  {"count","dirs","files","items":[{"name","dir","sizeText"}]}
+Ошибка — {"ok":false,"error":"…"}. Кэш миниатюр — ~/.cache/yumi/quicklook/<sha1 пути+mtime>/ (старше 7 дней чистится).
+Ничего не меняет в системе; YP_DRYRUN не нужен."""
+import hashlib
+import json
+import mimetypes
+import os
+import shutil
+import stat
+import subprocess
+import sys
+import time
+
+CACHE = os.path.expanduser("~/.cache/yumi/quicklook")
+TEXT_LINES = 400
+TEXT_BYTES = 256 * 1024
+PDF_PAGES = 12
+QT_IMAGES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".svg", ".svgz", ".ico", ".tif", ".tiff", ".pbm", ".pgm", ".ppm", ".xpm", ".jfif"}
+ARCHIVES = (".zip", ".tar", ".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar.zst", ".tzst", ".tar.bz2", ".tbz2", ".7z", ".rar",
+            ".gz", ".xz", ".zst", ".bz2", ".jar", ".apk", ".deb", ".rpm", ".iso", ".cpio", ".pkg.tar.zst", ".pkg.tar.xz")
+TEXT_EXT = {".txt", ".md", ".py", ".sh", ".bash", ".zsh", ".fish", ".js", ".ts", ".tsx", ".jsx", ".json", ".qml", ".lua", ".c", ".h",
+            ".cpp", ".hpp", ".cc", ".rs", ".go", ".java", ".kt", ".rb", ".pl", ".php", ".css", ".scss", ".html", ".xml", ".yaml",
+            ".yml", ".toml", ".ini", ".conf", ".cfg", ".log", ".csv", ".tsv", ".sql", ".diff", ".patch", ".rst", ".tex", ".nix",
+            ".vim", ".el", ".hs", ".swift", ".zig", ".desktop", ".service", ".env", ".srt", ".vtt", ".cmake", ".mk", ".gradle"}
+LANG = {".py": "python", ".sh": "shell", ".bash": "shell", ".zsh": "shell", ".fish": "shell", ".js": "js", ".ts": "js", ".tsx": "js",
+        ".jsx": "js", ".qml": "js", ".json": "json", ".lua": "lua", ".c": "c", ".h": "c", ".cpp": "c", ".hpp": "c", ".cc": "c",
+        ".rs": "c", ".go": "c", ".java": "c", ".kt": "c", ".swift": "c", ".zig": "c", ".css": "css", ".scss": "css",
+        ".html": "xml", ".xml": "xml", ".yaml": "conf", ".yml": "conf", ".toml": "conf", ".ini": "conf", ".conf": "conf",
+        ".cfg": "conf", ".desktop": "conf", ".service": "conf", ".md": "md", ".diff": "diff", ".patch": "diff", ".sql": "sql", ".rb": "shell"}
+
+
+def human(n):
+    n = float(n)
+    for u in ("Б", "КБ", "МБ", "ГБ", "ТБ"):
+        if n < 1024 or u == "ТБ":
+            return (f"{n:.0f} {u}" if u == "Б" or n >= 100 else f"{n:.1f} {u}".replace(".", ","))
+        n /= 1024
+    return str(n)
+
+
+MONTHS = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"]
+
+
+def when(t):
+    lt = time.localtime(t)
+    return f"{lt.tm_mday} {MONTHS[lt.tm_mon - 1]} {lt.tm_year}, {lt.tm_hour:02d}:{lt.tm_min:02d}"
+
+
+def dur(sec):
+    try:
+        s = int(round(float(sec)))
+    except (TypeError, ValueError):
+        return ""
+    h, m, s = s // 3600, s // 60 % 60, s % 60
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def run(cmd, timeout=15):
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=timeout)
+        return r.returncode, r.stdout.decode("utf-8", "replace"), r.stderr.decode("utf-8", "replace")
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return 1, "", str(e)
+
+
+def mime_of(path):
+    code, out, _ = run(["file", "-b", "-L", "--mime-type", path], 5)
+    m = out.strip() if code == 0 else ""
+    if not m or m == "application/octet-stream":
+        g = mimetypes.guess_type(path)[0]
+        if g:
+            m = g
+    return m or "application/octet-stream"
+
+
+def cache_dir(path, st):
+    key = hashlib.sha1(f"{path}\0{st.st_mtime_ns}\0{st.st_size}".encode()).hexdigest()
+    d = os.path.join(CACHE, key)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def clean_cache():
+    try:
+        now = time.time()
+        for e in os.scandir(CACHE):
+            if e.is_dir() and now - e.stat().st_mtime > 7 * 86400:
+                shutil.rmtree(e.path, ignore_errors=True)
+    except OSError:
+        pass
+
+
+def ffprobe(path):
+    code, out, _ = run(["ffprobe", "-v", "error", "-print_format", "json", "-show_format", "-show_streams", path], 15)
+    try:
+        return json.loads(out) if code == 0 else {}
+    except ValueError:
+        return {}
+
+
+def kind_of(path, mime, st):
+    low = path.lower()
+    ext = os.path.splitext(low)[1]
+    if stat.S_ISDIR(st.st_mode):
+        return "folder"
+    if mime == "application/pdf" or ext == ".pdf":
+        return "pdf"
+    if mime.startswith("image/"):
+        return "image"
+    if mime.startswith("video/") or ext in (".mkv", ".webm", ".mp4", ".mov", ".avi", ".m4v"):
+        return "video"
+    if mime.startswith("audio/") or ext in (".mp3", ".flac", ".ogg", ".opus", ".m4a", ".wav", ".aac"):
+        return "audio"
+    if any(low.endswith(a) for a in ARCHIVES) or mime in ("application/zip", "application/x-tar", "application/x-7z-compressed",
+                                                         "application/zstd", "application/gzip", "application/x-xz",
+                                                         "application/x-rar", "application/vnd.rar", "application/x-bzip2"):
+        return "archive"
+    if mime.startswith("text/") or ext in TEXT_EXT or mime in ("application/json", "application/xml", "application/javascript",
+                                                               "application/x-shellscript", "application/toml", "application/x-yaml"):
+        return "text"
+    if st.st_size < TEXT_BYTES * 4:      # без расширения: текст, если нет нулевых байтов и читается как UTF-8
+        try:
+            with open(path, "rb") as f:
+                head = f.read(8192)
+            if head and b"\0" not in head:
+                head.decode("utf-8")
+                return "text"
+        except (OSError, UnicodeDecodeError):
+            pass
+    return "other"
+
+
+def do_image(path, st, out):
+    ext = os.path.splitext(path.lower())[1]
+    w = h = 0
+    try:
+        from PIL import Image  # noqa: PLC0415
+        with Image.open(path) as im:
+            w, h = im.size
+    except Exception:  # noqa: BLE001
+        code, o, _ = run(["identify", "-format", "%w %h\n", path + "[0]"], 10)
+        try:
+            w, h = (int(x) for x in o.split()[:2])
+        except ValueError:
+            pass
+    out.update(w=w, h=h, src=path)
+    if ext not in QT_IMAGES:           # HEIC, AVIF, RAW… — PNG-копия
+        dst = os.path.join(cache_dir(path, st), "image.png")
+        if not os.path.exists(dst):
+            run(["magick", path + "[0]", "-auto-orient", "-resize", "2400x2400>", dst], 30)
+        out["src"] = dst if os.path.exists(dst) else ""
+
+
+def do_pdf(path, st, out):
+    code, o, _ = run(["pdfinfo", path], 10)
+    info = {}
+    for line in o.splitlines():
+        k, _, v = line.partition(":")
+        info[k.strip()] = v.strip()
+    pages = int(info.get("Pages", "0") or 0)
+    d = cache_dir(path, st)
+    last = min(pages, PDF_PAGES) if pages else 1
+    imgs = [os.path.join(d, f"p{i}.png") for i in range(1, last + 1)]
+    # первая страница — сразу (ответ не ждёт остальных), 2…12 — в фоне по одной: QML подхватит, когда файл появится
+    if not os.path.exists(imgs[0]):
+        run(["pdftoppm", "-png", "-r", "110", "-f", "1", "-l", "1", "-singlefile", path, imgs[0][:-4]], 30)
+    todo = [i for i in range(2, last + 1) if not os.path.exists(imgs[i - 1])]
+    if todo:
+        script = "; ".join(f'pdftoppm -png -r 110 -f {i} -l {i} -singlefile "$1" "$2/p{i}.tmp" && mv "$2/p{i}.tmp.png" "$2/p{i}.png"' for i in todo)
+        subprocess.Popen(["sh", "-c", script, "sh", path, d], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    out.update(pages=pages, pageImgs=imgs, title=info.get("Title", ""), author=info.get("Author", ""),
+               pageSize=info.get("Page size", ""))
+
+
+def do_video(path, st, out):
+    d = cache_dir(path, st)
+    thumb = os.path.join(d, "thumb.png")
+    if not os.path.exists(thumb):
+        run(["ffmpegthumbnailer", "-i", path, "-o", thumb, "-s", "1280", "-t", "15%", "-c", "png"], 30)
+    p = ffprobe(path)
+    v = next((s for s in p.get("streams", []) if s.get("codec_type") == "video"), {})
+    a = next((s for s in p.get("streams", []) if s.get("codec_type") == "audio"), {})
+    du = (p.get("format") or {}).get("duration")
+    out.update(thumb=thumb if os.path.exists(thumb) else "", duration=float(du) if du else 0, durationText=dur(du),
+               w=v.get("width", 0), h=v.get("height", 0), codec=(v.get("codec_name") or "").upper(),
+               audio=(a.get("codec_name") or "").upper(), fps=v.get("avg_frame_rate", ""))
+
+
+def do_audio(path, st, out):
+    p = ffprobe(path)
+    fmt = p.get("format") or {}
+    tags = {k.lower(): v for k, v in (fmt.get("tags") or {}).items()}
+    for s in p.get("streams", []):
+        for k, v in (s.get("tags") or {}).items():
+            tags.setdefault(k.lower(), v)
+    a = next((s for s in p.get("streams", []) if s.get("codec_type") == "audio"), {})
+    has_pic = any(s.get("codec_type") == "video" for s in p.get("streams", []))
+    cover = ""
+    if has_pic:
+        d = cache_dir(path, st)
+        cover = os.path.join(d, "cover.jpg")
+        if not os.path.exists(cover):
+            run(["ffmpeg", "-v", "error", "-y", "-i", path, "-an", "-frames:v", "1", "-vf", "scale='min(800,iw)':-2", cover], 20)
+        if not os.path.exists(cover):
+            cover = ""
+    if not cover:                      # cover.jpg / folder.jpg рядом
+        for n in ("cover.jpg", "cover.png", "folder.jpg", "folder.png", "Cover.jpg", "Folder.jpg", "front.jpg"):
+            c = os.path.join(os.path.dirname(path), n)
+            if os.path.exists(c):
+                cover = c
+                break
+    du = fmt.get("duration")
+    br = int(fmt.get("bit_rate") or 0)
+    out.update(cover=cover, title=tags.get("title", ""), artist=tags.get("artist", "") or tags.get("album_artist", ""),
+               album=tags.get("album", ""), duration=float(du) if du else 0, durationText=dur(du),
+               codec=(a.get("codec_name") or "").upper(), bitrate=f"{br // 1000} кбит/с" if br else "",
+               rate=f"{int(a.get('sample_rate', 0)) // 100 / 10:g} кГц".replace(".", ",") if a.get("sample_rate") else "")
+
+
+def do_text(path, st, out):
+    lines, size, trunc = [], 0, False
+    with open(path, "rb") as f:
+        for raw in f:
+            size += len(raw)
+            if len(lines) >= TEXT_LINES or size > TEXT_BYTES:
+                trunc = True
+                break
+            lines.append(raw.decode("utf-8", "replace").rstrip("\r\n").replace("\t", "    "))
+    total = len(lines)
+    if trunc and st.st_size < 32 * 1024 * 1024:
+        with open(path, "rb") as f:
+            total = sum(1 for _ in f)
+    ext = os.path.splitext(path.lower())[1]
+    lang = LANG.get(ext, "")
+    if not lang and lines and lines[0].startswith("#!"):
+        lang = "python" if "python" in lines[0] else "shell"
+    out.update(text="\n".join(lines), lines=total, shown=len(lines), truncated=trunc, lang=lang)
+
+
+def do_archive(path, st, out):
+    code, o, err = run(["bsdtar", "-tf", path], 30)
+    names = [n for n in o.splitlines() if n.strip()]
+    if code != 0 and not names:
+        out.update(entries=[], count=0, truncated=False, error=err.strip()[:120])
+        return
+    entries = [{"name": n.rstrip("/"), "dir": n.endswith("/")} for n in names[:400]]
+    out.update(entries=entries, count=len(names), files=sum(1 for n in names if not n.endswith("/")), truncated=len(names) > 400)
+
+
+def do_folder(path, st, out):
+    items, dirs, files = [], 0, 0
+    try:
+        ents = sorted(os.scandir(path), key=lambda e: (not e.is_dir(follow_symlinks=True), e.name.lower()))
+    except OSError as e:
+        out.update(count=0, dirs=0, files=0, items=[], error=str(e))
+        return
+    ents = [e for e in ents if not e.name.startswith(".")]
+    for e in ents:
+        isd = e.is_dir(follow_symlinks=True)
+        dirs += isd
+        files += not isd
+        if len(items) < 80:
+            try:
+                sz = "" if isd else human(e.stat().st_size)
+            except OSError:
+                sz = ""
+            items.append({"name": e.name, "dir": isd, "sizeText": sz})
+    out.update(count=len(ents), dirs=dirs, files=files, items=items)
+
+
+def siblings(path):
+    d = os.path.dirname(path)
+    try:
+        names = sorted((n for n in os.listdir(d) if not n.startswith(".")), key=lambda n: n.lower())
+    except OSError:
+        return [path], 0
+    paths = [os.path.join(d, n) for n in names]
+    base = os.path.basename(path)
+    if base.startswith("."):
+        paths.append(path)
+    return paths, paths.index(path) if path in paths else 0
+
+
+ICONS = {"folder": "folder", "pdf": "application-pdf", "image": "image-x-generic", "video": "video-x-generic",
+         "audio": "audio-x-generic", "text": "text-x-generic", "archive": "package-x-generic", "other": "unknown"}
+
+
+def main():
+    if len(sys.argv) < 2:
+        print(json.dumps({"ok": False, "error": "нет пути"}))
+        return
+    path = sys.argv[1]
+    if path.startswith("file://"):
+        from urllib.parse import unquote, urlparse  # noqa: PLC0415
+        path = unquote(urlparse(path).path)
+    path = os.path.abspath(os.path.expanduser(path))
+    try:
+        st = os.stat(path)
+    except OSError as e:
+        print(json.dumps({"ok": False, "path": path, "name": os.path.basename(path), "error": "Файл не найден" if isinstance(e, FileNotFoundError) else "Нет доступа" if isinstance(e, PermissionError) else f"Ошибка: {e.strerror}"}, ensure_ascii=False))
+        return
+    os.makedirs(CACHE, exist_ok=True)
+    mime = "inode/directory" if stat.S_ISDIR(st.st_mode) else mime_of(path)
+    kind = kind_of(path, mime, st)
+    sib, idx = siblings(path)
+    out = {"ok": True, "path": path, "name": os.path.basename(path) or path, "dir": os.path.dirname(path), "kind": kind, "mime": mime,
+           "size": st.st_size, "sizeText": "" if kind == "folder" else human(st.st_size), "mtime": st.st_mtime,
+           "mtimeText": when(st.st_mtime), "ctimeText": when(st.st_ctime),
+           "icon": ICONS[kind], "mimeIcon": mime.replace("/", "-"), "siblings": sib, "index": idx}
+    try:
+        {"image": do_image, "pdf": do_pdf, "video": do_video, "audio": do_audio, "text": do_text,
+         "archive": do_archive, "folder": do_folder}.get(kind, lambda *a: None)(path, st, out)
+    except Exception as e:  # noqa: BLE001
+        out["error"] = str(e)[:160]
+    print(json.dumps(out, ensure_ascii=False), flush=True)
+    clean_cache()
+
+
+if __name__ == "__main__":
+    main()

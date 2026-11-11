@@ -1,7 +1,6 @@
 # Системные файлы (абсолютные пути). Применяются только через ./rice push-system (с подтверждением).
 
 /etc/default/grub
-/etc/sddm.conf.d/zz-autologin.conf
 /etc/systemd/zram-generator.conf
 /etc/sysctl.d/99-vm-zram-parameters.conf
 /etc/sysctl.d/99-quiet-printk.conf
@@ -11,17 +10,8 @@
 /etc/bluetooth/main.conf
 /etc/security/faillock.conf
 
-# 3.0: тема SDDM yumi (саму тему ставит ~/.local/share/yumi-sddm/install.sh), курсор на экране входа, тачбар
-/etc/sddm.conf.d/zz-yumi-theme.conf
-/etc/X11/xorg.conf.d/40-yumi-pointer.conf
-/etc/tiny-dfr/config.toml
-/etc/tiny-dfr/folder-yumi.svg
-/etc/tiny-dfr/yumi-brightness_high.svg
-/etc/tiny-dfr/yumi-brightness_low.svg
-/etc/tiny-dfr/yumi-coffee.svg
-/etc/tiny-dfr/yumi-fast_forward.svg
-/etc/tiny-dfr/yumi-folder.svg
-/etc/tiny-dfr/yumi-play_pause.svg
-/etc/tiny-dfr/yumi-volume_down.svg
-/etc/tiny-dfr/yumi-volume_off.svg
-/etc/tiny-dfr/yumi-volume_up.svg
+# 3.1: вход — greetd (автовход при загрузке, после выхода — экран входа на Quickshell в sway).
+# Копию экрана входа в /var/lib/yumi-greeter готовит yumi-greeter-sync (установщик создаёт папку).
+/etc/greetd/config.toml
+/etc/greetd/yumi-session-env.conf
+/etc/pam.d/greetd-yumi

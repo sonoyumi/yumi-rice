@@ -1,0 +1,10 @@
+[Unit]
+Description=yumi: применить выбранный режим питания (частота ЦП) при входе
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/yumi-power-profile apply
+
+[Install]
+WantedBy=graphical-session.target

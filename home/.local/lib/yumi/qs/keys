@@ -1,0 +1,140 @@
+#!/usr/bin/env -S python3 -I
+"""Бэкенд меню «Горячие клавиши» для Quickshell (menus/keys/KeysMenu.qml) — разбор как у yumi-menu-keys.
+Разовый запуск: читает `hyprctl binds -j` (или YP_KEYS_JSON=файл) и печатает ОДНУ JSON-строку:
+  {"n_binds":N,"total":N,"groups":[{"name":"Окна","items":[{"sub","text","flags":[…],"hay":"строка для поиска",
+     "conf":"SUPER + SHIFT + slash","confs":[…],"combos":[{"mods":["SUPER"],"key":"/"}]}]}]}
+Группы — из описаний «[Группа|Подгруппа] текст», названия переведены словарём GROUPS; описания не переводятся."""
+import json
+import os
+import re
+import subprocess
+import sys
+
+MODS = [(64, "SUPER"), (4, "CTRL"), (8, "ALT"), (1, "SHIFT"), (2, "CAPS"), (16, "MOD2"), (32, "MOD3"), (128, "MOD5")]
+GROUPS = {
+    "Launcher": "Запуск", "Apps": "Приложения", "Rofi menus": "Меню", "Menus": "Меню",
+    "Window Management": "Окна", "Group Navigation": "Группы окон", "Change focus": "Фокус",
+    "Resize Active Window": "Размер окна", "Move active window": "Перемещение окна",
+    "Drag & Resize with mouse": "Мышью",
+    "Utils": "Утилиты", "Utilities": "Утилиты",
+    "Workspaces": "Рабочие столы", "Navigation": "Переход", "Move window to workspace": "Перенос окна",
+    "Move window (Don't follow)": "Перенос окна без перехода", "Relative workspace": "Соседний стол",
+    "Mouse": "Колесо мыши", "Special workspace": "Скрытый стол (scratchpad)",
+    "Hardware Controls": "Кнопки устройства", "Audio": "Звук", "Media": "Медиа", "Brightness": "Яркость",
+    "Theming and Wallpaper": "Оформление и обои", "AI": "ИИ", "Layout": "Раскладка окон",
+    "Master": "Раскладка master", "Session": "Сессия", "Hardware": "Устройство",
+}
+NO_DESC = "Без описания"
+KEYS = {
+    "left": "←", "right": "→", "up": "↑", "down": "↓", "return": "Enter", "enter": "Enter",
+    "escape": "Esc", "tab": "Tab", "delete": "Delete", "space": "Space", "backspace": "Backspace",
+    "slash": "/", "comma": ",", "period": ".", "grave": "`", "minus": "-", "equal": "=",
+    "semicolon": ";", "apostrophe": "'", "backslash": "\\", "bracketleft": "[", "bracketright": "]",
+    "print": "PrtSc", "scroll_lock": "ScrLk", "pause": "Pause",
+    "mouse:272": "ЛКМ", "mouse:273": "ПКМ", "mouse:274": "СКМ", "mouse_down": "колесо ↓", "mouse_up": "колесо ↑",
+    "xf86audiomute": "󰝟 звук", "xf86audiomicmute": "󰍭 микрофон", "xf86audiolowervolume": "󰝞 тише",
+    "xf86audioraisevolume": "󰝝 громче", "xf86audioplay": "󰐊 play", "xf86audiopause": "󰏤 пауза",
+    "xf86audionext": "󰒭 след.", "xf86audioprev": "󰒮 пред.", "xf86monbrightnessup": "󰃠 ярче",
+    "xf86monbrightnessdown": "󰃞 темнее", "xf86kbdbrightnessup": "󰌌 подсветка +",
+    "xf86kbdbrightnessdown": "󰌌 подсветка −", "xf86search": "󰍉 поиск", "xf86tools": "XF86Tools",
+    "xf86launch5": "XF86Launch5",
+}
+
+
+def key_label(key):
+    k = key.strip()
+    low = k.lower()
+    if low in KEYS:
+        return KEYS[low]
+    if low.startswith("switch:"):
+        state = low.split(":")[1]
+        return "крышка: " + ("закрыта" if state == "on" else "открыта") if "lid" in low else k
+    if low.startswith("kp_"):
+        return "Num " + k[3:]
+    if low.startswith("mouse:"):
+        return "мышь " + k[6:]
+    if len(k) == 1:
+        return k.upper()
+    return k[:1].upper() + k[1:] if k.isupper() and len(k) > 3 else k
+
+
+def mods_of(mask):
+    return [name for bit, name in MODS if mask & bit]
+
+
+def combo_conf(b):
+    return " + ".join(mods_of(b.get("modmask", 0)) + [b.get("key", "")])
+
+
+def parse_desc(desc):
+    m = re.match(r"^\s*\[([^\]]*)\]\s*(.*)$", desc or "")
+    if not m:
+        return ([NO_DESC] if not (desc or "").strip() else ["Прочее"]), (desc or "").strip()
+    parts = [p.strip() for p in m.group(1).split("|") if p.strip()] or ["Прочее"]
+    return parts, m.group(2).strip()
+
+
+def tr(name):
+    return GROUPS.get(name, name)
+
+
+def load_binds():
+    path = os.environ.get("YP_KEYS_JSON")
+    if path:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    try:
+        out = subprocess.run(["hyprctl", "binds", "-j"], capture_output=True, text=True, timeout=3).stdout
+        return json.loads(out or "[]")
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def build(binds):
+    groups, index = {}, {}
+    for b in binds:
+        if b.get("catch_all"):
+            continue
+        path, text = parse_desc(b.get("description", ""))
+        sub = " · ".join(tr(p) for p in path[1:])
+        key = (tuple(path), text) if text else (tuple(path), "#" + combo_conf(b))
+        if key in index:
+            index[key]["combos"].append(b)
+            continue
+        flags = []
+        k = b.get("key", "").lower()
+        if k.startswith("mouse:") or (b.get("description", "").lower().find("hold to") >= 0):
+            flags.append("удерживать")
+        if b.get("repeat"):
+            flags.append("повтор")
+        if b.get("locked"):
+            flags.append("и при блокировке")
+        if b.get("release"):
+            flags.append("по отпусканию")
+        if b.get("longPress"):
+            flags.append("долгое нажатие")
+        if b.get("submap"):
+            flags.append(f"подрежим {b['submap']}")
+        e = {"group": tr(path[0]), "sub": sub, "text": text or "описания нет", "combos": [b], "flags": flags}
+        index[key] = e
+        groups.setdefault(tr(path[0]), []).append(e)
+    order = sorted(groups.items(), key=lambda kv: kv[0] == NO_DESC)     # «Без описания» — в конец
+    out, n_binds, total = [], 0, 0
+    for g, items in order:
+        rows = []
+        for e in items:
+            hay = [e["group"], e["sub"], e["text"], " ".join(e["flags"])]
+            for b in e["combos"]:
+                hay += [combo_conf(b), key_label(b.get("key", ""))]
+            rows.append({"sub": e["sub"], "text": e["text"], "flags": e["flags"], "hay": " ".join(hay).lower(),
+                         "conf": combo_conf(e["combos"][0]), "confs": [combo_conf(b) for b in e["combos"]],
+                         "combos": [{"mods": mods_of(b.get("modmask", 0)), "key": key_label(b.get("key", ""))}
+                                    for b in e["combos"]]})
+            n_binds += len(e["combos"])
+        total += len(rows)
+        out.append({"name": g, "items": rows})
+    return {"groups": out, "n_binds": n_binds, "total": total}
+
+
+if __name__ == "__main__":
+    sys.stdout.write(json.dumps(build(load_binds()), ensure_ascii=False) + "\n")

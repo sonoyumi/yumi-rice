@@ -1,0 +1,313 @@
+diff --git a/src/helpers/BootHold.cpp b/src/helpers/BootHold.cpp
+new file mode 100644
+index 0000000..83f4d08
+--- /dev/null
++++ b/src/helpers/BootHold.cpp
+@@ -0,0 +1,208 @@
++#include "BootHold.hpp"
++#include "../Compositor.hpp"
++#include "../output/Monitor.hpp"
++#include "../render/Renderer.hpp"
++#include "../state/MonitorState.hpp"
++#include "../managers/SessionLockManager.hpp"
++#include "../managers/eventLoop/EventLoopManager.hpp"
++#include "../managers/eventLoop/EventLoopTimer.hpp"
++#include "../desktop/view/LayerSurface.hpp"
++#include "time/Time.hpp"
++
++#include <aquamarine/backend/Backend.hpp>
++#include <aquamarine/output/Output.hpp>
++
++#include <algorithm>
++#include <chrono>
++#include <cstdlib>
++#include <sstream>
++#include <string>
++#include <unordered_set>
++#include <vector>
++
++// static init runs before main(): close enough to "Hyprland started"
++static const auto BOOT_START = std::chrono::steady_clock::now();
++
++namespace {
++    struct SConfig {
++        double                   holdSeconds = 0;
++        std::vector<std::string> outputs;
++        bool                     hideCursor = false;
++    };
++
++    const SConfig& config() {
++        static const SConfig CFG = [] {
++            SConfig c;
++            if (const char* v = getenv("HYPRLAND_HOLD_FIRST_CLIENT"); v && *v) {
++                try {
++                    c.holdSeconds = std::stod(v);
++                } catch (...) { c.holdSeconds = 0; }
++                if (c.holdSeconds < 0 || c.holdSeconds != c.holdSeconds)
++                    c.holdSeconds = 0;
++                if (c.holdSeconds > 30)
++                    c.holdSeconds = 30;
++            }
++            if (const char* v = getenv("HYPRLAND_HOLD_OUTPUTS"); v && *v) {
++                std::stringstream ss{std::string{v}};
++                std::string       item;
++                while (std::getline(ss, item, ','))
++                    if (!item.empty())
++                        c.outputs.emplace_back(item);
++            }
++            if (const char* v = getenv("HYPRLAND_HIDE_CURSOR_UNTIL_LOCK"); v && *v && std::string{v} != "0")
++                c.hideCursor = true;
++
++            Log::logger->log(Log::DEBUG, "BootHold: hold {}s, outputs '{}', hide cursor until lock {}", c.holdSeconds,
++                             getenv("HYPRLAND_HOLD_OUTPUTS") ? getenv("HYPRLAND_HOLD_OUTPUTS") : "all", c.hideCursor);
++            return c;
++        }();
++        return CFG;
++    }
++
++    constexpr double              CURSOR_MAX_SECONDS = 30.0;
++
++    std::unordered_set<MONITORID> released;
++    bool                          holdExpired    = false;
++    bool                          cursorReleased = false;
++    SP<CEventLoopTimer>           expiryTimer;
++
++    double                        elapsed() {
++        return std::chrono::duration<double>(std::chrono::steady_clock::now() - BOOT_START).count();
++    }
++
++    void kickAllMonitors() {
++        for (auto const& m : State::monitorState()->monitors()) {
++            if (!m || !m->m_output)
++                continue;
++            m->m_damage.damageEntire();
++            g_pHyprRenderer->damageMonitor(m);
++            m->scheduleFrame();
++        }
++    }
++
++    void armExpiryTimer() {
++        if (expiryTimer || !g_pEventLoopManager)
++            return;
++
++        const double LEFT = std::max(0.0, config().holdSeconds - elapsed()) + 0.005;
++
++        expiryTimer = makeShared<CEventLoopTimer>(
++            std::chrono::duration_cast<Time::steady_dur>(std::chrono::duration<double>(LEFT)),
++            [](SP<CEventLoopTimer> self, void* data) {
++                Log::logger->log(Log::DEBUG, "BootHold: hold time is over at {:.3f}s, rendering normally", elapsed());
++                holdExpired = true;
++                kickAllMonitors();
++            },
++            nullptr);
++
++        g_pEventLoopManager->addTimer(expiryTimer);
++    }
++
++    bool outputSelected(const PHLMONITOR& m) {
++        if (config().outputs.empty())
++            return true;
++        return std::ranges::find(config().outputs, m->m_name) != config().outputs.end();
++    }
++
++    // a client already has a mapped surface with a buffer on this monitor
++    bool clientPresent(const PHLMONITOR& m) {
++        if (g_pSessionLockManager && g_pSessionLockManager->getSessionLockSurfaceForMonitor(m->m_id).lock())
++            return true;
++
++        for (auto const& layer : m->m_layerSurfaceLayers) {
++            for (auto const& lsr : layer) {
++                const auto ls = lsr.lock();
++                if (ls && ls->m_mapped)
++                    return true;
++            }
++        }
++
++        return false;
++    }
++
++    // first frame must show the client fully: skip open animations of what is already mapped
++    void finishLayerAnimations(const PHLMONITOR& m) {
++        for (auto const& layer : m->m_layerSurfaceLayers) {
++            for (auto const& lsr : layer) {
++                const auto ls = lsr.lock();
++                if (!ls || !ls->m_mapped)
++                    continue;
++                ls->finishAnimation();
++                ls->alpha().warp();
++            }
++        }
++    }
++
++    void release(const PHLMONITOR& m, const char* why) {
++        released.insert(m->m_id);
++
++        // no "monitorAdded" 2x->1x zoom-in on the first frames: they must continue the splash 1:1
++        m->m_zoomAnimProgress->setValueAndWarp(1.F);
++        m->m_zoomAnimFrameCounter = 5;
++        m->m_damage.damageEntire();
++
++        Log::logger->log(Log::DEBUG, "BootHold: releasing {} at {:.3f}s ({})", m->m_name, elapsed(), why);
++    }
++};
++
++bool BootHold::shouldHold(PHLMONITOR m) {
++    if (!m || config().holdSeconds <= 0)
++        return false;
++
++    if (released.contains(m->m_id))
++        return false;
++
++    if (!m->m_output || m->m_output->getBackend()->type() != Aquamarine::AQ_BACKEND_DRM || !outputSelected(m)) {
++        released.insert(m->m_id);
++        return false;
++    }
++
++    if (holdExpired || elapsed() >= config().holdSeconds) {
++        holdExpired = true;
++        release(m, "timeout");
++        return false;
++    }
++
++    if (clientPresent(m)) {
++        finishLayerAnimations(m);
++        release(m, "client surface mapped");
++        return false;
++    }
++
++    armExpiryTimer();
++    return true;
++}
++
++bool BootHold::deferCommit(PHLMONITOR m) {
++    if (!m || config().holdSeconds <= 0 || !m->m_output)
++        return false;
++
++    // never defer disabling an output
++    if (!m->m_output->state->state().enabled)
++        return false;
++
++    if (!shouldHold(m))
++        return false;
++
++    Log::logger->log(Log::DEBUG, "BootHold: deferring commit on {} (state stays pending until the first real frame)", m->m_name);
++    return true;
++}
++
++bool BootHold::cursorHoldPending() {
++    return config().hideCursor && !cursorReleased;
++}
++
++bool BootHold::cursorHidden() {
++    if (!config().hideCursor || cursorReleased)
++        return false;
++
++    const bool LOCK_MAPPED = g_pSessionLockManager && g_pSessionLockManager->anySessionLockSurfacesPresent();
++
++    if (LOCK_MAPPED || elapsed() >= CURSOR_MAX_SECONDS) {
++        cursorReleased = true;
++        Log::logger->log(Log::DEBUG, "BootHold: cursor allowed at {:.3f}s ({})", elapsed(), LOCK_MAPPED ? "lock surface mapped" : "timeout");
++        return false;
++    }
++
++    return true;
++}
+diff --git a/src/helpers/BootHold.hpp b/src/helpers/BootHold.hpp
+new file mode 100644
+index 0000000..bd92a9f
+--- /dev/null
++++ b/src/helpers/BootHold.hpp
+@@ -0,0 +1,32 @@
++#pragma once
++
++// yumi: boot hold.
++//
++// HYPRLAND_HOLD_FIRST_CLIENT=<seconds>
++//   While less than <seconds> have passed since Hyprland started and a DRM monitor
++//   has no mapped client surface (a layer surface of any layer, or a session lock
++//   surface), Hyprland does not output anything to that monitor: no render, no
++//   commit, no modeset. The CRTC keeps scanning out whatever framebuffer was there
++//   (e.g. a boot splash). The first frame after the hold already contains the client.
++//   Unset / 0 = upstream behaviour.
++// HYPRLAND_HOLD_OUTPUTS=eDP-1[,DP-1...]
++//   Optional: hold only these outputs (default: all DRM outputs).
++// HYPRLAND_HIDE_CURSOR_UNTIL_LOCK=1
++//   Optional: keep the cursor hidden (hw plane and software) until the first
++//   session lock surface is mapped, max 30 s after start. Independent of the hold.
++
++#include "../defines.hpp"
++
++namespace BootHold {
++    // true = do not render / commit this monitor now. Latches the release.
++    bool shouldHold(PHLMONITOR monitor);
++
++    // called from CMonitorState::commit(): true = skip the KMS commit, keep pending state
++    bool deferCommit(PHLMONITOR monitor);
++
++    // extra condition for IHyprRenderer::ensureCursorRenderingMode()
++    bool cursorHidden();
++
++    // HYPRLAND_HIDE_CURSOR_UNTIL_LOCK set and the cursor not released yet
++    bool cursorHoldPending();
++};
+diff --git a/src/output/Monitor.cpp b/src/output/Monitor.cpp
+index e69d8dd..543996f 100644
+--- a/src/output/Monitor.cpp
++++ b/src/output/Monitor.cpp
+@@ -1,5 +1,6 @@
+ #include "Monitor.hpp"
+ #include "../helpers/MiscFunctions.hpp"
++#include "../helpers/BootHold.hpp"
+ #include "../macros.hpp"
+ #include "SharedDefs.hpp"
+ #include "../helpers/TransferFunction.hpp"
+@@ -2657,6 +2658,12 @@ bool CMonitorState::commit() {
+     if (!updateSwapchain())
+         return false;
+ 
++    // yumi boot hold: leave the CRTC untouched (no modeset, no empty buffer) until the
++    // first client surface is on this monitor. The pending state is kept in m_output->state
++    // and goes out with the first rendered frame.
++    if (BootHold::deferCommit(m_owner->m_self.lock()))
++        return true;
++
+     Event::bus()->m_events.monitor.preCommit.emit(m_owner->m_self.lock());
+ 
+     ensureBufferPresent();
+diff --git a/src/render/Renderer.cpp b/src/render/Renderer.cpp
+index 249f084..1449080 100644
+--- a/src/render/Renderer.cpp
++++ b/src/render/Renderer.cpp
+@@ -35,6 +35,7 @@
+ #include "../desktop/DesktopTypes.hpp"
+ #include "../event/EventBus.hpp"
+ #include "../helpers/CursorShapes.hpp"
++#include "../helpers/BootHold.hpp"
+ #include "../helpers/MainLoopExecutor.hpp"
+ #include "../output/Monitor.hpp"
+ #include "../state/MonitorState.hpp"
+@@ -2068,6 +2069,15 @@ void IHyprRenderer::renderMonitor(PHLMONITOR pMonitor, bool commit) {
+             pMonitor->m_activeWorkspace->m_space->recalculate(Layout::RECALCULATE_REASON_RENDER_MONITOR);
+     }
+ 
++    // yumi boot hold: cursor must already be hidden in the very first frame
++    if (BootHold::cursorHoldPending())
++        ensureCursorRenderingMode();
++
++    // yumi boot hold: no render and no commit until a client surface is mapped here
++    // (or the hold time is over). Damage / needsFrame stay pending for the first frame.
++    if (BootHold::shouldHold(pMonitor))
++        return;
++
+     // needsFrame can be cleared by commits that didnt consume our damage like a
+     // commit while a pageflip was in flight, so pending damage must keep the frame alive.
+     if (!pMonitor->m_output->needsFrame && pMonitor->m_forceFullFrames == 0 && !pMonitor->m_damage.hasChanged())
+@@ -2933,7 +2943,7 @@ void IHyprRenderer::ensureCursorRenderingMode() {
+     m_cursorHiddenByCondition =
+         m_cursorHiddenConditions.hiddenOnTimeout || m_cursorHiddenConditions.hiddenOnTouch || m_cursorHiddenConditions.hiddenOnTablet || m_cursorHiddenConditions.hiddenOnKeyboard;
+ 
+-    const bool HIDE = m_cursorHiddenByCondition || (*PINVISIBLE != 0) || PROTO::inputCapture->isCaptured();
++    const bool HIDE = m_cursorHiddenByCondition || (*PINVISIBLE != 0) || PROTO::inputCapture->isCaptured() || BootHold::cursorHidden();
+ 
+     if (HIDE == m_cursorHidden)
+         return;

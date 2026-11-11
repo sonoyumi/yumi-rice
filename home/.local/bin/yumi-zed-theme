@@ -1,0 +1,385 @@
+#!/usr/bin/env python3
+# yumi-zed-theme — тема редактора Zed из темы VS Code «Wallbash» (цвета обоев).
+#
+# Берёт готовый файл темы VS Code (~/.vscode/extensions/yumi.wallbash-theme-*/themes/wallbash.json),
+# который при смене обоев пишут yumi-colors / code-colors.py / yumi-tone, и переводит его
+# в формат Zed: ~/.config/zed/themes/wallbash.json. Zed перечитывает файл темы сам.
+# Подсветка кода — оттенки из темы VS Code; фон и акцент — тон системы от yumi-accent (как бар и kitty).
+# Яркость каждого цвета подгоняется до читаемого контраста: на ярких обоях тема VS Code бывает нечитаемой.
+#
+# Запуск: вручную `yumi-zed-theme` или служба yumi-zed-theme.path (следит за файлом темы VS Code).
+# Откат: yumi-uninstall zed
+import colorsys
+import glob
+import json
+import os
+import sys
+
+HOME = os.path.expanduser("~")
+SRC_GLOB = os.path.join(HOME, ".vscode*/extensions/yumi.wallbash-theme-*/themes/wallbash.json")
+OUT = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.join(HOME, ".config")), "zed/themes/wallbash.json")
+
+
+def hex8(c, alpha=None):
+    """#RGB/#RRGGBB/#RRGGBBAA → #RRGGBBAA; alpha (0..1) заменяет прозрачность."""
+    c = c.lstrip("#")
+    if len(c) in (3, 4):
+        c = "".join(ch * 2 for ch in c)
+    if len(c) == 6:
+        c += "FF"
+    if alpha is not None:
+        c = c[:6] + "%02X" % round(alpha * 255)
+    return "#" + c.upper()
+
+
+def lum(c):
+    c = c.lstrip("#")
+    r, g, b = (int(c[i:i + 2], 16) / 255 for i in (0, 2, 4))
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def mix(a, b, t):
+    """Смешать два цвета: t=0 → a, t=1 → b."""
+    a, b = a.lstrip("#")[:6], b.lstrip("#")[:6]
+    return "#" + "".join("%02X" % round(int(a[i:i + 2], 16) * (1 - t) + int(b[i:i + 2], 16) * t) for i in (0, 2, 4))
+
+
+def rel_lum(c):
+    """Яркость по WCAG (для расчёта контраста)."""
+    c = c.lstrip("#")
+    ch = []
+    for i in (0, 2, 4):
+        v = int(c[i:i + 2], 16) / 255
+        ch.append(v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4)
+    return 0.2126 * ch[0] + 0.7152 * ch[1] + 0.0722 * ch[2]
+
+
+def contrast(a, b):
+    la, lb = rel_lum(a), rel_lum(b)
+    return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+
+
+def readable(color, bg, ratio):
+    """Тот же оттенок, но светлее/темнее, пока текст не станет читаемым на фоне bg."""
+    alpha = color.lstrip("#")[6:8]
+    base = "#" + color.lstrip("#")[:6]
+    if contrast(base, bg) >= ratio:
+        return color
+    r, g, b = (int(base[i:i + 2], 16) / 255 for i in (1, 3, 5))
+    h, l, sat = colorsys.rgb_to_hls(r, g, b)
+    step = 0.02 if rel_lum(bg) < 0.4 else -0.02      # тёмный фон — светлеем, светлый — темнеем
+    for _ in range(50):
+        l = min(1.0, max(0.0, l + step))
+        cand = "#" + "".join("%02X" % round(v * 255) for v in colorsys.hls_to_rgb(h, l, min(sat, 0.75)))
+        if contrast(cand, bg) >= ratio or l in (0.0, 1.0):
+            return cand + alpha
+    return color
+
+
+def system_tone():
+    """Тон системы от yumi-accent (тот же, что у бара и kitty): фон, кнопки, акцент. None — если файлов нет."""
+    d = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.join(HOME, ".cache")), "yumi-accent")
+    try:
+        deep, bg, btn, hov = ("#" + x.upper() for x in open(os.path.join(d, "bg.txt")).read().split()[:4])
+        xa = open(os.path.join(d, "accent.txt")).read().split()
+        acc = "#" + xa[6].upper() if len(xa) >= 7 else "#" + xa[-1].upper()
+        for v in (deep, bg, btn, hov, acc):
+            int(v[1:], 16)
+            assert len(v) == 7
+        return deep, bg, btn, hov, acc
+    except Exception:
+        return None
+
+
+def main():
+    srcs = sorted(glob.glob(SRC_GLOB))
+    if not srcs:
+        print("yumi-zed-theme: тема VS Code не найдена: " + SRC_GLOB, file=sys.stderr)
+        return 1
+    with open(srcs[-1]) as f:
+        vs = json.load(f)
+    col = vs.get("colors", {})
+    tokens = vs.get("tokenColors", [])
+
+    def c(key, default):
+        v = col.get(key)
+        return v if isinstance(v, str) and v.startswith("#") else default
+
+    def tok(*scopes):
+        """Цвет и начертание первого правила подсветки VS Code с таким scope."""
+        for scope in scopes:
+            for t in tokens:
+                s = t.get("scope")
+                s = [x.strip() for x in s.split(",")] if isinstance(s, str) else (s or [])
+                if scope in s and t.get("settings", {}).get("foreground"):
+                    return t["settings"]["foreground"], t["settings"].get("fontStyle") or ""
+        return None, ""
+
+    bg = c("editor.background", "#1E1E2E")
+    fg = c("editor.foreground", "#FFFFFF")
+    side = c("sideBar.background", bg)
+    acc = c("button.background", c("editorLineNumber.activeForeground", "#A3B7F0"))
+    muted = c("editorLineNumber.foreground", mix(fg, bg, 0.55))
+    dim = c("tab.inactiveForeground", mix(fg, bg, 0.7))
+    border = c("panel.border", mix(bg, fg, 0.2))
+    elem = c("input.background", mix(bg, fg, 0.1))
+    hover = c("list.hoverBackground", hex8(elem, 0.5))
+    sel = c("editor.selectionBackground", hex8(acc, 0.25))
+    dark = lum(bg) < 0.5
+    line = c("editor.lineHighlightBackground", hex8(fg, 0.07))
+    err = c("editorError.foreground", acc)
+    warn = c("editorWarning.foreground", acc)
+    added = c("gitDecoration.addedResourceForeground", acc)
+    modified = c("gitDecoration.modifiedResourceForeground", acc)
+    deleted = c("gitDecoration.deletedResourceForeground", acc)
+    ignored = c("gitDecoration.ignoredResourceForeground", dim)
+
+    # Тон системы (yumi-accent): фон и акцент — как у бара и kitty. На части обоев тема VS Code выходит
+    # с ярким фоном редактора и тёмным текстом (нечитаемо) — тогда её фон не берём вовсе.
+    tone = system_tone()
+    if tone:
+        deep, bg, elem, hov_c, acc = tone
+        side = bg
+        hover = hex8(hov_c, 0.45)
+        border = hov_c
+        dark = lum(bg) < 0.5
+        fg = "#F2F2F2" if dark else "#1A1A1A"
+        sel = hex8(acc, 0.25)
+        line = hex8(fg, 0.06)
+        for k in ("statusBar.background", "titleBar.activeBackground", "titleBar.inactiveBackground", "tab.activeBackground",
+                  "tab.inactiveBackground", "editorGroupHeader.tabsBackground", "terminal.background", "editorWidget.background",
+                  "list.activeSelectionBackground", "scrollbarSlider.background", "editorIndentGuide.background",
+                  "editorIndentGuide.activeBackground", "terminal.foreground", "editorCursor.foreground",
+                  "editorLineNumber.activeForeground"):
+            col.pop(k, None)
+        col["editorWidget.background"] = mix(bg, elem, 0.35)
+        col["editorCursor.foreground"] = acc
+    # читаемость: любой текст и значок должен быть виден на фоне (правим только яркость, оттенок тот же)
+    muted = readable(mix(acc, bg, 0.55) if tone else muted, bg, 2.6)
+    dim = readable(mix(acc, bg, 0.7) if tone else dim, bg, 2.0)
+    acc = readable(acc, bg, 4.5)
+    err, warn, added, modified, deleted = (readable(x, bg, 4.0) for x in (err, warn, added, modified, deleted))
+    ignored = readable(ignored, bg, 2.2)
+    subtle = hex8(border, 0.45)
+
+    style = {
+        "background.appearance": "opaque",
+        "accents": [hex8(acc)],
+        "background": hex8(side),
+        "border": subtle,
+        "border.variant": hex8(border, 0.25),
+        "border.focused": hex8(acc, 0.6),
+        "border.selected": hex8(acc, 0.6),
+        "border.transparent": "#00000000",
+        "border.disabled": hex8(border, 0.2),
+        "elevated_surface.background": hex8(c("editorWidget.background", bg)),
+        "surface.background": hex8(side),
+        "element.background": hex8(elem),
+        "element.hover": hex8(hover),
+        "element.active": hex8(elem),
+        "element.selected": hex8(c("list.activeSelectionBackground", elem)),
+        "element.disabled": hex8(elem, 0.4),
+        "drop_target.background": hex8(acc, 0.2),
+        "ghost_element.background": "#00000000",
+        "ghost_element.hover": hex8(hover),
+        "ghost_element.active": hex8(elem),
+        "ghost_element.selected": hex8(c("list.activeSelectionBackground", elem)),
+        "ghost_element.disabled": hex8(elem, 0.4),
+        "text": hex8(fg),
+        "text.muted": hex8(mix(fg, bg, 0.3)),
+        "text.placeholder": hex8(muted),
+        "text.disabled": hex8(dim),
+        "text.accent": hex8(acc),
+        "icon": hex8(fg),
+        "icon.muted": hex8(mix(fg, bg, 0.35)),
+        "icon.disabled": hex8(dim),
+        "icon.placeholder": hex8(muted),
+        "icon.accent": hex8(acc),
+        "status_bar.background": hex8(c("statusBar.background", bg)),
+        "title_bar.background": hex8(c("titleBar.activeBackground", bg)),
+        "title_bar.inactive_background": hex8(c("titleBar.inactiveBackground", bg)),
+        "toolbar.background": hex8(bg),
+        "tab_bar.background": hex8(c("editorGroupHeader.tabsBackground", bg)),
+        "tab.inactive_background": hex8(c("tab.inactiveBackground", bg)),
+        "tab.active_background": hex8(c("tab.activeBackground", bg)),
+        "search.match_background": hex8(acc, 0.3),
+        "panel.background": hex8(side),
+        "panel.focused_border": hex8(acc, 0.6),
+        "pane.focused_border": hex8(acc, 0.35),
+        "pane_group.border": subtle,
+        "scrollbar.thumb.background": hex8(c("scrollbarSlider.background", hex8(border, 0.5))),
+        "scrollbar.thumb.hover_background": hex8(border),
+        "scrollbar.thumb.border": "#00000000",
+        "scrollbar.track.background": "#00000000",
+        "scrollbar.track.border": "#00000000",
+        "editor.foreground": hex8(fg),
+        "editor.background": hex8(bg),
+        "editor.gutter.background": hex8(bg),
+        "editor.subheader.background": hex8(side),
+        "editor.active_line.background": hex8(line),
+        "editor.highlighted_line.background": hex8(line),
+        "editor.line_number": hex8(muted),
+        "editor.active_line_number": hex8(c("editorLineNumber.activeForeground", acc)),
+        "editor.invisible": hex8(muted, 0.6),
+        "editor.wrap_guide": hex8(border, 0.2),
+        "editor.active_wrap_guide": hex8(border, 0.4),
+        "editor.indent_guide": hex8(c("editorIndentGuide.background", border), 0.35),
+        "editor.indent_guide_active": hex8(c("editorIndentGuide.activeBackground", border)),
+        "editor.document_highlight.read_background": hex8(acc, 0.12),
+        "editor.document_highlight.write_background": hex8(acc, 0.2),
+        "editor.document_highlight.bracket_background": hex8(acc, 0.2),
+        "link_text.hover": hex8(acc),
+        "terminal.background": hex8(c("terminal.background", bg)),
+        "terminal.foreground": hex8(c("terminal.foreground", fg)),
+        "terminal.bright_foreground": hex8(fg),
+        "terminal.dim_foreground": hex8(mix(fg, bg, 0.4)),
+        "terminal.ansi.background": hex8(bg),
+    }
+    names = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"]
+    for n in names:
+        base = c("terminal.ansi" + n.capitalize(), fg)
+        bright = c("terminal.ansiBright" + n.capitalize(), base)
+        if n == "black":
+            base, bright = mix(bg, "#000000" if dark else "#FFFFFF", 0.35), muted
+        elif n == "white":
+            base, bright = mix(fg, bg, 0.15), fg
+        else:
+            base, bright = readable(base, bg, 4.0), readable(bright, bg, 4.5)
+        style["terminal.ansi." + n] = hex8(base)
+        style["terminal.ansi.bright_" + n] = hex8(bright)
+        style["terminal.ansi.dim_" + n] = hex8(mix(base, bg, 0.35))
+
+    # состояния: ошибки, предупреждения, git — как в VS Code
+    for name, color in (("error", err), ("warning", warn), ("info", acc), ("hint", muted), ("success", added),
+                        ("created", added), ("modified", modified), ("deleted", deleted), ("renamed", modified),
+                        ("conflict", c("gitDecoration.conflictingResourceForeground", warn)),
+                        ("ignored", ignored), ("hidden", dim), ("unreachable", dim), ("predictive", muted)):
+        style[name] = hex8(color)
+        style[name + ".background"] = hex8(color, 0.12)
+        style[name + ".border"] = hex8(color, 0.3)
+
+    style["players"] = [{"cursor": hex8(c("editorCursor.foreground", fg)), "background": hex8(acc), "selection": hex8(sel)}]
+
+    # подсветка кода: роль Zed ← scope VS Code
+    roles = {
+        "comment": ("comment",),
+        "comment.doc": ("comment",),
+        "string": ("string",),
+        "string.escape": ("constant.character.escape",),
+        "string.regex": ("string.regexp", "constant.character.escape"),
+        "string.special": ("constant.character.escape",),
+        "string.special.symbol": ("constant.language",),
+        "number": ("constant.numeric",),
+        "boolean": ("constant.language.boolean", "constant.numeric"),
+        "constant": ("variable.other.constant", "constant.numeric"),
+        "constant.builtin": ("constant.language",),
+        "keyword": ("keyword",),
+        "operator": ("keyword.operator",),
+        "function": ("entity.name.function",),
+        "function.method": ("entity.name.function",),
+        "function.builtin": ("support.function.builtin", "constant.language"),
+        "constructor": ("entity.name.class",),
+        "type": ("entity.name.type", "entity.name.class"),
+        "type.builtin": ("support.type", "entity.name.type"),
+        "enum": ("entity.name.enum", "entity.name.class"),
+        "variant": ("variable.other.enummember",),
+        "variable": ("variable.other.readwrite", "text"),
+        "variable.parameter": ("variable.parameter",),
+        "variable.special": ("variable.language.this", "constant.language"),
+        "property": ("meta.property.object", "keyword.operator"),
+        "attribute": ("entity.other.attribute-name", "variable.parameter"),
+        "tag": ("entity.name.tag", "keyword"),
+        "label": ("entity.name.namespace",),
+        "namespace": ("entity.name.namespace",),
+        "preproc": ("keyword.control.directive",),
+        "punctuation": ("punctuation",),
+        "punctuation.bracket": ("punctuation",),
+        "punctuation.delimiter": ("punctuation",),
+        "punctuation.list_marker": ("punctuation",),
+        "punctuation.special": ("keyword.operator",),
+        "embedded": ("text",),
+        "link_uri": ("entity.name.function",),
+        "link_text": ("string",),
+        "text.literal": ("string",),
+        "title": ("keyword",),
+    }
+    syntax = {}
+    for role, scopes in roles.items():
+        color, fstyle = tok(*scopes)
+        if not color:
+            continue
+        need = 3.0 if role.startswith(("comment", "punctuation")) else 5.5
+        item = {"color": hex8(readable(color, bg, need))}
+        if "italic" in fstyle:
+            item["font_style"] = "italic"
+        if "bold" in fstyle:
+            item["font_weight"] = 700
+        syntax[role] = item
+    syntax["emphasis"] = {"color": hex8(fg), "font_style": "italic"}
+    syntax["emphasis.strong"] = {"color": hex8(fg), "font_weight": 700}
+    syntax["primary"] = {"color": hex8(fg)}
+    syntax["hint"] = {"color": hex8(muted)}
+    syntax["predictive"] = {"color": hex8(muted), "font_style": "italic"}
+    if "title" in syntax:
+        syntax["title"]["font_weight"] = 700
+    style["syntax"] = syntax
+
+    theme = {
+        "$schema": "https://zed.dev/schema/themes/v0.2.0.json",
+        "name": "Wallbash",
+        "author": "yumi-zed-theme (из темы VS Code, цвета обоев) — не править, файл создаётся заново",
+        "themes": [{"name": "Wallbash", "appearance": "dark" if dark else "light", "style": style}],
+    }
+    out = json.dumps(theme, indent=2, ensure_ascii=False) + "\n"
+    os.makedirs(os.path.dirname(OUT), exist_ok=True)
+    try:
+        if open(OUT).read() == out:
+            return 0                                   # цвета не изменились — Zed не дёргать
+    except OSError:
+        pass
+    tmp = OUT + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(out)
+    os.replace(tmp, OUT)                               # подмена целиком: Zed не увидит полфайла
+    return 0
+
+
+def stamp():
+    """Отпечаток входных файлов: изменился — значит, цвета переписали (время изменения у файлов из комплекта старое,
+    поэтому смотрим ещё номер файла и время смены записи)."""
+    cache = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.join(HOME, ".cache")), "yumi-accent")
+    out = []
+    for f in sorted(glob.glob(SRC_GLOB)) + [os.path.join(cache, "bg.txt"), os.path.join(cache, "accent.txt")]:
+        try:
+            st = os.stat(f)
+            out.append((f, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns))
+        except OSError:
+            out.append((f, None))
+    return out
+
+
+def settle(quiet=1.5, limit=30.0):
+    """Режим службы: при смене обоев файлы цветов меняются несколько раз за секунду. Пересобираем тему после
+    каждого изменения и выходим, когда 1,5 с было тихо — так последняя версия цветов точно попадает в Zed."""
+    import time
+    start = last_change = time.monotonic()
+    seen = None
+    code = 0
+    while True:
+        now = stamp()
+        if now != seen:
+            seen = now
+            last_change = time.monotonic()
+            try:
+                code = main()
+            except Exception as e:                     # файл поймали на середине записи — следующая проверка исправит
+                print("yumi-zed-theme: %s" % e, file=sys.stderr)
+                seen = None
+        t = time.monotonic()
+        if t - last_change >= quiet or t - start >= limit:
+            return code
+        time.sleep(0.15)
+
+
+if __name__ == "__main__":
+    sys.exit(settle() if "--settle" in sys.argv else main())

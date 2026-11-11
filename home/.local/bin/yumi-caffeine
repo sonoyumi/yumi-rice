@@ -21,7 +21,8 @@ inhibit_alive() { [[ -r $PIDF ]] && kill -0 "$(cat "$PIDF")" 2>/dev/null; }
 state() { inhibit_alive; }
 ensure_hypridle() { pgrep -x hypridle >/dev/null || hyprctl dispatch 'hl.dsp.exec_cmd([[hypridle]])' >/dev/null 2>&1 || setsid -f hypridle >/dev/null 2>&1 </dev/null; }
 note() { notify-send -a "Не засыпать" -i preferences-desktop-screensaver "$@" 2>/dev/null; }
-refresh() { sleep 0.2; pkill -RTMIN+15 -x waybar; }
+osd()  { qs -c yumi ipc call -- osd show caffeine "$1" >/dev/null 2>&1; }   # капсула Quickshell; код ≠ 0 — его нет, тогда note
+refresh() { sleep 0.2; qs -c yumi ipc call bar refresh caffeine >/dev/null 2>&1; }   # пилюля Quickshell
 
 on() {
     ensure_hypridle                       # hypridle нужен для блокировки экрана; ☕ его больше не останавливает
@@ -33,7 +34,7 @@ on() {
     fi
     inhibit_alive || { logger -t yumi-caffeine "on FAILED: systemd-inhibit handle-lid-switch denied"; note -u critical "☕ Не удалось" "Блокировка крышки не взялась (systemd-inhibit — запуск вне графической сессии?)"; refresh; return 1; }
     logger -t yumi-caffeine "on: idle+lid inhibitor pid $(cat "$PIDF"), hypridle running"
-    note "☕ Включено" "Ноутбук не блокируется и не засыпает сам — даже с закрытой крышкой"
+    osd on || note "☕ Включено" "Ноутбук не блокируется и не засыпает сам — даже с закрытой крышкой"
     refresh
 }
 
@@ -41,7 +42,7 @@ off() {
     if [[ -r $PIDF ]]; then kill "$(cat "$PIDF")" 2>/dev/null; rm -f "$PIDF"; fi
     ensure_hypridle
     logger -t yumi-caffeine "off: inhibitor released"
-    note "☕ Выключено" "Ноутбук снова блокируется и засыпает по таймеру и при закрытой крышке"
+    osd off || note "☕ Выключено" "Ноутбук снова блокируется и засыпает по таймеру и при закрытой крышке"
     refresh
 }
 

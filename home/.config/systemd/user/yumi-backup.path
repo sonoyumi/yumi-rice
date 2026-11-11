@@ -1,0 +1,10 @@
+[Unit]
+Description=yumi: запускать бэкап, когда примонтирована флешка (/run/media/%u)
+
+[Path]
+# udisks2 монтирует съёмные носители сюда; срабатывает при появлении содержимого
+DirectoryNotEmpty=/run/media/%u
+Unit=yumi-backup.service
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,194 @@
+#!/usr/bin/env -S python3 -I
+"""calendar — бэкенд меню «Календарь» для Quickshell (yumi-rice 3.1). Хранилище и правила — те же, что у
+~/.local/bin/yumi-menu-calendar (модуль ~/.local/lib/yumi/calendar/calstore.py), без GTK: процесс печатает
+JSON-строки состояния в stdout и читает команды JSON-строками из stdin.
+
+stdout (по строке на событие):
+  {"type":"state", today:"2026-10-15", now:"13:48", events:[{id,date,time|null,text,remind,done,…}], weather:"", dry}
+      — при старте, при изменении events.json (опрос mtime раз в секунду) и после каждой команды
+  {"type":"result", cmd:"save|delete|done", ok, msg, date}   msg — текст для toast («󰄬 Сохранено», «󰆴 Удалено», ошибка)
+stdin:
+  {"cmd":"save", ev:{id?, date, time|null, text, remind|null, done}}   новая запись (без id) или правка
+  {"cmd":"delete", id}   {"cmd":"done", id, on}   {"cmd":"refresh"}   {"cmd":"quit"}
+Погода: ~/.cache/yumi/weather.txt, если файл не старше 3 ч (иначе "").
+Проверка: YP_DRYRUN=1 — файл планов не трогается, изменения живут в памяти процесса;
+YP_CAL_FILE, YP_CAL_NOW — как у GTK-меню (подменить файл / «сейчас»).
+Откат: yumi-uninstall quickshell"""
+import json
+import os
+import signal
+import sys
+import threading
+import time
+from datetime import date, datetime
+
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi/calendar"))
+import calstore as cs  # noqa: E402
+
+DRYRUN = os.environ.get("YP_DRYRUN") == "1"
+WEATHER = os.path.expanduser("~/.cache/yumi/weather.txt")
+OUT_LOCK = threading.Lock()
+MEM = None                      # dry-run: список планов в памяти
+
+
+def die_with_parent():
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").prctl(1, signal.SIGTERM)       # PR_SET_PDEATHSIG
+    except Exception:
+        pass
+
+
+def emit(**obj):
+    with OUT_LOCK:
+        try:
+            sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+            sys.stdout.flush()
+        except (BrokenPipeError, OSError):
+            os._exit(0)
+
+
+def log(*a):
+    print(*a, file=sys.stderr, flush=True)
+
+
+def weather():
+    try:
+        if time.time() - os.path.getmtime(WEATHER) > 3 * 3600:
+            return ""
+        with open(WEATHER, encoding="utf-8") as f:
+            return f.read().strip()[:40]
+    except OSError:
+        return ""
+
+
+def events():
+    global MEM
+    if DRYRUN:
+        if MEM is None:
+            MEM = cs.load()
+        return MEM
+    return cs.load()
+
+
+def modify(fn):
+    """Как cs.modify, но в dry-run — только в памяти."""
+    if DRYRUN:
+        fn(events())
+        MEM.sort(key=lambda e: (e["date"], e.get("time") or "", e.get("created", "")))
+        log("[dry-run] файл планов не записан")
+        return
+    cs.modify(fn)
+
+
+def state():
+    now = cs.now()
+    emit(type="state", today=now.date().isoformat(), now=f"{now:%H:%M}", events=events(), weather=weather(), dry=DRYRUN)
+
+
+def mtime():
+    try:
+        return os.stat(cs.PATH).st_mtime_ns
+    except OSError:
+        return 0
+
+
+def save(ev):
+    text = (ev.get("text") or "").strip()
+    if not text:
+        return False, "Напишите, что запланировано", ev.get("date", "")
+    stamp = cs.key(cs.now())
+    old = next((x for x in events() if x["id"] == ev.get("id")), None) if ev.get("id") else None
+    new = dict(old or {"id": cs.new_id(ev["date"]), "created": stamp})
+    rem = ev.get("remind")
+    new.update(date=ev["date"], text=text, remind=None if rem is None else int(rem), done=bool(ev.get("done")),
+               updated=stamp, time=ev.get("time") or None)
+    if old and (old.get("time"), old["date"]) != (new["time"], new["date"]):
+        new.pop("snooze", None)
+    cs.mark_past_as_sent(new)
+
+    def apply(evs):
+        for i, x in enumerate(evs):
+            if x["id"] == new["id"]:
+                evs[i] = new
+                return
+        evs.append(new)
+    try:
+        modify(apply)
+    except OSError as ex:
+        return False, f"Не сохранилось: {ex}", new["date"]
+    return True, "󰄬 Сохранено", new["date"]
+
+
+def delete(ev_id):
+    d = next((x["date"] for x in events() if x["id"] == ev_id), "")
+    try:
+        modify(lambda evs: evs.__setitem__(slice(None), [x for x in evs if x["id"] != ev_id]))
+    except OSError as ex:
+        return False, f"Не удалилось: {ex}", d
+    return True, "󰆴 Удалено", d
+
+
+def set_done(ev_id, on):
+    d = ""
+
+    def apply(evs):
+        nonlocal d
+        for x in evs:
+            if x["id"] == ev_id:
+                x["done"] = bool(on)
+                x["updated"] = cs.key(cs.now())
+                d = x["date"]
+    try:
+        modify(apply)
+    except OSError as ex:
+        return False, f"Не сохранилось: {ex}", d
+    return True, "", d
+
+
+def main():
+    die_with_parent()
+    state()
+    stop = threading.Event()
+
+    def watch():                                   # изменения файла извне (напоминалка, GTK-меню)
+        last = mtime()
+        while not stop.wait(1.0):
+            m = mtime()
+            if m != last:
+                last = m
+                time.sleep(0.2)
+                state()
+    threading.Thread(target=watch, daemon=True).start()
+
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            j = json.loads(line)
+        except ValueError:
+            log("calendar: не JSON:", line)
+            continue
+        cmd = j.get("cmd")
+        if cmd == "quit":
+            break
+        if cmd == "refresh":
+            state()
+            continue
+        if cmd == "save":
+            ok, msg, d = save(j.get("ev") or {})
+        elif cmd == "delete":
+            ok, msg, d = delete(j.get("id"))
+        elif cmd == "done":
+            ok, msg, d = set_done(j.get("id"), j.get("on"))
+        else:
+            log("calendar: неизвестная команда", cmd)
+            continue
+        state()
+        emit(type="result", cmd=cmd, ok=ok, msg=msg, date=d)
+    stop.set()
+
+
+if __name__ == "__main__":
+    main()

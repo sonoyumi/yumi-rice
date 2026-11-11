@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# yumi-bar-restart — полный перезапуск бара Quickshell (yumi-quickshell.service): новый процесс с чистой памятью
+# (`qs reload` память не трогает). Waybar и swaync удалены 19.10.2026.
+#   yumi-bar-restart            перезапустить
+#   yumi-bar-restart quickshell то же (старое имя аргумента)
+#   yumi-bar-restart state      активен ли (quickshell), без перезапуска
+set -u
+case "${1:-}" in
+    state) systemctl --user is-active --quiet yumi-quickshell.service && echo quickshell; exit 0 ;;
+    ""|quickshell) ;;
+    *) echo "yumi-bar-restart [quickshell|state]" >&2; exit 1 ;;
+esac
+systemctl --user restart yumi-quickshell.service 2>/dev/null
+for _ in $(seq 1 30); do
+    pgrep -x qs >/dev/null && { echo "Quickshell перезапущен"; exit 0; }
+    sleep 0.3
+done
+echo "Quickshell не поднялся — проверьте: systemctl --user status yumi-quickshell; journalctl --user -u yumi-quickshell -n 30" >&2
+exit 1

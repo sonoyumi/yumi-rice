@@ -1,0 +1,5 @@
+#!/bin/sh
+# Пауза / продолжить для биндов и наушников (XF86AudioPlay/Pause — тачбар и AirPods через AVRCP, ALT+F9) — 30.10.
+# Через оболочку Quickshell: тот же плеер, что в острове и центре управления; если игрок уже закрыт —
+# продолжает последний трек с сохранённого места (Player.resume). Оболочка не отвечает — как раньше, playerctl.
+qs -c yumi ipc call player playpause >/dev/null 2>&1 || exec playerctl play-pause

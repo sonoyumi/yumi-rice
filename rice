@@ -13,7 +13,22 @@ list() { grep -vE '^[[:space:]]*(#|$)' "$1"; }
 # RICE_LOCAL=off ./rice push — поставить чистую публичную версию (сам слой не меняется).
 local_dir="${XDG_CONFIG_HOME:-$HOME/.config}/rice-local"
 [ "${RICE_LOCAL:-on}" = "off" ] && local_dir=""
-home_list() { list "$man_home"; if [ -n "$local_dir" ] && [ -f "$local_dir/manifest.txt" ]; then list "$local_dir/manifest.txt"; fi; }
+# Раздел только для MacBook (Asahi): строки между «# @mac» и «# @end».
+# RICE_MAC=off ./rice push — пропустить его (так делает ./install.sh на других компьютерах).
+mac_filter() {
+    if [ "${RICE_MAC:-on}" = "off" ]; then
+        awk '/^[[:space:]]*#[[:space:]]*@mac[[:space:]]*$/ { skip = 1; next }
+             /^[[:space:]]*#[[:space:]]*@end[[:space:]]*$/ { skip = 0; next }
+             !skip'
+    else cat; fi
+}
+home_list() {
+    mac_filter < "$man_home" | grep -vE '^[[:space:]]*(#|$)'
+    if [ -n "$local_dir" ] && [ -f "$local_dir/manifest.txt" ]; then
+        mac_filter < "$local_dir/manifest.txt" | grep -vE '^[[:space:]]*(#|$)'
+    fi
+    true
+}
 # Откуда брать файл: «фильтр путь». Личная версия хранится как в системе, без меток.
 source_of() {
     if [ -n "$local_dir" ] && [ -e "$local_dir/home/$1" ]; then echo "cat $local_dir/home/$1"
@@ -22,8 +37,11 @@ source_of() {
 
 # В репозитории личный путь и логин заменены метками: @HOME@ и @USER@ (строка User= автовхода).
 # pull ставит метки, push/diff подставляют значения текущего пользователя.
-to_repo() { sed -e "s|$HOME|@HOME@|g" -e "s|^User=$USER\$|User=@USER@|"; }
-to_sys()  { sed -e "s|@HOME@|$HOME|g" -e "s|^User=@USER@\$|User=$USER|"; }
+# Ещё метки @USER@: строка `user = "логин"` (/etc/greetd/config.toml, автовход) и `…USER=логин` (yumi-greeter).
+to_repo() { sed -e "s|$HOME|@HOME@|g" -e "s|^User=$USER\$|User=@USER@|" \
+                -e "s|^user = \"$USER\"\$|user = \"@USER@\"|" -e "s|USER=$USER\\b|USER=@USER@|g"; }
+to_sys()  { sed -e "s|@HOME@|$HOME|g" -e "s|^User=@USER@\$|User=$USER|" \
+                -e "s|^user = \"@USER@\"\$|user = \"$USER\"|" -e "s|USER=@USER@|USER=$USER|g"; }
 # Исполняемые в ~/.local/bin, которых нет ни в одном манифесте (кроме чужих и ссылок на сторонние программы)
 untracked_bin() {
     local f n m
@@ -45,8 +63,9 @@ usage() {
 ./rice pull           система → репозиторий
 ./rice diff [путь]    чем система отличается от репозитория
 ./rice push           репозиторий → система (файлы в ~)
-./rice push-system    репозиторий → /etc (с diff и подтверждением)
-./rice reload         перечитать Hyprland, Waybar, swaync, systemd --user
+./rice push-system [фильтр]  репозиторий → /etc (с diff и подтверждением; фильтр — часть пути)
+./rice files          список файлов из ~, которые ставит push (с учётом RICE_LOCAL и RICE_MAC)
+./rice reload         перечитать Hyprland, Quickshell (бар, меню, уведомления), systemd --user
 ./rice add <путь>...  начать отслеживать файл(ы)
 ./rice doctor         проверка системы (yumi-doctor) и репозитория
 ./rice check          проверка репозитория (синтаксис, личное, секреты); --install-hook — перед каждым коммитом
@@ -107,7 +126,9 @@ push)
     done < <(home_list)
     ;;
 push-system)
+    filter="${2:-}"
     while read -r p; do
+        [ -n "$filter" ] && [[ "$p" != *"$filter"* ]] && continue
         src="$repo/system$p"
         [ -e "$src" ] || continue
         tmp="$(mktemp)"; to_sys < "$src" > "$tmp"
@@ -135,17 +156,22 @@ push-system)
   zram     → перезагрузка
   earlyoom → sudo systemctl restart earlyoom
   bluetooth→ sudo systemctl restart bluetooth
-  tiny-dfr → sudo systemctl restart tiny-dfr
-  SDDM     → тема: ~/.local/share/yumi-sddm/install.sh (откат: uninstall.sh рядом)
+  greetd   → вход со следующей загрузки (sudo systemctl enable greetd); экран входа — ~/.local/bin/yumi-greeter-sync
 EOF
     ;;
 reload)
     systemctl --user daemon-reload
     hyprctl reload >/dev/null && echo "Hyprland: ok"
     hyprctl configerrors
-    systemctl --user restart waybar.service && echo "Waybar: ok"
-    "$HOME/.local/bin/yumi-cc-build" compact 2>/dev/null
-    swaync-client -R >/dev/null 2>&1; swaync-client -rs >/dev/null 2>&1 && echo "swaync: ok"
+    # Quickshell читает QML только при старте; перезапуск останавливает музыку yumi-music — вернуть с того же места
+    playing=$(playerctl -a status 2>/dev/null | grep -c Playing || true)
+    "$HOME/.local/bin/yumi-bar-restart" && echo "Quickshell: ok"
+    if [ "${playing:-0}" -gt 0 ] && [ -x "$HOME/.local/lib/yumi/qs/player" ]; then
+        (echo '{"cmd":"resume"}'; sleep 30) | systemd-run --user --scope -q "$HOME/.local/lib/yumi/qs/player" >/dev/null 2>&1 &
+    fi
+    ;;
+files)
+    home_list
     ;;
 add)
     shift
@@ -171,21 +197,19 @@ doctor)
     echo "--- ошибки конфига Hyprland:"; hyprctl configerrors
     echo "--- режим: $("$HOME/.local/bin/yumi-workflow" get 2>/dev/null)"
     echo "--- процессы:"
-    for x in waybar swaync hypridle awww-daemon; do
+    for x in qs hypridle awww-daemon; do
         pgrep -x "$x" >/dev/null && echo "  ✓ $x" || echo "  ✗ $x НЕ запущен"
     done
-    echo "--- служба обоев для блокировки:"; systemctl --user is-active yumi-hyprlock-bg.service
     echo "--- память:"; free -h | sed -n '1,3p'; zramctl --noheadings 2>/dev/null
     echo "--- расхождения с репозиторием:"; "$0" diff | grep -c '^@@' | sed 's/^/  изменённых блоков: /'
     echo "--- службы yumi:"
-    for u in yumi-bar-events.service yumi-tray.service yumi-notify-log.service yumi-airpods.service \
-             yumi-wallpaper.service yumi-awww.service yumi-battery-notify.service yumi-mouse-notify.service \
-             yumi-clip-text.service yumi-clip-image.service yumi-hz-guard.service yumi-udiskie.service \
-             yumi-music-proxy.service yumi-calendar-remind.timer yumi-caffeine-guard.timer \
+    for u in yumi-quickshell.service yumi-bar-events.service yumi-wallpaper.service yumi-awww.service \
+             yumi-battery-notify.service yumi-mouse-notify.service yumi-clip-text.service yumi-clip-image.service \
+             yumi-clip-persist.service yumi-hz-guard.service yumi-mic.service yumi-music-proxy.service \
+             yumi-greeter-sync.path yumi-calendar-remind.timer yumi-caffeine-guard.timer \
              yumi-music-sync.timer yumi-music-update.timer yumi-rice-drift.timer; do
         printf '  %-28s %s\n' "$u" "$(systemctl --user is-active "$u" 2>/dev/null)"
     done
-    # дети Waybar (форк перед запуском скрипта пилюли) иногда падают с SIGABRT — это ошибка waybar 0.15, бар живёт
     echo "--- падения за сутки (coredumpctl):"
     coredumpctl list --since=-24h --no-legend -q 2>/dev/null | awk '{n=split($(NF-1),a,"/"); print a[n]}' \
         | sort | uniq -c | sort -rn | sed 's/^ */  /' | grep . || echo "  нет"
@@ -196,7 +220,7 @@ doctor)
     failed=$(systemctl --user --failed --no-legend --plain | awk '{print $1}' | tr '\n' ' ')
     echo "--- упавшие службы: ${failed:-нет}"
     echo "--- неудачных входов (faillock, 3 подряд = блокировка на 10 мин): $(faillock --user "$USER" 2>/dev/null | tail -n +3 | grep -c .)"
-    echo "--- ошибок Waybar за час: $(journalctl --user --since -1h -u waybar.service 2>/dev/null | grep -c -E '\[(error|critical)\]')"
+    echo "--- ошибок QML за час: $(journalctl --user --since -1h -u yumi-quickshell.service 2>/dev/null | grep -c -iE 'TypeError|ReferenceError|is not a type|Cannot assign')"
     echo "--- давление памяти (avg60): $(awk '/^some/{print $3}' /proc/pressure/memory)"
     ;;
 check)

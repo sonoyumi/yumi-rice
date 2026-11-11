@@ -6,6 +6,6 @@ hl.window_rule({ opaque = true, match = { class = ".*" } })
 hl.layer_rule({
 	name = "yumi_workflow_editing",
 	blur = true,
-	match = { namespace = "^(notifications|swaync-(notification-window|control-center)|waybar)$" },
+	match = { namespace = "^(notifications)$" },
 })
 return wf

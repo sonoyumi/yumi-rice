@@ -8,7 +8,9 @@ PAL="${cacheDir}/wallbash/yumi-folders"
 [[ -r "$PAL" ]] || PAL="${cacheDir}/wall.dcol"
 D="$HOME/.local/share/yumi-folders"
 T="$HOME/.local/share/icons/Yumi-Folders"
-exec 9>"${XDG_RUNTIME_DIR:-/tmp}/yumi-folders.lock"; flock -n 9 || exit 0
+# 19.10: ждать прошлый прогон, а не выходить (-n терял вторую быструю смену — папки оставались в цвете первых
+# обоев); палитру recolor читает уже после ожидания — то есть свежую
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/yumi-folders.lock"; flock -w 60 9 || exit 0
 python3 -I "$D/recolor.py" "$PAL" "$D/src" "$T/places/scalable"
 gtk-update-icon-cache -f -q -t "$T" 2>/dev/null || true
 rm -f "${XDG_CACHE_HOME:-$HOME/.cache}/icon-cache.kcache"

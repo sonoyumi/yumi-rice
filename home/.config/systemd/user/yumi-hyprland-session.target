@@ -1,0 +1,8 @@
+[Unit]
+# yumi (18.10): сеанс Hyprland без uwsm. Запускает Hyprland (yumi/autostart.lua) после передачи окружения;
+# поднимает graphical-session.target (все службы yumi ждут её) и автозапуск XDG (~/.config/autostart).
+Description=yumi: сеанс Hyprland (без uwsm)
+BindsTo=graphical-session.target
+Wants=graphical-session-pre.target xdg-desktop-autostart.target
+After=graphical-session-pre.target
+Before=graphical-session.target xdg-desktop-autostart.target

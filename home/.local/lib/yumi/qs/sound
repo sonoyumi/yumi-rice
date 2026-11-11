@@ -1,0 +1,440 @@
+#!/usr/bin/env -S python3 -I
+"""Бэкенд меню звука Quickshell (menus/sound): всё, чего нет в Quickshell.Services.Pipewire.
+Громкость, «без звука» и устройство по умолчанию QML делает сам через PipeWire; сюда — pactl:
+понятные имена и значки, разъёмы, профили карт, баланс Л/П, перенос потока на другое устройство,
+кто слушает микрофон. Разбор pactl -f json — тот же, что в ~/.local/bin/yumi-menu-sound (GTK).
+
+Протокол: stdout — JSON-строки {"type":"state", …} (при запуске и по каждому событию pactl subscribe,
+пачка событий → одно обновление через 120 мс) и {"type":"toast","text":…,"error":bool};
+stdin — команды JSON: {"cmd":"refresh"} | {"cmd":"set-default","kind":"sink|source","name":…}
+| {"cmd":"set-port","kind","name","port"} | {"cmd":"set-profile","card":<имя карты>,"key":…}
+| {"cmd":"set-balance","kind","name","value":-100..100} | {"cmd":"move","kind","index":<поток>,"target":<имя>}
+| {"cmd":"set-vol","kind","name","value":0..150} (запас, если узла PipeWire нет) | {"cmd":"mute","kind","name"}.
+Ключи устройств — имя узла (node.name = имя pactl), потоков — object.serial (= индекс pactl).
+YP_DRYRUN=1 — команды, меняющие звук, только печатаются в stderr. Откат: yumi-uninstall quickshell"""
+import json
+import os
+import re
+import subprocess
+import sys
+import threading
+
+DRY = bool(os.environ.get("YP_DRYRUN"))
+NO_DEV = 4294967295
+STEREO = "front-left,front-right"
+ICON_VOL, ICON_MUTED, ICON_MIC = "󰕾", "󰖁", "󰍬"
+ENV = dict(os.environ, LANG="C.UTF-8", LC_ALL="C.UTF-8")
+OUT = threading.Lock()
+
+
+def emit(obj):
+    with OUT:
+        sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
+
+
+def run(*cmd, timeout=4):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=ENV).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def do(*cmd):
+    """Команда, меняющая звук. В YP_DRYRUN только печатается."""
+    if DRY:
+        print("[dry-run]", " ".join(str(c) for c in cmd), file=sys.stderr, flush=True)
+        return True, ""
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=15, env=ENV)
+        return r.returncode == 0, (r.stdout + r.stderr).strip()
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, str(e)
+
+
+# ---------- чтение pactl (как в yumi-menu-sound) ----------
+def pj(*what):
+    try:
+        return json.loads(run("pactl", "-f", "json", *what) or "null")
+    except ValueError:
+        return None
+
+
+def pct(obj):
+    """Громкость как в pavucontrol: самый громкий канал, %."""
+    vals = []
+    for ch in (obj.get("volume") or {}).values():
+        try:
+            vals.append(int(str(ch.get("value_percent", "0")).rstrip("%")))
+        except ValueError:
+            pass
+    return max(vals) if vals else 0
+
+
+def is_monitor(src):
+    return src["name"].endswith(".monitor") or src.get("properties", {}).get("device.class") == "monitor"
+
+
+def hidden_stream(s):
+    """Служебные потоки: DSP-фильтры Asahi, измерители pavucontrol, неподключённые."""
+    p = s.get("properties", {})
+    node = p.get("node.name", "")
+    return (p.get("node.passive") == "true" or node.startswith(("effect_output.", "effect_input.", "audio_effect."))
+            or str(p.get("node.group", "")).startswith("filter-chain")
+            or p.get("application.id") == "org.PulseAudio.pavucontrol" or p.get("media.name") == "Peak detect"
+            or s.get("sink", s.get("source")) == NO_DEV)
+
+
+def snapshot():
+    info = pj("info") or {}
+    srcs = pj("list", "sources") or []
+    return {
+        "def_sink": info.get("default_sink_name", ""),
+        "def_src": info.get("default_source_name", ""),
+        "sinks": pj("list", "sinks") or [],
+        "sources": [s for s in srcs if not is_monitor(s)],
+        "monitors": {s["index"]: s for s in srcs if is_monitor(s)},
+        "inputs": [s for s in pj("list", "sink-inputs") or [] if not hidden_stream(s)],
+        "outputs": [s for s in pj("list", "source-outputs") or [] if not hidden_stream(s)],
+        "cards": {c["index"]: c for c in pj("list", "cards") or []},
+    }
+
+
+# ---------- названия и значки ----------
+APP_ICONS = (("firefox", "󰈹"), ("librewolf", "󰈹"), ("chrom", "󰊯"), ("brave", "󰊯"), ("spotify", "󰓇"),
+             ("telegram", ""), ("discord", "󰙯"), ("vesktop", "󰙯"), ("vlc", "󰕼"), ("mpv", "󰐊"),
+             ("celluloid", "󰐊"), ("steam", "󰓓"), ("obs", "󰑋"), ("zoom", "󰕧"), ("cava", "󰄨"),
+             ("yumi-player", "󰝚"), ("speech", "󰗋"))
+TRIVIAL_MEDIA = {"playback", "audio stream", "audiostream", "output", "record", "capture", "playstream",
+                 "recordstream", "audio", "simple dsp", "webrtc voiceengine"}
+
+
+def is_event(s):
+    return s.get("properties", {}).get("media.role") == "event"
+
+
+def app_icon(s):
+    p = s.get("properties", {})
+    if is_event(s):
+        return "󰂚"
+    key = " ".join(str(p.get(k, "")) for k in ("application.process.binary", "application.name",
+                                                  "application.icon_name", "node.name")).lower()
+    return next((ic for k, ic in APP_ICONS if k in key), "󰝚")
+
+
+def app_name(s):
+    p = s.get("properties", {})
+    if is_event(s):
+        return "Системные звуки"
+    return p.get("application.name") or p.get("media.name") or p.get("node.name") or "Без названия"
+
+
+def media_title(s):
+    p = s.get("properties", {})
+    m = (p.get("media.name") or "").strip()
+    if m == "cava" or p.get("node.name") == "cava":
+        return "визуализатор"
+    if is_event(s) or not m or m == p.get("application.name") or m.lower() in TRIVIAL_MEDIA:
+        return ""
+    return m
+
+
+def dev_kind(dev):
+    p = dev.get("properties", {})
+    txt = (dev.get("name", "") + " " + (dev.get("description") or "")).lower()
+    if p.get("device.bus") == "bluetooth" or p.get("device.api") == "bluez5" or "bluez" in txt:
+        return "bt"
+    if "hdmi" in txt or "displayport" in txt:
+        return "hdmi"
+    if p.get("device.bus") == "usb":
+        return "usb"
+    if (dev.get("description") or "").startswith(("Built-in Audio", "MacBook")) or p.get("device.form_factor") == "internal":
+        return "internal"
+    return "other"
+
+
+def dev_name(dev, kind):
+    """Понятное имя: «MacBook» (встроенные динамики), «Колонки» (разъём 3,5 мм — 19.10: там колонки, не наушники),
+    «Встроенный микрофон»; иначе — как у устройства."""
+    if not dev:
+        return "—"
+    desc = dev.get("description") or dev.get("name", "")
+    if dev.get("_monitor"):
+        return "выход"
+    if dev_kind(dev) == "internal":
+        low = desc.lower()
+        if "speaker" in low:
+            return "MacBook"
+        if "headset mic" in low:
+            return "Микрофон гарнитуры (3,5 мм)"
+        if "headphone" in low:
+            return "Колонки"
+        if "mic" in low:
+            return "Встроенный микрофон"
+    return desc
+
+
+def dev_icon(dev, kind):
+    if not dev:
+        return ICON_VOL
+    k = dev_kind(dev)
+    low = (dev.get("description") or dev.get("name", "")).lower()
+    if dev.get("_monitor"):
+        return ICON_VOL
+    if k == "bt":
+        return "󰂰"
+    if k == "hdmi":
+        return "󰍹"
+    if "headset" in low and kind == "source":
+        return "󰋎"
+    if "headphone" in low:
+        return "󰓃" if k == "internal" else "󰋋"     # 19.10: разъём 3,5 мм — колонки (значок колонки)
+    if k == "internal" and kind == "sink" and "speaker" in low:
+        return "󰌢"                                   # 19.10: встроенные динамики — значок ноутбука («MacBook»)
+    if k == "usb":
+        return "󰕓"
+    return ICON_MIC if kind == "source" else "󰓃"
+
+
+def dev_type_text(dev, kind, default):
+    what = {"bt": "Bluetooth", "hdmi": "HDMI", "usb": "USB", "internal": "встроенный"}.get(dev_kind(dev), "")
+    side = "Выход" if kind == "sink" else "Вход"
+    return " · ".join(x for x in (side, what, "основной" if default else "") if x)
+
+
+PART_RU = {"analog-stereo": "Аналоговый стерео", "analog-mono": "Аналоговый моно",
+           "analog-surround-40": "Аналоговый 4.0", "analog-surround-51": "Аналоговый 5.1",
+           "analog-surround-71": "Аналоговый 7.1", "iec958-stereo": "Цифровой стерео (S/PDIF)",
+           "hdmi-stereo": "HDMI стерео", "hdmi-surround": "HDMI 5.1", "hdmi-surround71": "HDMI 7.1"}
+
+
+def part_ru(part):
+    base = re.sub(r"-extra\d+$", "", part)
+    return PART_RU.get(base) or (part.replace("-", " ").capitalize())
+
+
+def profile_ru(key, desc):
+    k = key.lower()
+    codec = re.search(r"codec ([\w\-.]+)", desc or "", re.I)
+    codec = f", {codec.group(1)}" if codec else ""
+    if k == "off":
+        return "Выкл."
+    if k.startswith("a2dp"):
+        return f"Высокое качество (A2DP{codec})"
+    if k.startswith(("headset", "handsfree")) or "hfp" in k or "hsp" in k:
+        return f"Гарнитура с микрофоном (HFP{codec})"
+    if k == "pro-audio":
+        return "Профессиональный (Pro Audio)"
+    if k == "hifi" or desc == "Default":
+        return "Обычный (HiFi)"
+    m = dict(re.findall(r"(output|input):([\w\-]+)", key))
+    out, inp = m.get("output"), m.get("input")
+    if out and inp:
+        return f"{part_ru(out)} дуплекс" if out == inp else f"{part_ru(out)} + вход {part_ru(inp).lower()}"
+    if out:
+        return f"{part_ru(out)} (только выход)"
+    if inp:
+        return f"{part_ru(inp)} (только вход)"
+    return desc or key
+
+
+def profile_icon(key):
+    k = key.lower()
+    if k == "off":
+        return ICON_MUTED
+    if k.startswith("a2dp"):
+        return "󰋋"
+    if k.startswith(("headset", "handsfree")) or "hfp" in k:
+        return "󰋎"
+    if "hdmi" in k:
+        return "󰍹"
+    return "󰓃"
+
+
+def short_name(dev, kind):
+    """«Микрофон гарнитуры (3,5 мм)» → «Гарнитура» — для чипа устройства у потока."""
+    short = re.sub(r"\s*\(.*\)$", "", dev_name(dev, kind))
+    return {"Встроенный микрофон": "Встроенный", "Микрофон гарнитуры": "Гарнитура"}.get(short, short)
+
+
+# ---------- состояние для QML ----------
+class Backend:
+    def __init__(self):
+        self.data = None
+        self.timer = None
+        self.lock = threading.Lock()
+
+    def dev_by_index(self, kind, idx):
+        d = self.data
+        dev = next((x for x in d[kind + "s"] if x["index"] == idx), None)
+        if dev is None and kind == "source" and idx in d["monitors"]:
+            dev = dict(d["monitors"][idx], _monitor=True)
+        return dev
+
+    def dev_by_name(self, kind, name):
+        return next((x for x in (self.data or {}).get(kind + "s", []) if x["name"] == name), None)
+
+    def card_of(self, dev):
+        try:
+            return self.data["cards"].get(int(dev.get("properties", {}).get("device.id", -1)))
+        except (TypeError, ValueError):
+            return None
+
+    def card_json(self, card):
+        profs = [(k, v) for k, v in card.get("profiles", {}).items() if v.get("available", True)]
+        profs.sort(key=lambda kv: (kv[0] == "off", -int(kv[1].get("priority", 0))))
+        return {"index": card["index"], "name": card["name"],
+                "desc": card.get("properties", {}).get("device.description") or card["name"],
+                "active": card.get("active_profile"),
+                "off": card.get("active_profile") == "off" and len(card.get("profiles", {})) > 1,
+                "profiles": [{"key": k, "ru": profile_ru(k, v.get("description", "")), "icon": profile_icon(k),
+                              "active": k == card.get("active_profile")} for k, v in profs]}
+
+    def dev_json(self, dev, kind, default):
+        streams = self.data["inputs"] if kind == "sink" else self.data["outputs"]
+        users = sorted({app_name(s) for s in streams if s.get(kind) == dev["index"]})
+        card = self.card_of(dev)
+        ports = dev.get("ports") or []
+        return {
+            "name": dev["name"], "index": dev["index"], "ru": dev_name(dev, kind), "short": short_name(dev, kind),
+            "icon": dev_icon(dev, kind), "kind": dev_kind(dev), "desc": dev.get("description") or dev["name"],
+            "type_text": dev_type_text(dev, kind, dev["name"] == default),
+            "vol": pct(dev), "mute": bool(dev.get("mute")),
+            "stereo": dev.get("channel_map") == STEREO, "balance": round(float(dev.get("balance") or 0) * 100),
+            "active_port": dev.get("active_port"),
+            "ports": [{"name": p["name"], "ru": re.sub(r"^\[(In|Out)\]\s*", "", p.get("description") or p["name"]),
+                       "active": p["name"] == dev.get("active_port"),
+                       "meta": "не подключён" if p.get("availability") == "not available" else ""} for p in ports],
+            "card": card["name"] if card else "", "users": users,
+        }
+
+    def stream_json(self, s, kind):
+        dev = self.dev_by_index(kind, s[kind])
+        devs = self.data["sinks"] if kind == "sink" else self.data["sources"]
+        sub = media_title(s)
+        if s.get("corked"):
+            sub = " · ".join(x for x in (sub, "на паузе") if x)
+        return {
+            "index": s["index"], "serial": str(s.get("properties", {}).get("object.serial", s["index"])),
+            "kind": kind, "app": app_name(s), "icon": app_icon(s), "sub": sub, "event": is_event(s),
+            "corked": bool(s.get("corked")), "vol": pct(s), "mute": bool(s.get("mute")),
+            "dev": dev["name"] if dev else "", "dev_short": short_name(dev, kind) if dev else "—",
+            "dev_icon": dev_icon(dev, kind), "monitor": bool(dev and dev.get("_monitor")),
+            "movable": len(devs) > 1 and not (dev or {}).get("_monitor"),
+        }
+
+    def state(self):
+        d = self.data
+        mics = [o for o in d["outputs"] if o["source"] not in d["monitors"]]
+        inputs = sorted(d["inputs"], key=lambda s: (is_event(s), bool(s.get("corked")), app_name(s).lower()))
+        return {
+            "type": "state", "dry": DRY,
+            "def_sink": d["def_sink"], "def_src": d["def_src"],
+            "sinks": [self.dev_json(x, "sink", d["def_sink"]) for x in d["sinks"]],
+            "sources": [self.dev_json(x, "source", d["def_src"]) for x in d["sources"]],
+            "streams": [self.stream_json(s, "sink") for s in inputs],
+            "rec": [self.stream_json(s, "source") for s in sorted(d["outputs"], key=lambda s: app_name(s).lower())],
+            "mics": len(mics),
+            "cards": [self.card_json(c) for c in d["cards"].values()],
+        }
+
+    def refresh(self):
+        with self.lock:
+            self.timer = None
+            self.data = snapshot()
+            emit(self.state())
+
+    def schedule(self, delay=0.12):
+        with self.lock:
+            if self.timer is None:
+                self.timer = threading.Timer(delay, self.refresh)
+                self.timer.daemon = True
+                self.timer.start()
+
+    def subscribe(self):
+        try:
+            proc = subprocess.Popen(["pactl", "subscribe"], stdout=subprocess.PIPE, text=True, env=ENV)
+            for line in proc.stdout:
+                if any(w in line for w in ("sink", "source", "server", "card")):
+                    self.schedule()
+        except OSError:
+            pass
+
+    # ---------- действия ----------
+    def after(self, ok, out, text):
+        if ok:
+            if text:
+                emit({"type": "toast", "text": ("[проверка] " if DRY else "") + text, "error": False})
+        else:
+            emit({"type": "toast", "text": out.splitlines()[-1] if out else "Не получилось", "error": True})
+        self.schedule()
+
+    def handle(self, c):
+        cmd, kind = c.get("cmd"), c.get("kind", "sink")
+        name = c.get("name", "")
+        if cmd == "refresh":
+            self.schedule(0)
+        elif cmd == "set-default":
+            dev = self.dev_by_name(kind, name)
+            ok, out = do("pactl", f"set-default-{kind}", name)
+            self.after(ok, out, f"{'Выход' if kind == 'sink' else 'Вход'}: {dev_name(dev, kind)}")
+        elif cmd == "set-port":
+            ok, out = do("pactl", f"set-{kind}-port", name, c["port"])
+            self.after(ok, out, "Разъём переключён")
+        elif cmd == "set-profile":
+            card = next((x for x in self.data["cards"].values() if x["name"] == c["card"]), None)
+            prof = (card or {}).get("profiles", {}).get(c["key"], {})
+            ok, out = do("pactl", "set-card-profile", c["card"], c["key"])
+            self.after(ok, out, f"Профиль: {profile_ru(c['key'], prof.get('description', ''))}")
+        elif cmd == "set-balance":
+            dev = self.dev_by_name(kind, name)
+            if dev:
+                v, f = pct(dev), max(-100, min(100, int(c["value"]))) / 100
+                left, right = (round(v * (1 - f)), v) if f > 0 else (v, round(v * (1 + f)))
+                ok, out = do("pactl", f"set-{kind}-volume", name, f"{left}%", f"{right}%")
+                self.after(ok, out, "")
+        elif cmd == "set-vol":
+            dev = self.dev_by_name(kind, name)
+            v = int(c["value"])
+            bal = float((dev or {}).get("balance") or 0)
+            if dev and dev.get("channel_map") == STEREO and abs(bal) > 0.005:      # не сбивать баланс
+                left, right = (round(v * (1 - bal)), v) if bal > 0 else (v, round(v * (1 + bal)))
+                ok, out = do("pactl", f"set-{kind}-volume", name, f"{left}%", f"{right}%")
+            else:
+                ok, out = do("pactl", f"set-{kind}-volume", name, f"{v}%")
+            self.after(ok, out, "")
+        elif cmd == "mute":
+            ok, out = do("pactl", f"set-{kind}-mute", name, "toggle")
+            self.after(ok, out, "")
+        elif cmd == "move":
+            what = "sink-input" if kind == "sink" else "source-output"
+            lst = self.data["inputs"] if kind == "sink" else self.data["outputs"]
+            s = next((x for x in lst if x["index"] == int(c["index"])), None)
+            ok, out = do("pactl", f"move-{what}", str(c["index"]), c["target"])
+            self.after(ok, out, f"{app_name(s) if s else 'Поток'} → {dev_name(self.dev_by_name(kind, c['target']), kind)}")
+        elif cmd == "stream-vol":           # запас: громкость потока по индексу pactl
+            what = "sink-input" if kind == "sink" else "source-output"
+            ok, out = do("pactl", f"set-{what}-volume", str(c["index"]), f"{int(c['value'])}%")
+            self.after(ok, out, "")
+        elif cmd == "stream-mute":
+            what = "sink-input" if kind == "sink" else "source-output"
+            ok, out = do("pactl", f"set-{what}-mute", str(c["index"]), "toggle")
+            self.after(ok, out, "")
+
+
+def main():
+    b = Backend()
+    b.refresh()
+    threading.Thread(target=b.subscribe, daemon=True).start()
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            b.handle(json.loads(line))
+        except (ValueError, KeyError, TypeError) as e:
+            print("sound: плохая команда:", line, e, file=sys.stderr, flush=True)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,122 @@
+#!/usr/bin/env -S python3 -I
+"""yumi-island-pomodoro — Pomodoro/таймер тачбара → Dynamic Island (id pomo, priority 3). 30.10.2026.
+
+Слушает файл состояния ~/.local/state/yumi-pomodoro.json (его пишут плагины тачбара yumi-pomodoro и yumi-timer,
+атомарно через rename) через inotifywait — без опроса. Пока таймер идёт, раз в TICK с (по умолч. 1) обновляет
+остаток (trail мм:сс) и progress; на паузе — ничего не шлёт. Сброс → уйти; фаза кончилась → галочка.
+Плагины тачбара не тронуты. Служба: yumi-island-pomodoro.service (не включена).
+"""
+import json
+import os
+import select
+import subprocess
+import sys
+import time
+
+STATE = os.path.expanduser(os.environ.get("YUMI_POMO_STATE", "~/.local/state/yumi-pomodoro.json"))
+ISLAND = os.path.expanduser("~/.local/bin/yumi-island")
+TICK = float(os.environ.get("YUMI_ISLAND_POMO_TICK", "1"))
+NAMES = {"focus": "Фокус", "break": "Перерыв", "long": "Длинный перерыв", "timer": "Таймер"}
+ROUNDS = 4
+TOGGLE = ("python3 -c \"import sys,os;sys.path.insert(0,os.path.expanduser('~/.config/touchbar/plugins'));"
+          "import yumi_pomo_state as P;d=P.load();P.save(P.pause(d) if P.running(d) else P.start(d))\"")
+
+
+def island(*args):
+    subprocess.run([ISLAND, *args], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                   stderr=None if os.environ.get("YUMI_ISLAND_DRY") else subprocess.DEVNULL)
+
+
+def load():
+    try:
+        with open(STATE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def left(d):
+    if d.get("end"):
+        return max(0, int(round(d["end"] - time.time())))
+    return int(d.get("left", d.get("total", 0)))
+
+
+def mmss(s):
+    return f"{s // 60}:{s % 60:02d}"
+
+
+def sub_of(d, paused):
+    name = NAMES.get(d.get("mode"), "Таймер")
+    if d.get("mode") in ("focus", "break"):
+        name += f" · круг {d.get('round', 1)} из {ROUNDS}"
+    return name + (" · пауза" if paused else "")
+
+
+class Pomo:
+    def __init__(self):
+        self.shown = False
+        self.prev = None
+
+    def show(self, d, verb):
+        total = d.get("total") or 1
+        lft = left(d)
+        paused = not d.get("end")
+        island(verb, "pomo", "--title", "Pomodoro" if d.get("mode") != "timer" else "Таймер",
+               "--sub", sub_of(d, paused), "--trail", mmss(lft), "--icon",
+               "tomato" if d.get("mode") != "timer" else "timer", "--tone", "warn" if paused else "acc",
+               "--prio", "3", "--progress", f"{1 - lft / total:.3f}", "--primary", TOGGLE,
+               "--primary-label", "Продолжить" if paused else "Пауза")
+        self.shown = True
+
+    def on_change(self, d):
+        p, self.prev = self.prev, d
+        if d is None:
+            return
+        running = bool(d.get("end"))
+        fresh = d.get("end") is None and int(d.get("left", -1)) == int(d.get("total", -2))   # фаза не начата
+        if running:
+            self.show(d, "update" if self.shown else "start")
+        elif self.shown:
+            if fresh and p and p.get("end") and left(p) <= 1:
+                island("end", "pomo", "--done", f"{NAMES.get(p.get('mode'), 'Таймер')}: время вышло")
+                self.shown = False
+            elif fresh:                     # сброс или следующая фаза ждёт касания
+                island("end", "pomo")
+                self.shown = False
+            else:                           # пауза — показать один раз
+                self.show(d, "update")
+
+    def tick(self):
+        if self.shown and self.prev and self.prev.get("end"):
+            self.show(self.prev, "update")
+
+
+def main():
+    os.makedirs(os.path.dirname(STATE), exist_ok=True)
+    w = subprocess.Popen(["inotifywait", "-m", "-q", "-e", "close_write,moved_to", "--format", "%f",
+                          os.path.dirname(STATE)], stdout=subprocess.PIPE)
+    fd, buf = w.stdout.fileno(), b""
+    pomo = Pomo()
+    pomo.prev = load()
+    if pomo.prev and pomo.prev.get("end") and left(pomo.prev) > 0:
+        pomo.show(pomo.prev, "start")
+    base = os.path.basename(STATE).encode()
+    while True:
+        r, _, _ = select.select([fd], [], [], TICK if pomo.shown else None)
+        if not r:
+            pomo.tick()
+            continue
+        chunk = os.read(fd, 4096)          # сырые байты: буфер TextIO прятал строки от select
+        if not chunk:
+            return 1
+        buf += chunk
+        *lines, buf = buf.split(b"\n")
+        if base in (l.strip() for l in lines):
+            pomo.on_change(load())
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(0)

@@ -1,0 +1,206 @@
+#!/usr/bin/env -S python3 -I
+"""yumi-mic — стабильный микрофон «Микрофон (авто)» для Discord (18.10).
+Зачем: Vesktop держит поток микрофона ВСЕГДА (и вне звонка). Если это микрофон AirPods — наушники навсегда в
+режиме гарнитуры (16 кГц моно, музыка плохая). А при переключении профиля AAC ↔ гарнитура узел микрофона AirPods
+пересоздаётся — Discord теряет устройство, переподключается, звук и микрофон пропадают (петля).
+Как: виртуальный источник yumi_mic (pw-loopback) существует всегда — Discord пишет с него и ничего не замечает.
+Служба сама решает, откуда он берёт звук:
+  звонок в Discord и хотя бы один AirPods в ухе → микрофон AirPods (наушники уходят в гарнитуру);
+  иначе (нет звонка, наушники в кейсе/отключены) → встроенный микрофон, AirPods в AAC.
+Звонок = у vesktop есть UDP-сокеты WebRTC (кроме mDNS :5353) — проверено вживую: в звонке 3, вне — 0.
+Уши — из сокета службы yumi-airpods (пакеты AAP 0x06).
+Выключить: systemctl --user disable --now yumi-mic (микрофон по умолчанию вернётся на встроенный)."""
+import json
+import os
+import select
+import signal
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, os.path.expanduser("~/.local/lib/yumi/panel"))
+import aap  # noqa: E402
+
+NODE, NODE_IN = "yumi_mic", "yumi_mic_in"
+BUILTIN = "effect_output.j293-mic"
+POLL_S = 1.0
+HFP_PROFILE = os.environ.get("YUMI_MIC_HFP", "headset-head-unit-cvsd")   # 30.10: профиль гарнитуры, на котором микрофон AirPods пишет
+CALL_HOLD_S = 10.0         # звонок кончился = 10 с подряд без сокетов (переподключение Discord их на время убирает)
+DRY = os.environ.get("YP_DRYRUN") == "1"
+
+
+def log(*a):
+    print(time.strftime("%H:%M:%S"), *a, flush=True)
+
+
+def pactl(*args):
+    try:
+        return subprocess.run(["pactl", *args], capture_output=True, text=True, errors="replace", timeout=3).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def in_call():
+    try:
+        out = subprocess.run(["ss", "-uanp"], capture_output=True, text=True, errors="replace", timeout=3).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    # в звонке 3–5 сокетов; после выхода один ещё ~30 с висит (хвост WebRTC) — это уже не звонок (18.10)
+    return sum(1 for ln in out.splitlines() if "vesktop" in ln and ":5353 " not in ln) >= 2
+
+
+HD_NODE = "airpods_hd"
+HD_DIR = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "yumi-airpods-mic")
+
+
+def hd_status():
+    try:
+        with open(os.path.join(HD_DIR, "status")) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def hd_want(on):
+    """Флаг для yumi-airpods-mic: есть файл want — HD-микрофон включён."""
+    path = os.path.join(HD_DIR, "want")
+    try:
+        if on and not os.path.exists(path):
+            os.makedirs(HD_DIR, exist_ok=True)
+            open(path, "w").close()
+            log("HD-микрофон AirPods: включить")
+        elif not on and os.path.exists(path):
+            os.unlink(path)
+            log("HD-микрофон AirPods: выключить")
+    except OSError:
+        pass
+
+
+def sources():
+    return [ln.split("\t")[1] for ln in pactl("list", "short", "sources").splitlines() if "\t" in ln]
+
+
+class Ears:
+    """Сколько AirPods в ушах — по пакетам AAP из сокета yumi-airpods (без службы — 0)."""
+
+    def __init__(self):
+        self.sock, self.mac, self.worn, self.retry_at = None, None, 0, 0
+
+    def poll(self):
+        if self.sock is None and time.monotonic() >= self.retry_at:
+            self.retry_at = time.monotonic() + 3
+            for name in sorted(os.listdir(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))):
+                if name.startswith("yumi-airpods-") and name.endswith(".sock"):
+                    h = name[len("yumi-airpods-"):-5]
+                    mac = ":".join(h[i:i + 2] for i in range(0, 12, 2))
+                    self.sock = aap.open_relay(mac)
+                    if self.sock:
+                        self.mac = mac
+                        break
+        if self.sock is None:
+            self.worn = 0
+            return
+        try:
+            while select.select([self.sock], [], [], 0)[0]:
+                d = self.sock.recv(8192)
+                if not d:
+                    raise OSError("closed")
+                if d.startswith(aap.HDR) and d[4:6] == bytes([aap.OP_EAR, 0]) and len(d) >= 8:
+                    self.worn = sum(1 for v in d[6:8] if v == 0x00)
+        except OSError:
+            self.sock.close()
+            self.sock, self.worn = None, 0
+
+
+def card_profile(mac):
+    key = "bluez_card." + mac.replace(":", "_")
+    for blk in pactl("list", "cards").split("\n\n"):
+        if key in blk:
+            for ln in blk.splitlines():
+                if "Active Profile:" in ln:
+                    return key, ln.split(":", 1)[1].strip()
+    return key, ""
+
+
+def loopback_index():
+    for blk in pactl("list", "source-outputs").split("\n\n"):
+        if f'node.name = "{NODE_IN}"' in blk:
+            return blk.split("#", 1)[1].split()[0]
+    return None
+
+
+def main():
+    lb = subprocess.Popen(
+        ["pw-loopback", "-n", "yumi-mic",
+         "--capture-props", f"{{ node.name = {NODE_IN} node.description = \"yumi-mic (вход)\" target.object = {BUILTIN}"
+                            " node.dont-fallback = true audio.channels = 1 audio.position = [ MONO ] }",
+         "--playback-props", f"{{ node.name = {NODE} node.description = \"Микрофон (авто)\" media.class = Audio/Source"
+                             " audio.channels = 1 audio.position = [ MONO ] }"])
+    signal.signal(signal.SIGTERM, lambda *_: (lb.terminate(), sys.exit(0)))
+    for _ in range(20):                                  # дождаться узлов
+        if NODE in sources() and loopback_index():
+            break
+        time.sleep(0.25)
+    if not DRY:
+        pactl("set-default-source", NODE)
+        try:                                             # Vesktop — на авто-микрофон (его поток живёт всегда)
+            outs = json.loads(pactl("-f", "json", "list", "source-outputs") or "[]")
+        except ValueError:
+            outs = []
+        for o in outs:
+            if "vesktop" in str(o.get("properties", {}).get("application.name", "")).lower():
+                pactl("move-source-output", str(o["index"]), NODE)
+    log("«Микрофон (авто)» готов, по умолчанию")
+    ears, cur, was_call, seen = Ears(), None, False, 0.0
+    try:
+        while lb.poll() is None:
+            ears.poll()
+            if in_call():
+                seen = time.monotonic()
+            call = time.monotonic() - seen < CALL_HOLD_S       # сокеты WebRTC на миг пропадают посреди звонка
+            srcs = sources()
+            # 30.10: в звонке — HD-микрофон AirPods (yumi-airpods-mic: AAC-ELD по AAP, наушники остаются в AAC);
+            # не вышло (status fail / службы нет) — по-старому гарнитура HFP (CVSD)
+            hd = ears.worn and HD_NODE in srcs and hd_status() != "fail"
+            hd_want(call and hd)
+            pods = (HD_NODE if hd else next((s for s in srcs if s.startswith("bluez_input.")), None)) if ears.worn else None
+            want = pods if (call and pods) else BUILTIN
+            idx = loopback_index()
+            if idx and want != cur:
+                log(f"микрофон → {want}", "(звонок)" if call else "")
+                if not DRY:
+                    pactl("move-source-output", idx, want)
+                cur = want
+            if call and cur == pods and pods != HD_NODE and ears.mac:
+                # 30.10: имена профилей сменились (headset-head-unit теперь mSBC, -msbc нет) и на mSBC микрофон AirPods
+                # молчит (проверено записью: 0 кадров), на CVSD — работает. Держим гарнитуру на HFP_PROFILE.
+                key, prof = card_profile(ears.mac)
+                if prof != HFP_PROFILE:                     # автопереключение WirePlumber выключено — включаем сами
+                    log(f"гарнитура {prof} → {HFP_PROFILE} (микрофон AirPods работает только на нём)")
+                    if not DRY:
+                        pactl("set-card-profile", key, HFP_PROFILE)
+            if was_call and not call and ears.mac:           # звонок кончился — вернуть AAC
+                time.sleep(1)
+                key, prof = card_profile(ears.mac)
+                if prof.startswith("headset"):
+                    log("звонок кончился → AirPods в AAC")
+                    if not DRY:
+                        pactl("set-card-profile", key, "a2dp-sink")
+            if pactl("get-default-source") == BUILTIN and not DRY:   # кто-то сбросил выбор — вернуть
+                pactl("set-default-source", NODE)
+            was_call = call
+            time.sleep(POLL_S)
+    finally:
+        hd_want(False)
+        lb.terminate()
+    # 30.10: петля pw-loopback умерла (наушники отключились и т.п.) — выйти с ошибкой, systemd перезапустит
+    # (раньше выход был «успешным», Restart=on-failure не срабатывал и Discord оставался без микрофона)
+    log("петля микрофона завершилась — перезапуск службы")
+    sys.exit(1)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass

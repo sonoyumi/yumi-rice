@@ -5,7 +5,8 @@
 
 export LANG=C.UTF-8 LC_ALL=C.UTF-8  # playerctl и кириллица без этого ломаются
 cache=${XDG_CACHE_HOME:-$HOME/.cache}/hyprlock-info; mkdir -p "$cache"
-CITY=Bolzano
+# место и координаты — из ~/.config/yumi/weather.conf (lat=, lon=, place=; тот же файл, что у погоды Quickshell)
+wconf() { sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" ~/.config/yumi/weather.conf 2>/dev/null | head -1 | tr -d '"'; }
 
 # цвет акцента из обоев (wallbash), для полосы прогресса
 acc="#$(awk '{print $7}' ~/.cache/yumi-accent/accent.txt 2>/dev/null)"; [[ $acc == "#" ]] && acc=$(awk '/^\$wallbash_1xa7 /{print "#" $3; exit}' ~/.config/hypr/themes/colors.conf 2>/dev/null)   # живой акцент (yumi-accent)
@@ -17,10 +18,13 @@ pad() { local s=$1 n=$2; local l=${#s}; (( l < n )) && s+=$(printf '%*s' $((n - 
 
 case $1 in
 weather)  # раз в 15 мин, при ошибке сети — последнее удачное значение
+    lat=$(wconf lat) lon=$(wconf lon) CITY=$(wconf place)
+    [[ -n $lat && -n $lon ]] || exit 0          # погода не настроена — пустая строка
+    CITY=${CITY:-$lat,$lon}
     f=$cache/weather
     if [[ ! -s $f || -n $(find "$f" -mmin +15 2>/dev/null) ]]; then
         # обновляем в фоне: экран не ждёт сеть, сейчас показываем кеш
-        ( w=$(curl -sf --max-time 6 "https://wttr.in/$CITY?format=%t|%C&lang=it" 2>/dev/null)
+        ( w=$(curl -sf --max-time 6 "https://wttr.in/$lat,$lon?format=%t|%C&lang=it" 2>/dev/null)
           [[ $w == *'|'* && $w != *Unknown* ]] && printf '%s' "$w" > "$f.tmp" && mv "$f.tmp" "$f" ) >/dev/null 2>&1 &
     fi
     [[ -s $f ]] || { echo "󰖐  $CITY"; exit; }
@@ -57,7 +61,7 @@ tablo)  # правая колонка табло: день / дата / апта
 
 profile)  # строки профиля рядом с аватаркой
     echo "<b>$(cat /etc/hostname)</b>"
-    echo "<span foreground='$acc'>󰣇 Arch Linux</span>"
+    echo "<span foreground='$acc'>弓 yumi rice · Arch Linux</span>"
     echo "<span alpha='70%' size='90%'>󰌽 $(uname -r | cut -d- -f1-2) · 󰏖 $(pacman -Qq | wc -l) pkg</span>" ;;
 
 net)  # без сканирования эфира: nmcli dev wifi пересканирует Wi-Fi и тормозит экран на секунды

@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# yumi-quicklook — «Быстрый просмотр» (Quickshell, menus/quicklook): показать файл в карточке Quick Look.
+#   yumi-quicklook <путь|file://…>   открыть этот файл
+#   yumi-quicklook                   выделенный файл в Dolphin (активное окно org.kde.dolphin): действие «Копировать» Dolphin
+#                                    по D-Bus (без нажатий: wtype давал SUPER+Ctrl+C и уведомление «раскладка EN» от своей
+#                                    виртуальной клавиатуры — 30.10), путь из wl-paste text/uri-list, прежний буфер — на место.
+# Повторный вызов, пока карточка открыта, — закрыть её (как Пробел в Finder).
+# YUMI_QL_IPC — как звать IPC Quickshell (по умолчанию «qs -c yumi ipc call»; проверка: "qs ipc -p ~/.config/quickshell/yumi/dev-quicklook.qml call").
+# DRY=1 — ничего не нажимать и не открывать, только напечатать.
+set -u
+# 30.10: журнал запусков (отладка «в Dolphin на русской раскладке не работает») — $XDG_RUNTIME_DIR/yumi-quicklook.log
+LOG=${XDG_RUNTIME_DIR:-/tmp}/yumi-quicklook.log
+exec 2>>"$LOG"; echo "== $(date +%T) args=[$*] layout=$(hyprctl devices -j 2>/dev/null | jq -r '[.keyboards[]|select(.main)][0].active_keymap')" >&2
+set -x
+read -r -a QS <<< "${YUMI_QL_IPC:-qs -c yumi ipc call}"
+ipc() { if [[ -n ${DRY:-} ]]; then echo "DO: ${QS[*]} quicklook $*"; else "${QS[@]}" quicklook "$@"; fi; }
+
+decode() {   # file:///a%20b → /a b (остальные схемы — как есть)
+    python3 -I -c 'import sys, urllib.parse as u
+s = sys.argv[1].strip()
+print(u.unquote(u.urlparse(s).path) if s.startswith("file://") else s)' "$1"
+}
+
+# уже открыто — закрыть (клавиатура сейчас у карточки: Ctrl+C ушёл бы ей, а не Dolphin)
+state=$("${QS[@]}" quicklook state 2>/dev/null)
+if [[ $state == *'"open":true'* ]]; then
+    ipc close
+    exit 0
+fi
+
+if [[ $# -gt 0 && -n $1 ]]; then
+    ipc open "$(decode "$1")"
+    exit 0
+fi
+
+win=$(hyprctl activewindow -j 2>/dev/null)
+cls=$(jq -r '.class // empty' <<< "$win"); pid=$(jq -r '.pid // empty' <<< "$win")
+if [[ $cls != org.kde.dolphin ]]; then
+    echo "yumi-quicklook: активное окно не Dolphin ($cls) — передайте путь аргументом" >&2
+    exit 1
+fi
+
+# сохранить буфер обмена (первый тип, как есть — картинку, текст, список файлов)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+had=""
+otype=$(wl-paste --list-types 2>/dev/null | head -1)
+if [[ -n $otype ]] && wl-paste --no-newline --type "$otype" > "$tmp/clip" 2>/dev/null; then had=1; fi
+
+# окно Dolphin этого процесса: /dolphin/Dolphin_N, активное (isActiveWindow), иначе первое
+svc=org.kde.dolphin-$pid
+obj=""
+for o in $(busctl --user tree "$svc" 2>/dev/null | grep -oE '/dolphin/Dolphin_[0-9]+$'); do
+    [[ -z $obj ]] && obj=$o
+    [[ $(busctl --user get-property "$svc" "$o" org.qtproject.Qt.QWidget isActiveWindow 2>/dev/null) == "b true" ]] && { obj=$o; break; }
+done
+if [[ -z $obj ]]; then
+    echo "yumi-quicklook: Dolphin не отвечает по D-Bus ($svc)" >&2
+    exit 1
+fi
+if [[ -n ${DRY:-} ]]; then
+    echo "DO: busctl --user call $svc $obj/actions/edit_copy org.qtproject.Qt.QAction trigger"
+else
+    busctl --user call "$svc" "$obj/actions/edit_copy" org.qtproject.Qt.QAction trigger
+fi
+uris=""
+for _ in 1 2 3 4 5 6 7 8 9 10; do             # Dolphin кладёт выделение не мгновенно
+    sleep 0.05
+    uris=$(wl-paste --no-newline --type text/uri-list 2>/dev/null | tr -d '\r')
+    [[ -n $uris ]] && break
+done
+
+# вернуть прежний буфер
+if [[ -z ${DRY:-} ]]; then
+    if [[ -n $had ]]; then
+        setsid -f wl-copy --type "$otype" < "$tmp/clip" >/dev/null 2>&1
+        sleep 0.05
+    else
+        wl-copy --clear 2>/dev/null
+    fi
+fi
+
+first=$(printf '%s\n' "$uris" | grep -m1 -v '^#')
+# 30.10: убрать из истории буфера (cliphist, SUPER+V) запись, которую оставило копирование из Dolphin
+if [[ -z ${DRY:-} && -n $first ]] && command -v cliphist >/dev/null; then
+    sleep 0.3                                 # cliphist store (wl-paste --watch) пишет не мгновенно
+    cliphist list 2>/dev/null | awk -F'\t' -v u="${first:0:60}" 'index($2, u) == 1' | cliphist delete 2>/dev/null
+fi
+if [[ -z $first ]]; then
+    echo "yumi-quicklook: в Dolphin ничего не выделено" >&2
+    exit 1
+fi
+ipc open "$(decode "$first")"

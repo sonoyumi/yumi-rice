@@ -1,14 +1,14 @@
 #  Startup 
 # Commands to execute on startup (before the prompt is shown)
 # Check if the interactive shell option is set
-if [[ $- == *i* ]]; then
+if [[ $- == *i* && $TERM_PROGRAM != (vscode|zed) ]]; then  # 10.11: в VS Code и Zed без fastfetch
     # This is a good place to load graphic/ascii art, display system information, etc.
     if command -v pokego >/dev/null; then
         pokego --no-title -r 1,3,6
     elif command -v pokemon-colorscripts >/dev/null; then
         pokemon-colorscripts --no-title -r 1,3,6
     elif command -v fastfetch >/dev/null; then
-        fastfetch      # значок Yumi-Rice — текст (~/.config/fastfetch/yumi-logo.txt), рисуется в любом терминале
+        fastfetch      # печать 弓, как значок меню «Система» — текст (~/.config/fastfetch/yumi-logo-hanko.txt), рисуется в любом терминале
     fi
 fi
 

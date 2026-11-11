@@ -43,7 +43,7 @@ set_wf() {
     # атомарно: временный файл рядом и переименование — Hyprland и меню не увидят пустой файл
     tmp="$(mktemp "$dir/.workflow.XXXXXX")" || die 1 "не удалось записать $STATE"
     printf '%s\n' "$1" >"$tmp" && mv -f "$tmp" "$STATE" || { rm -f "$tmp"; die 1 "не удалось записать $STATE"; }
-    pkill -RTMIN+9 waybar 2>/dev/null
+    qs -c yumi ipc call bar refresh workflow >/dev/null 2>&1   # пилюля в Quickshell (без него — тихо)
     if [ -z "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then
         echo "yumi-workflow: Hyprland не запущен — режим «$1» применится при следующем входе" >&2
         return 0

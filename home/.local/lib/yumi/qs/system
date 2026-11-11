@@ -1,0 +1,528 @@
+#!/usr/bin/env -S python3 -I
+"""system — бэкенд меню «Система» для Quickshell (yumi-rice 3.1). Данные и команды те же, что у GTK-меню
+~/.local/bin/yumi-menu-system (оно остаётся рабочим), только без окна: процесс печатает JSON-строки в stdout
+и читает команды JSON-строками из stdin.
+
+stdout (по строке на событие):
+  {"type":"info", subtitle}                                   — «хост · ядро X · в сети Ч:М», раз в 20 с
+  {"type":"updates", recs:[[менеджер, число]]|null}           — из кеша yumi-update ($XDG_RUNTIME_DIR/yumi/update_info.json)
+  {"type":"updates_list", data:{менеджер:[[пакет, старая, новая]]}}  — ответ на updates_list (checkupdates, paru -Qua, flatpak)
+  {"type":"snapshots", snaps:{root:[{num,date,when,desc,sub}], home:[…]}, note}   — snapper --jsonout list
+  {"type":"stats", disk|mem|bat|temp:{text, frac, level, icon, tip}}             — раз в 5 с
+  {"type":"doctor", rep:{status,summary,checks,fixable,fixed,time,error}, stale, running}
+  {"type":"busy", what:"updates|snapshot|doctor", on}   {"type":"toast", text, error, hold}   {"type":"dry", text}
+  {"type":"launched", key}                                     — команда запущена, меню можно закрыть
+stdin:
+  {"cmd":"updates_list"}  {"cmd":"snapshot"}  {"cmd":"doctor"}  {"cmd":"doctor_fix"}  {"cmd":"doctor_term"}
+  {"cmd":"launch","key":"update|wallpaper|waybar|accent|btop|wiki|keys"}  {"cmd":"refresh"}  {"cmd":"quit"}
+Проверка: YP_DRYRUN=1 — команды только печатаются в stderr и имитируются (yumi-doctor --json без --fix — читает,
+поэтому запускается и так); YUMI_DOCTOR=путь — другой yumi-doctor.
+Откат: yumi-uninstall quickshell"""
+import json
+import os
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import threading
+import time
+
+HOME = os.path.expanduser("~")
+DRY = os.environ.get("YP_DRYRUN") == "1"
+UPDATE_INFO = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "yumi/update_info.json")  # пишет yumi-update check
+SYS_BAT = "/sys/class/power_supply/macsmc-battery"
+MGR_NAME = {"pacman": "pacman", "paru": "AUR", "yay": "AUR", "flatpak": "flatpak"}
+
+# действие → (значок, текст, команда, меняет систему?) — как ACTIONS в yumi-menu-system;
+# «Перезапустить Waybar» → «Перезапустить бар» (yumi-bar-restart: Waybar и/или Quickshell — что активно)
+ACTIONS = {
+    "update":     ("󰚰", "Обновить систему", [os.path.join(HOME, ".local/bin/yumi-update"), "run"], False),
+    "wallpaper":  ("󰸉", "Обои", ["qs", "-c", "yumi", "ipc", "call", "menu", "center", "wallpaper"], False),
+    "waybar":     ("󰑓", "Перезапустить бар", [os.path.join(HOME, ".local/bin/yumi-bar-restart")], True),
+    "accent":     ("󰏘", "Пересчитать цвета", [os.path.join(HOME, ".local/bin/yumi-accent")], True),
+    "btop":       ("󰄨", "Системный монитор (btop)", ["kitty", "--title", "btop", "-e", "btop"], False),
+    "wiki":       ("󰖟", "Arch Wiki", ["xdg-open", "https://wiki.archlinux.org"], False),
+    "keys":       ("󰌌", "Горячие клавиши", ["qs", "-c", "yumi", "ipc", "call", "menu", "center", "keys"], False),
+}
+SNAP_DESC = "Вручную из меню «Система»"
+DOCTOR = os.environ.get("YUMI_DOCTOR") or os.path.join(HOME, ".local/bin/yumi-doctor")
+DOCTOR_CACHE = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "yumi/doctor.json")   # последний результат —
+                                       # меню показывает его сразу, пока идёт новая проверка
+OUT_LOCK = threading.Lock()
+
+
+def die_with_parent():
+    """Если Quickshell умер (SIGKILL, падение) — выйти вместе с ним, не висеть сиротой."""
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").prctl(1, signal.SIGTERM)       # PR_SET_PDEATHSIG
+    except Exception:
+        pass
+
+
+def emit(**obj):
+    with OUT_LOCK:
+        try:
+            sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+            sys.stdout.flush()
+        except (BrokenPipeError, OSError):          # QML закрыл канал — выходим
+            os._exit(0)
+
+
+def log(*a):
+    print(*a, file=sys.stderr, flush=True)
+
+
+def run(*cmd, timeout=2):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout
+    except Exception:
+        return ""
+
+
+def do(*cmd, timeout=15):
+    """Команда, МЕНЯЮЩАЯ систему. В YP_DRYRUN=1 только печатается. Возвращает (ok, вывод)."""
+    if DRY:
+        log("[dry-run]", " ".join(str(c) for c in cmd))
+        return True, ""
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return r.returncode == 0, (r.stdout + r.stderr).strip()
+    except Exception as e:
+        return False, str(e)
+
+
+def spawn(*cmd):
+    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+# ---------- данные (1:1 из yumi-menu-system) ----------
+def read(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def uptime_hm():
+    try:
+        s = int(float(read("/proc/uptime").split()[0]))
+    except (AttributeError, ValueError, IndexError):
+        return ""
+    d, s = divmod(s, 86400)
+    t = f"{s // 3600:02d}:{s % 3600 // 60:02d}"
+    return f"{d} д {t}" if d else t
+
+
+def subtitle():
+    host = read("/proc/sys/kernel/hostname") or ""
+    kernel = os.uname().release.split("-")[0]
+    parts = [host, f"ядро {kernel}"]
+    up = uptime_hm()
+    if up:
+        parts.append(f"в сети {up}")
+    return " · ".join(p for p in parts if p)
+
+
+def plural(n, one, few, many):
+    n = abs(n)
+    if n % 10 == 1 and n % 100 != 11:
+        return one
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return few
+    return many
+
+
+def cached_updates():
+    """Число обновлений из кеша yumi-update (тот же файл, что у пилюли custom/updates). None — кеша нет."""
+    try:
+        with open(UPDATE_INFO) as f:
+            data = json.load(f)
+        return [(m["name"], int(m["count"])) for m in data.get("managers", []) if isinstance(m, dict)]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def list_updates():
+    """Пакеты к обновлению по менеджерам: {имя: [(пакет, старая, новая)]} — как list_updates в HyDE pm."""
+    out = {}
+    if shutil.which("checkupdates"):
+        rows = []
+        for line in run("checkupdates", timeout=40).splitlines():
+            p = line.split()
+            if len(p) >= 4:
+                rows.append((p[0], p[1], p[3]))
+        out["pacman"] = rows
+    aur = "paru" if shutil.which("paru") else ("yay" if shutil.which("yay") else None)
+    if aur:
+        rows = []
+        for line in run(aur, "-Qua", timeout=40).splitlines():
+            p = line.split()
+            if len(p) >= 4 and not line.startswith(":"):
+                rows.append((p[0], p[1], p[3]))
+        out[aur] = rows
+    if shutil.which("flatpak"):
+        rows = []
+        for line in run("flatpak", "remote-ls", "--updates", "--columns=application,version",
+                        timeout=40).splitlines():
+            p = line.split("\t")
+            if p and p[0].strip() and not p[0].startswith("Application"):
+                rows.append((p[0].strip(), "", p[1].strip() if len(p) > 1 else ""))
+        out["flatpak"] = rows
+    return out
+
+
+def snapper_list():
+    """Снимки snapper по конфигам: {'root': [...], 'home': [...]} — пары pre/post склеены в одну запись."""
+    raw = run("snapper", "--jsonout", "list", "--all-configs", timeout=8)
+    try:
+        data = json.loads(raw) if raw.strip() else {}
+    except ValueError:
+        data = {}
+    res = {}
+    for cfg, snaps in data.items():
+        snaps = [s for s in snaps if s.get("number")]
+        by_num = {s["number"]: s for s in snaps}
+        paired = {s["pre-number"] for s in snaps if s.get("type") == "post" and s.get("pre-number")}
+        items = []
+        for s in snaps:
+            if s.get("type") == "pre" and s["number"] in paired:
+                continue                              # покажем вместе с парой «после»
+            desc = s.get("description") or ""
+            sub = ""
+            nums = str(s["number"])
+            if s.get("type") == "post" and s.get("pre-number") in by_num:
+                pre = by_num[s["pre-number"]]
+                sub, desc = desc, pre.get("description") or desc
+                nums = f"{pre['number']}–{s['number']}"
+            elif s.get("type") == "pre":
+                sub = "незавершённое: снимок «до» без «после»"
+            if desc == "timeline":
+                desc = "по расписанию"
+            desc, sub = human(desc, sub)
+            items.append({"num": nums, "date": s.get("date", ""), "when": when(s.get("date", "")), "desc": desc, "sub": sub})
+        items.sort(key=lambda x: x["date"], reverse=True)
+        res[cfg] = items
+    return res
+
+
+PM_VERB = {"-Syu": "Обновление системы", "-Syyu": "Обновление системы", "-Su": "Обновление системы",
+           "-S": "Установка", "-U": "Установка из файла", "-R": "Удаление", "-Rs": "Удаление",
+           "-Rns": "Удаление", "-Rn": "Удаление", "--upgrade": "Установка из файла", "--sync": "Установка",
+           "--remove": "Удаление", "-Sy": "Установка"}
+
+
+def human(desc, sub):
+    """«pacman -U --config … /home/…pkg» → «Установка из файла: имена пакетов» (имена — из снимка «после»)."""
+    p = desc.split()
+    if p and p[0] in ("pacman", "yay", "paru", "pacman-key"):
+        verb = next((PM_VERB[a] for a in p[1:] if a in PM_VERB), "pacman")
+        if sub:
+            return f"{verb}: {sub}", desc
+        return verb, desc
+    return desc, sub
+
+
+def when(date):
+    try:
+        t = time.strptime(date, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return date
+    today = time.localtime()
+    days = (time.mktime(today[:3] + (0, 0, 0, 0, 0, -1)) - time.mktime(t[:3] + (0, 0, 0, 0, 0, -1))) // 86400
+    hm = time.strftime("%H:%M", t)
+    if days == 0:
+        return f"сегодня {hm}"
+    if days == 1:
+        return f"вчера {hm}"
+    return time.strftime("%d.%m %H:%M", t)
+
+
+def disk():
+    u = shutil.disk_usage("/")
+    return u.free, u.total, u.used / u.total if u.total else 0
+
+
+def memory():
+    info = {}
+    for line in (read("/proc/meminfo") or "").splitlines():
+        k, _, v = line.partition(":")
+        try:
+            info[k] = int(v.split()[0]) * 1024
+        except (ValueError, IndexError):
+            pass
+    total, avail = info.get("MemTotal", 0), info.get("MemAvailable", 0)
+    return total - avail, total, (total - avail) / total if total else 0
+
+
+def battery():
+    cap = read(os.path.join(SYS_BAT, "capacity"))
+    if cap is None:
+        return None
+    st = read(os.path.join(SYS_BAT, "status")) or ""
+    return int(cap), {"Charging": "заряжается", "Discharging": "от батареи", "Full": "заряжена",
+                      "Not charging": "не заряжается"}.get(st, st.lower())
+
+
+TEMP_NAMES = {"NAND Flash Temperature": "SSD", "Battery Hotspot": "АКБ",
+              "Charge Regulator Temp": "заряд", "WiFi/BT Module Temp": "Wi-Fi"}
+TEMP_FULL = {"SSD": "накопитель (NAND)", "АКБ": "батарея", "заряд": "контроллер заряда", "Wi-Fi": "модуль Wi-Fi/BT"}
+
+
+def temperatures():
+    """Все датчики hwmon (на M1 под Asahi нет датчика ЦП — macsmc_hwmon: накопитель, батарея, заряд, Wi-Fi)."""
+    out = []
+    base = "/sys/class/hwmon"
+    for hw in sorted(os.listdir(base)) if os.path.isdir(base) else []:
+        d = os.path.join(base, hw)
+        name = read(os.path.join(d, "name")) or hw
+        for f in sorted(os.listdir(d)):
+            if f.startswith("temp") and f.endswith("_input"):
+                v = read(os.path.join(d, f))
+                label = read(os.path.join(d, f.replace("_input", "_label"))) or name
+                try:
+                    c = int(v) / 1000
+                except (TypeError, ValueError):
+                    continue
+                if -20 < c < 150:
+                    out.append((TEMP_NAMES.get(label, label), c))
+    return out
+
+
+def gb(b):
+    return f"{b / 1024 ** 3:.1f}".replace(".", ",") + " ГБ"
+
+
+def stats():
+    """Четыре карточки «СИСТЕМА»: как refresh_stats/set_stat в GTK-меню (текст, доля, уровень, значок, подсказка)."""
+    out = {}
+    free, total, used = disk()
+    out["disk"] = {"text": f"{free / 1024 ** 3:.0f} из {total / 1024 ** 3:.0f} ГБ", "frac": 1 - free / total if total else 0,
+                   "level": "crit" if used > 0.92 else "warn" if used > 0.8 else "", "icon": "󰋊",
+                   "tip": f"Занято {gb(total - free)} из {gb(total)} ({used:.0%})"}
+    mu, mt, mf = memory()
+    out["mem"] = {"text": f"{gb(mu)} из {gb(mt)}".replace(" ГБ из", " из"), "frac": mf,
+                  "level": "crit" if mf > 0.9 else "warn" if mf > 0.75 else "", "icon": "󰘚", "tip": ""}
+    b = battery()
+    if b:
+        pct, st = b
+        charging = st in ("заряжается", "заряжена")
+        icons = "󰢜󰂆󰂇󰂈󰢝󰂉󰢞󰂊󰂋󰂅" if charging else "󰁺󰁻󰁼󰁽󰁾󰁿󰂀󰂁󰂂󰁹"
+        out["bat"] = {"text": f"{pct}% · {st}", "frac": pct / 100,
+                      "level": "good" if charging else "crit" if pct <= 10 else "warn" if pct <= 20 else "",
+                      "icon": icons[min(pct // 10, 9)], "tip": ""}
+    else:
+        out["bat"] = {"text": "нет батареи", "frac": 0, "level": "", "icon": "󰁹", "tip": ""}
+    temps = temperatures()
+    if temps:
+        name, c = max(temps, key=lambda t: t[1])
+        out["temp"] = {"text": f"{c:.0f} °C · {name}", "frac": c / 100,
+                       "level": "crit" if c >= 80 else "warn" if c >= 65 else "", "icon": "󰔏",
+                       "tip": "\n".join(f"{TEMP_FULL.get(n, n)}: {v:.0f} °C" for n, v in sorted(temps, key=lambda t: -t[1]))}
+    else:
+        out["temp"] = {"text": "нет датчиков", "frac": 0, "level": "", "icon": "󰔏", "tip": ""}
+    for v in out.values():
+        v["frac"] = max(0.0, min(v["frac"], 1.0))
+    return out
+
+
+def snap_note(snaps):
+    """Строка под списком обновлений: снимок до/после делает snap-pac (pacman-хук), последний снимок /."""
+    last = (snaps.get("root") or [None])[0]
+    tail = f" Последний снимок /: {last['when']}." if last else ""
+    if os.path.isfile("/usr/share/libalpm/hooks/05-snap-pac-pre.hook"):
+        return "Снимок / до и после обновления snap-pac сделает сам — откатить можно из «Снимков btrfs»." + tail
+    return "snap-pac не установлен: обновление пройдёт без снимка. Сначала «Сделать снимок сейчас»." + tail
+
+
+# ---------- бэкенд ----------
+class Backend:
+    def __init__(self):
+        self.snaps = {}
+        self.upd_list = None
+        self.doc_running = False
+        self.snapping = False
+        self.listing = False
+        self.alive = True
+
+    def tick(self, every, fn):
+        def loop():
+            while self.alive:
+                try:
+                    fn()
+                except Exception as e:          # данные не должны валить процесс
+                    log("system:", e)
+                time.sleep(every)
+        threading.Thread(target=loop, daemon=True).start()
+
+    def send_updates(self, recs):
+        emit(type="updates", recs=None if recs is None else [[n, c] for n, c in recs])
+
+    def load_snapshots(self):
+        self.snaps = snapper_list()
+        emit(type="snapshots", snaps=self.snaps, note=snap_note(self.snaps))
+
+    # ---------- подстраница «Обновления» ----------
+    def cmd_updates_list(self):
+        if self.upd_list is not None:
+            emit(type="updates_list", data=self.upd_list)
+            return
+        if self.listing:
+            return
+        self.listing = True
+        emit(type="busy", what="updates", on=True)
+
+        def work():
+            data = list_updates()
+            self.upd_list = data
+            self.listing = False
+            self.send_updates([(n, len(v)) for n, v in data.items()])
+            emit(type="updates_list", data=data)
+            emit(type="busy", what="updates", on=False)
+        threading.Thread(target=work, daemon=True).start()
+
+    # ---------- снимок ----------
+    def cmd_snapshot(self):
+        if self.snapping:
+            return
+        self.snapping = True
+        emit(type="busy", what="snapshot", on=True)
+        emit(type="toast", text="Делаю снимки / и /home…", error=False, hold=10)
+
+        def work():
+            res = []
+            for cfg in ("root", "home"):
+                ok, out = do("snapper", "-c", cfg, "create", "--cleanup-algorithm", "number",
+                             "--description", SNAP_DESC, timeout=60)
+                res.append((cfg, ok, out))
+            self.snaps = snapper_list()
+            self.snapping = False
+            bad = [f"{c}: {o}" for c, ok, o in res if not ok]
+            if bad:
+                emit(type="toast", text="Ошибка: " + "; ".join(bad)[:80], error=True, hold=6)
+            else:
+                emit(type="toast", text="Имитация: снимки / и /home" if DRY else "Снимки / и /home сделаны", error=False, hold=4)
+            if DRY:
+                emit(type="dry", text="Пробный режим, не выполнено: snapper -c root|home create")
+            emit(type="snapshots", snaps=self.snaps, note=snap_note(self.snaps))
+            emit(type="busy", what="snapshot", on=False)
+        threading.Thread(target=work, daemon=True).start()
+
+    # ---------- доктор ----------
+    def doctor_cached(self):
+        try:                                   # прошлый результат — сразу, пока идёт новая проверка
+            with open(DOCTOR_CACHE) as f:
+                emit(type="doctor", rep=json.load(f), stale=True, running=True)
+        except (OSError, ValueError):
+            pass
+
+    def run_doctor(self, fix=False):
+        """yumi-doctor --json [--fix] в фоне; в пробном режиме --fix ничего не меняет (YUMI_DOCTOR_DRY)."""
+        if self.doc_running:
+            return
+        self.doc_running = True
+        emit(type="busy", what="doctor", on=True)
+        if fix:
+            emit(type="toast", text="Имитация: чиню…" if DRY else "Чиню…", error=False, hold=30)
+
+        def work():
+            env = dict(os.environ, **({"YUMI_DOCTOR_DRY": "1"} if DRY and fix else {}))
+            cmd = [DOCTOR, "--json"] + (["--fix"] if fix else [])
+            if DRY and fix:
+                log(f"system [dry-run] Доктор: {shlex.join(cmd)} (YUMI_DOCTOR_DRY=1)")
+            try:
+                p = subprocess.run(cmd, capture_output=True, text=True, timeout=300 if fix else 120, env=env)
+                rep = json.loads(p.stdout)
+            except (OSError, ValueError, subprocess.SubprocessError) as e:
+                rep = {"status": "fail", "summary": "доктор не запустился", "checks": [], "error": str(e)}
+            self.doc_running = False
+            if fix:
+                fixed = rep.get("fixed") or []
+                bad = [f["cmd"] for f in fixed if not f.get("ok")]
+                emit(type="toast", text=("Имитация: " if DRY else "") + (f"не удалось: {bad[0]}"[:70] if bad else
+                     f"починено пунктов: {len(fixed)}" if fixed else "чинить нечего"), error=bool(bad), hold=6)
+            if rep.get("checks"):
+                try:
+                    os.makedirs(os.path.dirname(DOCTOR_CACHE), exist_ok=True)
+                    with open(DOCTOR_CACHE, "w") as f:
+                        json.dump(rep, f, ensure_ascii=False)
+                except OSError:
+                    pass
+            emit(type="doctor", rep=rep, stale=False, running=False)
+            emit(type="busy", what="doctor", on=False)
+        threading.Thread(target=work, daemon=True).start()
+
+    def doctor_terminal(self):
+        cmd = ["kitty", "--title", "Доктор Yumi-Rice", "--hold", "-e", DOCTOR, "-v"]
+        if DRY:
+            log(f"system [dry-run] Доктор: {shlex.join(cmd)}")
+            emit(type="toast", text="Имитация: доктор в терминале", error=False, hold=3)
+            emit(type="dry", text=f"Пробный режим, команда не выполнена:\n{shlex.join(cmd)}")
+            return
+        spawn(*cmd)
+        emit(type="launched", key="doctor-term")
+
+    # ---------- действия ----------
+    def launch(self, key):
+        if key not in ACTIONS:
+            return
+        _icon, text, cmd, _changes = ACTIONS[key]
+        if DRY:
+            log(f"system [dry-run] {text}: {shlex.join(cmd)}")
+            emit(type="toast", text=f"Имитация: {text}", error=False, hold=3)
+            emit(type="dry", text=f"Пробный режим, команда не выполнена:\n{shlex.join(cmd)}")
+            return
+        spawn(*cmd)                 # и перезапуск бара, и обычный запуск — отдельным процессом, не ждём
+        emit(type="launched", key=key)
+
+    def handle(self, line):
+        try:
+            j = json.loads(line)
+        except ValueError:
+            log("system: не JSON:", line.strip())
+            return
+        c = j.get("cmd")
+        if c == "updates_list":
+            self.cmd_updates_list()
+        elif c == "snapshot":
+            self.cmd_snapshot()
+        elif c == "doctor":
+            self.run_doctor()
+        elif c == "doctor_fix":
+            self.run_doctor(fix=True)
+        elif c == "doctor_term":
+            self.doctor_terminal()
+        elif c == "launch":
+            self.launch(j.get("key", ""))
+        elif c == "refresh":
+            self.send_updates(cached_updates())
+            emit(type="stats", **stats())
+            threading.Thread(target=self.load_snapshots, daemon=True).start()
+        elif c == "quit":
+            self.stop()
+
+    def stop(self):
+        self.alive = False
+        os._exit(0)
+
+    def main(self):
+        signal.signal(signal.SIGTERM, lambda *_: self.stop())
+        emit(type="info", subtitle=subtitle(), dry=DRY)
+        self.send_updates(cached_updates())
+        emit(type="stats", **stats())
+        self.doctor_cached()
+        threading.Thread(target=self.load_snapshots, daemon=True).start()
+        self.run_doctor()
+        self.tick(20, lambda: emit(type="info", subtitle=subtitle(), dry=DRY))
+        self.tick(5, lambda: emit(type="stats", **stats()))
+        for line in sys.stdin:
+            if line.strip():
+                self.handle(line)
+        self.stop()
+
+
+if __name__ == "__main__":
+    die_with_parent()
+    Backend().main()

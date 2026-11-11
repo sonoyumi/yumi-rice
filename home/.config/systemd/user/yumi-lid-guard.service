@@ -1,0 +1,11 @@
+[Unit]
+Description=yumi: встроенный экран после сна и открытия крышки (и с ☕ кофеином)
+PartOf=graphical-session.target
+After=graphical-session.target
+[Service]
+ExecStart=%h/.local/bin/yumi-lid-guard
+Restart=on-failure
+RestartSec=5
+Slice=background.slice
+[Install]
+WantedBy=graphical-session.target

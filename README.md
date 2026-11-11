@@ -2,18 +2,18 @@
 
 <p>
   <img alt="Hyprland" src="https://img.shields.io/badge/Hyprland-0.56%20Lua-58E1FF?logo=hyprland&logoColor=white">
+  <img alt="Quickshell" src="https://img.shields.io/badge/Quickshell-QML-a6da95?logo=qt&logoColor=white">
   <img alt="Asahi Linux" src="https://img.shields.io/badge/Asahi-Arch%20Linux%20ARM-1793D1?logo=archlinux&logoColor=white">
   <img alt="ARM64" src="https://img.shields.io/badge/aarch64-16K%20pages-f5a97f">
-  <img alt="Version" src="https://img.shields.io/badge/version-3.0-ed8796">
-  <img alt="Waybar" src="https://img.shields.io/badge/Waybar-swaync%20·%20GTK4-a6da95">
-  <img alt="License" src="https://img.shields.io/badge/license-MIT-green">
+  <img alt="Version" src="https://img.shields.io/badge/version-3.1-ed8796">
+  <img alt="License" src="https://img.shields.io/badge/license-GPL--3.0--or--later-blue">
 </p>
 
 **🇬🇧 [English](#en)** · **🇮🇹 [Italiano](#it)** · **🇺🇦 [Українська](#uk)** · **🇷🇺 [Русский](#ru)**
 
-![Desktop](assets/screenshots/v3/desktop.jpg)
+![Desktop](assets/screenshots/v3.1/desktop.jpg)
 
-<p align="center"><b>3.0</b> — entirely my own base, without HyDE: pult, doctor, wallpaper collections, SDDM theme<br><a href="https://github.com/sonoyumi/yumi-rice/releases/tag/v2.5">2.5</a> — AirPods, music with lyrics, GTK4 control center · <a href="https://github.com/sonoyumi/yumi-rice/releases/tag/v2.1">2.1</a> — lighter: events instead of polling, monitors in one file · <a href="https://github.com/sonoyumi/yumi-rice/releases/tag/v2.0">2.0</a> — GTK4 menus, accent from the wallpaper, new lock screen · <a href="https://github.com/sonoyumi/yumi-rice/releases/tag/v1.0">1.0</a> — rofi menus, HyDE themes</p>
+<p align="center"><b>3.1</b> — the whole shell on Quickshell, the “Ink” style, login screen on greetd, an installer for Arch<br><a href="https://github.com/sonoyumi/yumi-rice/releases/tag/v3.0">3.0</a> — entirely my own base, without HyDE: pult, doctor, wallpaper collections · <a href="https://github.com/sonoyumi/yumi-rice/releases/tag/v2.5">2.5</a> — AirPods, music with lyrics, GTK4 control center · <a href="https://github.com/sonoyumi/yumi-rice/releases/tag/v2.1">2.1</a> — lighter: events instead of polling, monitors in one file · <a href="https://github.com/sonoyumi/yumi-rice/releases/tag/v2.0">2.0</a> — GTK4 menus, accent from the wallpaper, new lock screen · <a href="https://github.com/sonoyumi/yumi-rice/releases/tag/v1.0">1.0</a> — rofi menus, HyDE themes</p>
 
 ---
 
@@ -21,67 +21,99 @@
 
 ## 🇬🇧 English
 
-My Hyprland desktop on a MacBook Pro M1 running Asahi Linux: Waybar made of "pills", menus on GTK4
-with blur and wallpaper colors, a macOS-like control center, a Spotlight-style launcher, a lock screen with a music
-player — and all of it recolors itself to match the current wallpaper. Since 3.0 it all runs on a base of my own,
-without HyDE. Plus a sync script that keeps the repository and the system in step, with a backup of every file it touches.
+My Hyprland desktop on a MacBook Pro M1 running Asahi Linux. Since 3.1 the whole shell — bar, menus, notifications,
+on-screen indicators, lock screen, login screen and the password dialog — is written in QML on
+[Quickshell](https://quickshell.org/), in the “Ink” style: serif type, Japanese captions, a red hanko seal. Everything
+takes its colors from the current wallpaper. Plus an installer for Arch Linux / Arch Linux ARM and a sync script that
+keeps the repository and the system in step, with a backup of every file it touches.
 
 | | |
 |---|---|
-| Hardware | MacBook Pro 13" M1 (2020), 8 GB RAM, 2560×1600 display, scale 1.666667 · second monitor MSI G27C3F 1920×1080 @ 180 Hz over USB-C · Logitech PRO keyboard and PRO X 2 mouse |
+| Hardware | MacBook Pro 13" M1 (2020), 8 GB RAM, 2560×1600 display, scale 1.666667 · second monitor MSI G27C3F 1920×1080 over USB-C · Logitech PRO keyboard and PRO X 2 mouse |
 | OS | Arch Linux ARM ([Asahi](https://asahilinux.org/)), `linux-asahi` kernel, 16K memory pages, btrfs |
-| Desktop | Hyprland 0.56 with the Lua config, my own base `~/.config/hypr/yumi` (no HyDE), started via uwsm |
-| Bar / notifications / menus | Waybar · swaync · GTK4 (yumi-panel) |
-| Lock / idle / wallpaper / login | hyprlock · hypridle · awww · SDDM with its own theme |
+| Desktop | Hyprland 0.56 with the Lua config, my own base `~/.config/hypr/yumi` |
+| Bar / notifications / menus / OSD | Quickshell (QML) — one service, `yumi-quickshell` |
+| Lock / login / password dialog | Quickshell lock screen · greetd with a Quickshell login screen · Quickshell polkit agent |
+| Idle / wallpaper | hypridle · awww |
 | Terminal / shell / font | kitty · zsh + starship · CaskaydiaCove Nerd Font Mono |
-| Browser | [Zen](https://zen-browser.app/) |
+| Shell fonts | Noto Serif · Noto Serif CJK JP · JetBrains Mono Nerd Font · Inter |
+| Browser | [Zen](https://zen-browser.app/) (optional) |
 
-### What's new in 3.0
+### What's new in 3.1
 
 > [!NOTE]
-> **No more HyDE.** 3.0 is the first release on a base that is entirely my own: everything HyDE used to do is now
-> done by my own configs and scripts, and HyDE is uninstalled. It is still built for my machine — portability
-> (other distros, ordinary x86 hardware, a one-command installer) is planned for **3.1**.
+> **Tested on a MacBook Pro M1 (Asahi).** The installer is written for any Arch Linux / Arch Linux ARM machine, but it
+> has not been tried on other hardware yet — that is the next thing to check. If something breaks, please open an issue.
 
-**My own base instead of HyDE**
-- **Hyprland in modules:** `hyprland.lua` loads `~/.config/hypr/yumi/` — `env`, `look`, `layout`, `binds`, `rules`,
-  `autostart`, `events` — plus work modes in `workflows/` (default, editing, gaming, powersaver, snappy) switched
-  by `yumi-workflow`.
-- **My own color engine** `yumi-colors`: templates in `~/.config/yumi/colors/templates` for Waybar, swaync, kitty,
-  GTK, Qt/Kvantum, VS Code, Discord, cava, Obsidian, the keyboard backlight and the volume icons.
-- **Waybar straight from the package** with my layout (a systemd drop-in), my own zsh setup (`conf.d/yumi`),
-  my own package-manager wrapper for the `in` / `un` / `up` aliases.
-- **One naming scheme:** every command is `yumi-*`, libraries live in `~/.local/lib/yumi/`, settings in
-  `~/.config/yumi/`. `cc` is the C compiler again — the control center is now `yumi-cc`.
+**The “Island” look**
+- Solid capsules in the wallpaper colors across the bar, every menu, the lock screen and the Touch Bar; the 弓 seal
+  as the mark of the system.
+- **Dynamic Island** in the middle of the bar: the current track, timers and Pomodoro, downloads, microphone in use,
+  network and VPN changes, AirPods — one place for everything that is happening right now (`yumi-island`).
+- New menus: updates as a compact popup, backup (borg), quick look, downloads, YouTube.
 
-**New**
-- **Pult** (`yumi-pult`, `SUPER+Space`) — a Spotlight/Raycast-style window: apps, Yumi commands, files (`fd`), a
-  calculator, emoji and web search in one list with a preview on the right. It also finds words typed in the wrong
-  keyboard layout.
-- **Doctor** (`yumi-doctor`): 13 checks — services, timers, Hyprland config, broken links, wallpaper colors, Waybar
-  memory, disk, updates, snapper snapshots, pacman lock — in plain words, with `--fix` and `--json`. Also a "Doctor"
-  row in the System menu.
-- **Wallpaper collections:** subfolders of `~/Pictures/Wallpapers` become collections with a preview, buttons in the
-  wallpaper menu and `yumi-wallpaper collection NAME|off|get`. Copies are pre-scaled per monitor, the transition runs
-  at each monitor's refresh rate, and Waybar recolors right before the transition, not after it.
-- **Login screen:** my own SDDM theme `yumi`; its background follows the wallpaper (`yumi-sddm-sync`).
-- **Terminal:** kitty with CaskaydiaCove Nerd Font Mono, a two-line starship prompt in the terminal palette, zoxide
-  (`z` / `zi`), atuin on `Ctrl+R` (local only, no sync), eza aliases. fastfetch with a text logo (a bow and arrow),
-  framed sections and a Japanese quote of the day with a translation.
-- **Zen** is the default browser (Firefox removed), colored from the wallpaper (`yumi-zen-theme`), including its settings pages.
-- **Also:** a fullscreen player (`yumi-player-full`) and a queue in the player, a devices page inside the control
-  center, mouse and AirPods battery notifications, `yumi-update` with a 30-minute cache (Waybar no longer runs
-  `checkupdates` every time), the Yumi-Folders icon theme, the VS Code theme as its own extension.
+**MacBook keyboard light** (`yumi-light`)
+- The key backlight follows the ambient light sensor: on in the dark, off in daylight. A slider and an “auto” switch
+  sit in the control center, and the Touch Bar has its own slider.
+- The keys “breathe” when a Pomodoro phase ends or the battery runs low. A manual change always wins.
 
-**`rice`**
-- `./rice hyde-patches` and `hyde-patches.sh` are gone; `./rice reload` restarts Waybar through systemd;
-  `./rice doctor` starts with `yumi-doctor`.
-- The manifest is rebuilt for the new paths (~300 files); `./rice check` also checks `system/`.
-- `system-manifest.txt`: the SDDM theme setting, the login-screen pointer and the Touch Bar icons (tiny-dfr).
-- The 2.x rollback scripts are not part of 3.0 — they stay in [`v2.5`](https://github.com/sonoyumi/yumi-rice/releases/tag/v2.5).
+**Health check and patches**
+- `yumi-doctor` now also checks the Touch Bar, Touch ID, pinned packages, the login screen, earlyoom and the key light.
+- The source patches the desktop runs on (Hyprland first-frame hold and lock-screen keyboard fix, the awww crash fix)
+  are in [`patches/`](patches/README.md).
+
+**The whole shell on Quickshell**
+- Bar, all menus, notification popups and the notification center, OSD (volume, brightness, keyboard backlight,
+  layout, keep-awake), lock screen and the polkit / sudo password dialog are QML in `~/.config/quickshell/yumi`, started
+  as one service, `yumi-quickshell`. The logic stays in small Python backends (`~/.local/lib/yumi/qs`) that speak
+  JSON; QML only draws.
+- **Removed:** Waybar, swaync, rofi, the GTK menus and SDDM. hyprlock stays only as an emergency fallback, used if
+  Quickshell does not answer.
+- Colors: the template `quickshell.dcol` → `~/.config/yumi/quickshell/colors.json`; the shell rereads it on the fly,
+  so a new wallpaper recolors everything without a restart.
+
+**The “Ink” style**
+- Serif type (Noto Serif + Noto Serif CJK JP), thin lines instead of capsules, a red hanko seal 弓, animations
+  without springs.
+- In the bar: workspaces 一 二 三…, captions 核 (CPU), 憶 (memory), 電 (battery), 護 (VPN); menus as cards, square
+  cover art in the player.
+
+**Lock, login, password**
+- **Lock screen “Scroll”** with the **“Stroke”** password field: a single line instead of a box.
+- **Login screen on greetd** instead of SDDM — the same look, Quickshell inside a small sway session. At boot, autologin
+  goes straight to Hyprland and the lock screen; after “Log out” you get this login screen instead of a black screen.
+- **Password dialog** for polkit / sudo in the same style: `yumi-polkit-switch on|off|status` (`off` brings back
+  hyprpolkitagent).
+
+**Menus and wallpapers**
+- Menus: Pult (`SUPER+Space`), Apps and files, Music, System, Wi-Fi, Bluetooth, VPN, Sound, Battery and power modes,
+  Clipboard, Calendar, Workspaces, Processes, Tray, Keyboard shortcuts, Emoji and glyphs, Web search. The control
+  center (`SUPER+C`) is a hub with links to every menu.
+- **Session ring** (`SUPER+Esc`, `SUPER+Delete`): lock 鍵, sleep 眠, log out 出, reboot 再, power off 終 — hold to confirm.
+- **Music** (`yumi-music`): YouTube Music + SoundCloud without an account, playlists, queue, synced lyrics.
+- **Wallpaper widget** (`SUPER+SHIFT+W`): a carousel, styles (folders) → wallpapers, arrows to browse, a preview of the
+  accent color under the picture. Colors of the whole desktop come from the wallpaper (`yumi-colors`).
+
+**Portability**
+- **`./install.sh`** — Arch Linux / Arch Linux ARM only: a question before every step, a backup first, `--dry-run`
+  and `--uninstall`. Package lists in `packages/`: `arch.txt` (required), `aur.txt`, `optional.txt` (groups you can
+  skip), `mac.txt`.
+- **Mac parts are optional modules** (`RICE_MAC`): Touch Bar, battery charge limit, lid guard, AirPods mode, boot
+  splash. They are installed only when a MacBook is detected. Touch ID is a separate public repository:
+  [yumi-touchid](https://github.com/sonoyumi/yumi-touchid).
+- **Monitors:** the built-in screen is any output named `eDP*`; scales and names live in
+  `~/.config/yumi/monitors.conf` (an empty file is fine — everything gets 1.0).
+- **License:** GPL-3.0-or-later instead of MIT — the color engine is a port of wallbash from HyDE (GPL-3.0).
+  See [NOTICE](NOTICE).
 
 <details>
-<summary><b>Earlier versions: 2.5 · 2.1 · 2.0</b></summary>
+<summary><b>Earlier versions: 3.0 · 2.5 · 2.1 · 2.0</b></summary>
+
+#### 3.0
+
+The first release on a base entirely my own, without HyDE: Hyprland in modules (`~/.config/hypr/yumi`), my own color
+engine `yumi-colors`, the Pult (`SUPER+Space`), `yumi-doctor`, wallpaper collections, an SDDM theme, Zen as the
+browser. The full notes are on the [3.0 release page](https://github.com/sonoyumi/yumi-rice/releases/tag/v3.0).
 
 #### What's new in 2.5
 
@@ -104,7 +136,6 @@ without HyDE. Plus a sync script that keeps the repository and the system in ste
   (`yumi-idle-action`), battery charge limit (`yumi-battery-limit`).
 - **Apps in wallpaper colors** through accent hooks: Zen, Firefox, Vesktop, hyprtoolkit dialogs, Touch Bar; folder
   icons recolored to the palette (`recolor.py`, `yumi-folders-update`).
-- `ai` — a small local code helper (Qwen2.5-Coder 1.5B via Ollama).
 
 **Cleaner**
 - `~/.local/bin`: 155 → ~90 files. 39 `*-uninstall` scripts, 27 `.bak` copies and 17 backup folders moved to
@@ -182,82 +213,90 @@ Measured on my machine (MacBook Pro M1, 8 GB, Firefox, Telegram and terminals op
 - **Also:** calendar reminders (systemd timer), a tray without duplicate applets, a Telegram theme in wallpaper colors,
   hiding unneeded app launchers (`yumi-app-hide`), `SUPER+K` switches the layout on all keyboards at once, and the lock
   screen always opens with the English layout. Every add-on has its own `*-uninstall` script.
-
 </details>
 
 ### Features
 
-- **Waybar of pills:** my own `yumi` layout, every group of modules is a separate rounded pill. Left: logo,
-  workspaces, CPU / RAM. Center: the player with cover art and an equalizer. Right: control center and clipboard ·
-  keyboard layout, VPN, keep-awake, Wi-Fi, Bluetooth, sound (with AirPods icons) · clock, battery, power profile and
-  work mode · power button. Pills update on D-Bus events (`yumi-bar-events`), not by polling.
-- **GTK4 menus (`yumi-panel`):** one framework — a layer-shell window with blur, wallpaper colors and keyboard
-  navigation. Wi-Fi, Bluetooth, sound, VPN, power and work modes, session, system (updates, snapshots, resources,
-  Doctor), processes, mouse, calendar with reminders, clipboard, wallpapers, workspaces, tray, music, apps, emoji and
-  glyphs, web search.
-- **Control center** (`yumi-menu-control`, GTK4): tiles, sliders, player card, devices, "Do not disturb" and notification
-  history. swaync draws the popups.
-- **Everything follows the wallpaper:** `yumi-colors` and the `yumi-accent` hooks recolor Waybar, the menus, swaync,
-  kitty, GTK/Qt, window borders, VS Code, Telegram, Vesktop, Zen, the Touch Bar, folder icons, the lock screen and SDDM.
-- **Lock screen "Yumi Google":** `yumi-hyprlock-build` builds it from a template for each monitor — clock, quotes,
-  player, system info. SDDM autologin → Hyprland → hyprlock at once; the desktop is drawn *under* the lock.
-- **Music:** `yumi-music` — YouTube Music + SoundCloud with covers, playlists and lyrics; the `yumi-airpods` service
-  pauses when a bud comes out and hands the buds back to the iPhone on lock.
+- **Bar in the “Ink” style:** the seal, workspaces in kanji, CPU and memory on the left; the player with cover art
+  and a cava equalizer of small squares in the center; control center, keyboard layout, VPN (only while it is on),
+  keep-awake, Wi-Fi with the network name, Bluetooth with the number of devices, sound, clock, battery and power on
+  the right. Pills update on D-Bus events (`yumi-bar-events`), not by polling.
+- **Menus on QML:** one framework, one menu open at a time, keyboard navigation, closes on `Esc` or a click outside.
+- **Notifications:** popups and a notification center — a list with `↑` `↓`, `Enter`, `Del`, `H` to hide an app,
+  `D` for “Do not disturb”, “Clear” with a second press.
+- **OSD** for volume, microphone, brightness, keyboard backlight, layout and keep-awake.
+- **Lock screen “Scroll”:** `yumi-lock` locks through Quickshell; if it does not answer in about 2 s, hyprlock takes
+  over. At boot the desktop is drawn *under* the lock.
+- **Login screen:** greetd + sway + the same QML screen; a copy of the theme lives in `/var/lib/yumi-greeter` and
+  follows the wallpaper (`yumi-greeter-sync`).
+- **Everything follows the wallpaper:** `yumi-colors` and the hooks in `~/.config/yumi/accent/hooks.d` recolor the
+  shell, kitty, GTK/Qt, window borders, VS Code, Zen, Telegram, Vesktop, Obsidian, folder icons, the keyboard
+  backlight and the login screen.
+- **Music:** `yumi-music` — YouTube Music + SoundCloud with covers, playlists and lyrics; `yumi-airpods` pauses when
+  a bud comes out.
 - **Living on 8 GB:** zram the size of RAM + a swap file; earlyoom closes browser tabs first and never the desktop;
   Zen runs in its own cgroup (`zen.slice`); `lim 1G <command>` runs test servers in `dev.slice` with a memory cap.
-- **System:** silent boot (hidden GRUB menu, `quiet loglevel=3`), btrfs snapshots with snapper (snap-pac before and
-  after every pacman run, `/home` every hour), faillock, BlueZ Experimental for headphone battery.
+- **System:** silent boot, btrfs snapshots with snapper (optional group: snap-pac before and after every pacman run),
+  faillock, BlueZ Experimental for headphone battery.
 - **Two monitors on an M1 MacBook:** the external display runs over USB-C DisplayPort alt mode thanks to
   [haripako/dp-altmode](https://github.com/haripako/dp-altmode). Workspaces 1–5 live on the MacBook, 6–10 on the
-  external monitor; unplug it and they move to the laptop. Scales and names of the monitors are in one file,
-  `~/.config/yumi/monitors.conf`.
-- **Logitech without G HUB:** a mouse menu with DPI and polling rate (Solaar); the keyboard backlight follows the
-  wallpaper through an OpenRGB server; Win and Alt are swapped only on the external keyboard; media keys on `ALT+F9–F12`.
-- **Every change can be undone:** `./rice push` keeps the previous version of each file, `./rice push-system` applies
-  `/etc` one file at a time after a snapper snapshot, and add-ons are rolled back with `yumi-uninstall <module>`.
+  external monitor; unplug it and they move to the laptop.
+- **Logitech without G HUB** (optional): a mouse menu with DPI and polling rate (Solaar); the keyboard backlight
+  follows the bar accent through an OpenRGB server.
+- **MacBook extras** (optional modules): Touch Bar layers and styles ([touchbard](https://github.com/0800tim/touchbard)),
+  battery charge limit, a guard that brings the built-in screen back after the lid, Touch ID for sudo and the lock
+  screen ([yumi-touchid](https://github.com/sonoyumi/yumi-touchid), installed separately).
+- **Every change can be undone:** `./install.sh --uninstall` puts the backups back, `./rice push` keeps the previous
+  version of each file, and add-ons are rolled back with `yumi-uninstall <module>`.
 
 ### Screenshots
 
-https://github.com/user-attachments/assets/72154592-2090-4faa-a56b-40aeb462c0ba
-<p align="center">Showcase: windows, dwindle / master / scrolling layouts, workspaces, player with lyrics, wallpaper changes</p>
-
-![Wallpaper change](assets/screenshots/v3/wallpaper-change.gif)
-<p align="center">One new wallpaper — and everything recolors together: Waybar, terminals, cava, the file manager, window borders</p>
+![Wallpaper change](assets/screenshots/v3.1/wallpaper-change.gif)
+<p align="center">One new wallpaper — and everything recolors together: the bar, menus, terminals, window borders</p>
 
 | | |
 |:---:|:---:|
-| ![Pult (SUPER+Space)](assets/screenshots/v3/pult.png) | ![Pult: commands, files, web](assets/screenshots/v3/pult-search.png) |
-| Pult (SUPER+Space) | Pult: commands, files, web |
-| ![Control center](assets/screenshots/v3/menu-control.png) | ![System menu with Doctor](assets/screenshots/v3/menu-system.png) |
-| Control center | System menu with Doctor |
-| ![Sound](assets/screenshots/v3/menu-sound.png) | ![Bluetooth](assets/screenshots/v3/menu-bluetooth.png) |
-| Sound | Bluetooth |
-| ![Wi-Fi](assets/screenshots/v3/menu-wifi.png) | ![VPN: WARP / Proton + Tailscale](assets/screenshots/v3/menu-vpn.png) |
-| Wi-Fi | VPN: WARP / Proton + Tailscale |
-| ![Calendar](assets/screenshots/v3/menu-calendar.png) | ![Clipboard](assets/screenshots/v3/menu-clipboard.png) |
-| Calendar | Clipboard |
-| ![Power and work modes](assets/screenshots/v3/menu-power.png) | ![Session](assets/screenshots/v3/menu-session.png) |
-| Power and work modes | Session |
-| ![Mouse](assets/screenshots/v3/menu-mouse.png) | ![Workspaces](assets/screenshots/v3/menu-workspaces.png) |
-| Mouse | Workspaces |
-| ![Apps](assets/screenshots/v3/menu-launcher.png) | ![Emoji and glyphs](assets/screenshots/v3/menu-picker.png) |
-| Apps | Emoji and glyphs |
-| ![Web search](assets/screenshots/v3/menu-websearch.png) | ![Tray](assets/screenshots/v3/menu-tray.png) |
-| Web search | Tray |
+| ![Lock screen](assets/screenshots/v3.1/lock.jpg) | ![Login screen (greetd)](assets/screenshots/v3.1/greeter.jpg) |
+| Lock screen | Login screen (greetd) |
+| ![Bar](assets/screenshots/v3.1/bar.png) | ![Password dialog](assets/screenshots/v3.1/polkit.png) |
+| Bar | Password dialog (polkit / sudo) |
+| ![Control center](assets/screenshots/v3.1/control.png) | ![Notifications](assets/screenshots/v3.1/notifications.png) |
+| Control center | Notification center |
+| ![Pult](assets/screenshots/v3.1/pult.png) | ![Apps](assets/screenshots/v3.1/launcher.png) |
+| Pult (SUPER+Space) | Apps |
+| ![Music](assets/screenshots/v3.1/music.png) | ![Player](assets/screenshots/v3.1/player.png) |
+| Music with lyrics | Player |
+| ![Wi-Fi](assets/screenshots/v3.1/menu-wifi.png) | ![Bluetooth](assets/screenshots/v3.1/menu-bluetooth.png) |
+| Wi-Fi | Bluetooth |
+| ![Sound](assets/screenshots/v3.1/menu-sound.png) | ![VPN](assets/screenshots/v3.1/menu-vpn.png) |
+| Sound | VPN |
+| ![System](assets/screenshots/v3.1/menu-system.png) | ![Battery and power](assets/screenshots/v3.1/menu-power.png) |
+| System | Battery and power modes |
+| ![Clipboard](assets/screenshots/v3.1/menu-clipboard.png) | ![Calendar](assets/screenshots/v3.1/menu-calendar.png) |
+| Clipboard | Calendar |
+| ![Session ring](assets/screenshots/v3.1/session.png) | ![Workspaces](assets/screenshots/v3.1/menu-workspaces.png) |
+| Session ring | Workspaces |
 
-![Wallpapers and collections](assets/screenshots/v3/menu-wallpaper.png)
-<p align="center">Wallpaper picker with collections</p>
+![Wallpaper widget](assets/screenshots/v3.1/wallpaper-widget.png)
+<p align="center">Wallpaper widget: styles → wallpapers, accent preview</p>
 
-![Two monitors](assets/screenshots/v3/two-monitors.jpg)
-<p align="center">MacBook (2560×1600) and MSI (1920×1080 @ 165 Hz) side by side</p>
+<p align="center">MacBook (2560×1600) and MSI (1920×1080) side by side</p>
 
-![Login screen](assets/screenshots/v3/sddm.jpg)
-<p align="center">Login screen: my own SDDM theme</p>
-
-> Private data in the screenshots is blurred; VPN and clipboard show demo data.
+> Private data in the screenshots is blurred.
 
 <details>
-<summary><b>2.5 and earlier</b></summary>
+<summary><b>3.0 and earlier</b></summary>
+
+https://github.com/user-attachments/assets/72154592-2090-4faa-a56b-40aeb462c0ba
+<p align="center">3.0 showcase: windows, dwindle / master / scrolling layouts, workspaces, player with lyrics, wallpaper changes</p>
+
+| | |
+|:---:|:---:|
+| ![Desktop 3.0](assets/screenshots/v3/desktop.jpg) | ![Pult 3.0](assets/screenshots/v3/pult.png) |
+| Desktop (3.0, Waybar) | Pult (3.0) |
+| ![Control center 3.0](assets/screenshots/v3/menu-control.png) | ![Login screen 3.0](assets/screenshots/v3/sddm.jpg) |
+| Control center (3.0, GTK4) | Login screen (3.0, SDDM) |
+
 | | |
 |:---:|:---:|
 | ![Player with lyrics](assets/screenshots/v2.5/player-lyrics.png) | ![Control center](assets/screenshots/v2.5/control-center.png) |
@@ -312,7 +351,6 @@ https://github.com/user-attachments/assets/72154592-2090-4faa-a56b-40aeb462c0ba
 ![Waybar 1.0](assets/screenshots/v1/bar.png)
 
 </details>
-
 </details>
 
 ### Keys and gestures
@@ -320,64 +358,53 @@ https://github.com/user-attachments/assets/72154592-2090-4faa-a56b-40aeb462c0ba
 | Keys | Action |
 |---|---|
 | `SUPER` + `Space` | Pult: apps, commands, files, calculator, emoji, web |
-| `SUPER` + `Esc`, `CTRL` + `ALT` + `Del` | Session: lock, sleep, logout, reboot, power off |
+| `SUPER` + `A` / `SUPER` + `SHIFT` + `E` | Apps / files |
+| `SUPER` + `C` | Control center — links to every menu |
+| `SUPER` + `CTRL` + `W` / `B` / `V` / `A` | Wi-Fi / Bluetooth / VPN / sound |
+| `SUPER` + `CTRL` + `E` / `T` / `Y` | Battery and power modes / processes / tray |
+| `SUPER` + `CTRL` + `C` / `N` / `K` | Calendar / notification center / keyboard shortcuts |
+| `SUPER` + `Esc`, `SUPER` + `Delete`, `CTRL` + `ALT` + `Del` | Session ring: lock, sleep, log out, reboot, power off |
 | `SUPER` + `N` | Lock the screen |
-| `SUPER` + `M` / `SUPER` + `SHIFT` + `M` | Player / music library |
+| `SUPER` + `M` / `SUPER` + `SHIFT` + `M` | Player / music |
 | `SUPER` + `V` | Clipboard |
 | `SUPER` + `TAB` | Workspaces |
 | `SUPER` + `` ` `` | System menu |
-| `SUPER` + `A` | Apps |
 | `SUPER` + `,` / `SUPER` + `.` | Emoji / glyphs |
-| `SUPER` + `SHIFT` + `W` | Wallpaper picker |
+| `SUPER` + `SHIFT` + `/` | Web search |
+| `SUPER` + `SHIFT` + `W` | Wallpaper widget |
 | `SUPER` + `ALT` + `←` / `→` | Previous / next wallpaper |
-| `SUPER` + `/` | Power and work modes |
 | `SUPER` + `ALT` + `↑` / `↓` | Next / previous work mode |
 | `SUPER` + `K` | Keyboard layout on all keyboards |
-| `SUPER` + `F10` / `F11` / `F12`, `Print` | Screenshot: area / frozen screen / monitor / all monitors |
+| `SUPER` + `P` / `ALT` + `P` / `SHIFT` + `P`, `Print` | Screenshot: area / frozen screen / monitor / all monitors |
+| `SUPER` + `ALT` + `Space` / `,` / `.` | Play-pause / previous / next track |
 | `ALT` + `F9`…`F12`, `ALT` + `Print` / `Scroll Lock` / `Pause` | Media and volume on the external keyboard |
 | 3 fingers ← / → | Switch workspaces |
 | 3 fingers ↓ | Workspace overview |
+| 4 fingers | Focus the window in the swipe direction |
 
-### Quick start
+### Installation
 
 > [!WARNING]
-> These are the configs of **one specific machine**: MacBook M1, Asahi, a 2560×1600 display. HyDE is no longer
-> needed. On other hardware use them as a base and borrow parts; an installer for other distros and ordinary hardware
-> is planned for 3.1. Apply the system files (`system/`) only on purpose.
+> **Arch Linux and Arch Linux ARM only.** Tested on a MacBook Pro M1 (Asahi); on other Arch hardware it has not been
+> tried yet — please report problems. The system files in `/etc` (GRUB, zram, earlyoom, Bluetooth) come from my
+> machine: the installer asks about each one, and if you are not sure, answer “no”.
 
-Hyprland ≥ 0.56 (Lua config) and the packages:
-
-```bash
-sudo pacman -S --needed hyprland hypridle hyprlock hyprsunset hyprpolkitagent hyprpicker uwsm \
-    waybar swaync awww kitty zsh starship fastfetch zoxide atuin eza fd jq cliphist wl-clipboard \
-    playerctl imagemagick inotify-tools bluez-utils power-profiles-daemon libnotify brightnessctl btop \
-    gtk4 gtk4-layer-shell python-gobject python-dbus python-requests pacman-contrib yt-dlp mpv cava \
-    grim slurp satty tesseract udiskie snapper snap-pac earlyoom zram-generator kvantum qt6ct \
-    ttf-cascadia-code-nerd ttf-jetbrains-mono-nerd noto-fonts-cjk solaar openrgb python-ytmusicapi wireproxy
-```
-
-From the AUR: `zen-browser-bin`. zsh plugins: oh-my-zsh with
-`zsh-autosuggestions` and `zsh-syntax-highlighting`.
-
-```bash
+```zsh
 git clone https://github.com/sonoyumi/yumi-rice.git ~/Projects/yumi-rice
 cd ~/Projects/yumi-rice
-./rice diff            # see what will change
-./rice push            # copy the files into ~ (old versions go to ~/.local/state/rice-bak/)
-systemctl --user daemon-reload
-systemctl --user enable --now yumi-awww.service yumi-wallpaper.service yumi-bar-events.service \
-    yumi-tray.service yumi-notify-log.service yumi-hyprlock-bg.service yumi-calendar-remind.timer
-$EDITOR ~/.config/yumi/monitors.conf   # your monitors: interface scale, name
-yumi-wallpaper random  # pictures from ~/Pictures/Wallpapers (subfolders = collections); colors follow
-yumi-hyprlock-build    # build the lock screen for the monitors from monitors.conf
-yumi-doctor            # check that everything is in place
-./rice reload
-./rice push-system     # optional: /etc, one file at a time with confirmation
-~/.local/share/yumi-sddm/install.sh   # optional: the SDDM theme (rollback: uninstall.sh next to it)
+./install.sh --dry-run   # show what would be done, change nothing
+./install.sh             # install: a question before every step, a backup first
 ```
 
-The repository stores `@HOME@` instead of the home path and `@USER@` in the autologin file — `./rice push`
-fills in yours. Put your own avatar into `~/.config/hypr/hyprlock/avatar.jpg`.
+The installer puts the packages from `packages/` in place (AUR through `paru` or `yay`, optional groups on request),
+copies the files with `./rice push`, sets up the greetd login screen, the user services and the password dialog. Then
+put some pictures into `~/Pictures/Wallpapers`, reboot and run `yumi-doctor`. Monitors: `~/.config/yumi/monitors.conf`
+(output names from `hyprctl monitors`); lock-screen avatar: `~/.config/hypr/hyprlock/avatar.jpg`.
+
+Rollback: `./install.sh --uninstall` — puts back the files from the backups, switches off the services and greetd and
+returns the previous login manager. Packages are removed only if you agree separately.
+
+Step by step, with every question and the known limits: [INSTALL.md](INSTALL.md) (in Russian for now).
 
 ### The `rice` script
 
@@ -388,8 +415,9 @@ The repository is the source of truth; `rice` syncs it with the system.
 | `./rice pull` | System → repository |
 | `./rice diff [path]` | What differs between the system and the repository |
 | `./rice push` | Repository → `~` (backs up the previous versions) |
-| `./rice push-system` | Repository → `/etc` (diff and confirmation for every file, snapper snapshot first) |
-| `./rice reload` | Reload Hyprland, Waybar, swaync, systemd --user |
+| `./rice push-system [filter]` | Repository → `/etc` (diff and confirmation for every file, snapper snapshot first) |
+| `./rice files` | Which files `push` installs (honours `RICE_LOCAL` and `RICE_MAC`) |
+| `./rice reload` | Reload Hyprland, Quickshell, systemd --user |
 | `./rice add <path>` | Start tracking a file |
 | `./rice doctor` | `yumi-doctor` plus repository details: services, crashes, drift, files outside the manifest |
 | `./rice check` | Repository check before a commit: syntax, private data, secrets (`--install-hook` runs it on every commit) |
@@ -399,7 +427,7 @@ The repository is the source of truth; `rice` syncs it with the system.
 Personal tweaks live outside the repository in `~/.config/rice-local/` (same layout as `home/`, plus its own
 `manifest.txt`): `./rice` installs them instead of the public files, so private changes never reach GitHub.
 Private blocks inside a shared file are marked `yumi:private-begin/-end` and cut out by `tools/publicize`.
-`RICE_LOCAL=off ./rice push` installs the clean public version.
+`RICE_LOCAL=off ./rice push` installs the clean public version; `RICE_MAC=off` skips the Mac block of the manifest.
 
 Workflow: edit in `home/…` → `./rice push` → `./rice reload` → check → `git commit`.
 Didn't like it — `git checkout -- <file>` and `./rice push` again.
@@ -408,39 +436,43 @@ Didn't like it — `git checkout -- <file>` and `./rice push` again.
 
 ```
 yumi-rice/
+├── install.sh              # installer (Arch / Arch ARM): --dry-run, --uninstall
+├── INSTALL.md              # installation step by step
+├── packages/               # arch.txt, aur.txt, optional.txt (groups), mac.txt
 ├── home/
-│   ├── .config/hypr/       # hyprland.lua + yumi/ (modules, work modes), hyprlock, hypridle
-│   ├── .config/yumi/       # monitors.conf, accent hooks, color templates, menu and player styles
-│   ├── .config/waybar/     # yumi.jsonc layout, modules and styles
-│   ├── .config/swaync/     # control center layouts and popup style
+│   ├── .config/quickshell/yumi/  # the shell: bar, menus, notifications, osd, lock, polkit, greeter.qml
+│   ├── .config/hypr/       # hyprland.lua + yumi/ (modules, work modes), hypridle, fallback hyprlock
+│   ├── .config/yumi/       # monitors.conf, accent hooks, color templates, login screen (greeter/sway.conf)
 │   ├── .config/systemd/    # yumi-* services and timers, dev.slice, zen.slice
 │   ├── .config/…           # kitty, zsh, starship, atuin, fastfetch, VS Code
-│   ├── .local/bin/         # yumi-* commands: menus, pult, doctor, wallpaper, colors, player…
-│   ├── .local/lib/yumi/    # panel (GTK4 menus), bar (Waybar modules), colors, tray, calendar, fetch…
-│   ├── .local/src/yumi-eq/ # Waybar CFFI equalizer (C)
-│   └── .local/share/       # SDDM theme, VS Code theme, music helpers, picker data
-├── system/etc/             # GRUB, SDDM, zram, sysctl, earlyoom, BlueZ, faillock, X11 pointer, tiny-dfr
+│   ├── .local/bin/         # yumi-* commands: lock, wallpaper, colors, music, doctor, greeter…
+│   ├── .local/lib/yumi/    # qs (menu backends), bar (bar scripts), colors, tray, calendar, fetch…
+│   └── .local/share/       # VS Code theme, music helpers, folder icons, picker data
+├── system/etc/             # greetd + PAM, GRUB, zram, sysctl, earlyoom, BlueZ, faillock
+├── patches/                # source patches: Hyprland, awww (see patches/README.md)
 ├── assets/screenshots/
-├── manifest.txt            # tracked files from ~
+├── manifest.txt            # tracked files from ~ (the Mac part between # @mac and # @end)
 ├── system-manifest.txt     # tracked files from /etc
 ├── rice                    # sync script
+├── NOTICE                  # authors and third-party licenses
 └── tools/                  # publicize (public copy from private), check (pre-commit check)
 ```
 
-### Gotchas: Hyprland 0.56 Lua and Asahi
+### Gotchas: Hyprland 0.56 Lua, Quickshell and Asahi
 
 - Options use dots: `hyprctl getoption decoration.rounding`. Dispatchers are Lua:
   `hyprctl dispatch 'hl.dsp.focus({ workspace = 3 })'`. `hyprctl keyword` doesn't work — use `hyprctl eval 'hl.config({...})'`.
 - The scale must divide the resolution: `1.666667`, not `1.67`.
-- Waybar's built-in `hyprland/language` doesn't work with Lua Hyprland — a custom module is needed.
-- swaync runs commands without `XDG_RUNTIME_DIR` — `wpctl` returns 0; sliders need explicit `min_limit/max_limit`.
-- hyprlock: `$BACKGROUND_PATH` is unreliable (use an absolute path), `onclick` only works with `hide_cursor = false`,
-  `fadeOut, 0` removes the grey frame after boot.
+- `Hyprland --verify-config` **runs** the `exec` commands of the config it checks — check only the live config, never a copy.
+- Quickshell: stop it with `systemctl --user stop yumi-quickshell` or `qs kill -c yumi`, never `pkill qs` — that also
+  kills test instances. File watching is off, so QML edits show up only after `systemctl --user restart yumi-quickshell`.
+- Don't start and close the real lock screen to test it: an aborted PAM conversation counts as a wrong password for
+  faillock (3 attempts → 10 minutes, and sudo is locked too). Use the preview: `qs -c yumi ipc call lock preview`.
+- greetd reads `/etc/greetd/config.toml` only when it starts; `systemctl restart greetd` ends the current session.
 - `hypridle.conf` sources **every** file in `hypridle/` — any backup next to your config overrides it.
-- Some packages put an empty `[Autologin]` into `/etc/sddm.conf.d/` — name yours so it sorts last (`zz-…`).
 - GRUB can't write `grubenv` on btrfs — no `GRUB_SAVEDEFAULT`. Parameter order matters: `quiet loglevel=3`.
 - Asahi has no MGLRU; power-profiles-daemon offers only `balanced` and `power-saver`.
-- 16K pages: images with jemalloc built for 4K crash — `muvm` helps.
+- 16K pages: images with jemalloc built for 4K crash — `muvm` helps. Quickshell itself runs fine on 16K pages.
 - `MemoryHigh` without free swap freezes a process instead of killing it — use `MemoryMax`.
 - AirPods with macOS dual boot: `br-connection-key-missing` → remove and pair again.
 - Solaar reapplies its saved LED zones on start and can switch the keyboard backlight off: mark `led_control` and
@@ -451,18 +483,19 @@ yumi-rice/
 - A monitor connected after login gets a black background: redraw the wallpaper on `monitor.added`.
 - dp-altmode: after unplugging the monitor and suspending, the next connect can fail until a reboot (a known open bug).
   Kernel updates need the patch rebuilt.
-- `Hyprland --verify-config` **runs** the `exec` commands of the config it checks — check only the live config, never a copy.
 - atuin: an empty `sync_address = ""` breaks it — to stay local, set `auto_sync = false` and leave the address out.
 
 ### Credits
 
-[HyDE](https://github.com/HyDE-Project/HyDE) (the base of versions 1.0–2.5; the wallbash color templates grew out of it) ·
-[Hyprland](https://hyprland.org/) · [Asahi Linux](https://asahilinux.org/) ·
-[Hyprlock-Dots](https://github.com/mahaveergurjar/Hyprlock-Dots) (lock screen layout) ·
-[swaync](https://github.com/ErikReider/SwayNotificationCenter) · [Waybar](https://github.com/Alexays/Waybar) ·
-[Zen](https://zen-browser.app/) · [starship](https://starship.rs/) · [zoxide](https://github.com/ajeetdsouza/zoxide) · [atuin](https://atuin.sh/) · [fastfetch](https://github.com/fastfetch-cli/fastfetch) ·
-[rofi](https://github.com/davatorium/rofi) ·
-[dp-altmode](https://github.com/haripako/dp-altmode) by haripako (USB-C DisplayPort on M1) · [Solaar](https://github.com/pwr-Solaar/Solaar) · [OpenRGB](https://openrgb.org/)
+[Hyprland](https://hyprland.org/) · [Quickshell](https://quickshell.org/) · [Asahi Linux](https://asahilinux.org/) ·
+[HyDE](https://github.com/HyDE-Project/HyDE) (the base of versions 1.0–2.5; `yumi-colors` is a port of its wallbash) ·
+[greetd](https://git.sr.ht/~kennylevinsen/greetd) · [sway](https://swaywm.org/) (login screen) ·
+[touchbard](https://github.com/0800tim/touchbard) (Touch Bar) · [Zen](https://zen-browser.app/) ·
+[starship](https://starship.rs/) · [zoxide](https://github.com/ajeetdsouza/zoxide) · [atuin](https://atuin.sh/) ·
+[fastfetch](https://github.com/fastfetch-cli/fastfetch) ·
+[dp-altmode](https://github.com/haripako/dp-altmode) by haripako (USB-C DisplayPort on M1) ·
+[Solaar](https://github.com/pwr-Solaar/Solaar) · [OpenRGB](https://openrgb.org/) ·
+fonts Noto Serif, Noto Serif CJK JP, Inter, JetBrains Mono
 
 ### Author
 
@@ -476,7 +509,9 @@ yumi-rice/
 
 ### License
 
-MIT, see [LICENSE](LICENSE).
+GPL-3.0-or-later, see [LICENSE](LICENSE). Third-party parts are listed in [NOTICE](NOTICE): wallbash from HyDE
+(GPL-3.0), touchbard (MIT), fonts (SIL OFL 1.1, installed from the repositories, not bundled).
+Versions up to 3.0 were released under MIT.
 
 ---
 
@@ -486,69 +521,102 @@ MIT, see [LICENSE](LICENSE).
 
 **[🇬🇧 English](#en)** · **🇮🇹 Italiano** · **[🇺🇦 Українська](#uk)** · **[🇷🇺 Русский](#ru)**
 
-Il mio desktop Hyprland su un MacBook Pro M1 con Asahi Linux: una Waybar fatta di "pillole", i menu in GTK4
-con sfocatura e i colori dello sfondo, un centro di controllo in stile macOS, un launcher alla Spotlight, una schermata
-di blocco con il lettore musicale — e tutto si ricolora in base allo sfondo attuale. Dalla 3.0 gira tutto su una base
-mia, senza HyDE. In più, uno script che tiene allineati repository e sistema, con un backup di ogni file che tocca.
+Il mio desktop Hyprland su un MacBook Pro M1 con Asahi Linux. Dalla 3.1 tutta la shell — barra, menu, notifiche,
+indicatori a schermo, schermata di blocco, schermata di accesso e finestra della password — è scritta in QML su
+[Quickshell](https://quickshell.org/), nello stile “Inchiostro”: caratteri con grazie, didascalie giapponesi, un sigillo
+hanko rosso. Tutto prende i colori dallo sfondo attuale. In più, un installer per Arch Linux / Arch Linux ARM e uno
+script che tiene allineati repository e sistema, con un backup di ogni file che tocca.
 
 | | |
 |---|---|
-| Hardware | MacBook Pro 13" M1 (2020), 8 GB di RAM, schermo 2560×1600, scala 1.666667 · secondo monitor MSI G27C3F 1920×1080 @ 180 Hz via USB-C · tastiera Logitech PRO e mouse PRO X 2 |
+| Hardware | MacBook Pro 13" M1 (2020), 8 GB di RAM, schermo 2560×1600, scala 1.666667 · secondo monitor MSI G27C3F 1920×1080 via USB-C · tastiera Logitech PRO e mouse PRO X 2 |
 | Sistema | Arch Linux ARM ([Asahi](https://asahilinux.org/)), kernel `linux-asahi`, pagine di memoria da 16K, btrfs |
-| Desktop | Hyprland 0.56 con configurazione Lua, base mia `~/.config/hypr/yumi` (senza HyDE), avviato tramite uwsm |
-| Barra / notifiche / menu | Waybar · swaync · GTK4 (yumi-panel) |
-| Blocco / inattività / sfondo / accesso | hyprlock · hypridle · awww · SDDM con un tema mio |
+| Desktop | Hyprland 0.56 con configurazione Lua, base mia `~/.config/hypr/yumi` |
+| Barra / notifiche / menu / OSD | Quickshell (QML) — un solo servizio, `yumi-quickshell` |
+| Blocco / accesso / password | schermata di blocco Quickshell · greetd con schermata di accesso Quickshell · agente polkit Quickshell |
+| Inattività / sfondo | hypridle · awww |
 | Terminale / shell / font | kitty · zsh + starship · CaskaydiaCove Nerd Font Mono |
-| Browser | [Zen](https://zen-browser.app/) |
+| Font della shell | Noto Serif · Noto Serif CJK JP · JetBrains Mono Nerd Font · Inter |
+| Browser | [Zen](https://zen-browser.app/) (facoltativo) |
 
-### Novità della 3.0
+### Novità della 3.1
 
 > [!NOTE]
-> **Niente più HyDE.** La 3.0 è la prima versione su una base interamente mia: tutto ciò che faceva HyDE ora lo fanno
-> le mie configurazioni e i miei script, e HyDE è stato disinstallato. È ancora pensata per la mia macchina — la
-> portabilità (altre distribuzioni, hardware x86 comune, installazione con un solo comando) è prevista per la **3.1**.
+> **Provato su un MacBook Pro M1 (Asahi).** L'installer è scritto per qualsiasi macchina Arch Linux / Arch Linux ARM,
+> ma su altro hardware non è ancora stato provato: è la prossima verifica. Se qualcosa non va, apri una issue.
 
-**Una base mia al posto di HyDE**
-- **Hyprland a moduli:** `hyprland.lua` carica `~/.config/hypr/yumi/` — `env`, `look`, `layout`, `binds`, `rules`,
-  `autostart`, `events` — più le modalità di lavoro in `workflows/` (default, editing, gaming, powersaver, snappy),
-  cambiate da `yumi-workflow`.
-- **Un motore dei colori mio,** `yumi-colors`: template in `~/.config/yumi/colors/templates` per Waybar, swaync, kitty,
-  GTK, Qt/Kvantum, VS Code, Discord, cava, Obsidian, la retroilluminazione della tastiera e le icone del volume.
-- **Waybar direttamente dal pacchetto** con il mio layout (un drop-in di systemd), una configurazione di zsh mia
-  (`conf.d/yumi`), un wrapper mio del gestore pacchetti per gli alias `in` / `un` / `up`.
-- **Un solo schema di nomi:** ogni comando è `yumi-*`, le librerie stanno in `~/.local/lib/yumi/`, le impostazioni in
-  `~/.config/yumi/`. `cc` è di nuovo il compilatore C — il centro di controllo ora è `yumi-cc`.
+**Lo stile “Isola”**
+- Capsule piene nei colori dello sfondo su barra, menu, schermata di blocco e Touch Bar; il sigillo 弓 come marchio
+  del sistema.
+- **Dynamic Island** al centro della barra: brano in riproduzione, timer e Pomodoro, download, microfono in uso,
+  cambi di rete e VPN, AirPods — un solo posto per tutto ciò che sta succedendo adesso (`yumi-island`).
+- Nuovi menu: aggiornamenti come popup compatto, backup (borg), anteprima rapida, download, YouTube.
 
-**Novità**
-- **Pult** (`yumi-pult`, `SUPER+Space`) — una finestra alla Spotlight/Raycast: app, comandi Yumi, file (`fd`),
-  calcolatrice, emoji e ricerca web in un'unica lista, con l'anteprima a destra. Trova anche le parole scritte con il
-  layout di tastiera sbagliato.
-- **Dottore** (`yumi-doctor`): 13 controlli — servizi, timer, configurazione di Hyprland, link rotti, colori dello
-  sfondo, memoria di Waybar, disco, aggiornamenti, snapshot di snapper, blocco di pacman — spiegati in parole semplici,
-  con `--fix` e `--json`. E una voce "Dottore" nel menu Sistema.
-- **Collezioni di sfondi:** le sottocartelle di `~/Pictures/Wallpapers` diventano collezioni con anteprima, pulsanti
-  nel menu degli sfondi e il comando `yumi-wallpaper collection NOME|off|get`. Le copie sono già ridimensionate per
-  ogni schermo, la transizione gira alla frequenza di ciascun monitor e Waybar si ricolora subito prima della
-  transizione, non dopo.
-- **Schermata di accesso:** un tema SDDM mio, `yumi`, con lo sfondo che segue quello del desktop (`yumi-sddm-sync`).
-- **Terminale:** kitty con CaskaydiaCove Nerd Font Mono, un prompt starship su due righe nei colori della palette del
-  terminale, zoxide (`z` / `zi`), atuin su `Ctrl+R` (solo locale, senza sincronizzazione), alias di eza. fastfetch con
-  un logo di testo (arco e freccia), sezioni incorniciate e una citazione giapponese del giorno con traduzione.
-- **Zen** è il browser predefinito (Firefox rimosso), con i colori dello sfondo (`yumi-zen-theme`), comprese le pagine delle impostazioni.
-- **E inoltre:** un lettore a schermo intero (`yumi-player-full`) e una coda nel lettore, una pagina dei dispositivi
-  dentro il centro di controllo, notifiche della batteria del mouse e degli AirPods, `yumi-update` con una cache di 30
-  minuti (Waybar non lancia più `checkupdates` ogni volta), il tema di icone delle cartelle Yumi-Folders, il tema di
-  VS Code come estensione a sé.
+**Luce della tastiera del MacBook** (`yumi-light`)
+- La retroilluminazione dei tasti segue il sensore di luce ambientale: accesa al buio, spenta di giorno. Nel centro
+  di controllo ci sono un cursore e l'interruttore “auto”; la Touch Bar ha il suo cursore.
+- I tasti “respirano” quando finisce una fase del Pomodoro o la batteria è scarica. La regolazione manuale vince sempre.
 
-**`rice`**
-- Rimossi `./rice hyde-patches` e `hyde-patches.sh`; `./rice reload` riavvia Waybar tramite systemd;
-  `./rice doctor` comincia con `yumi-doctor`.
-- Il manifest è stato rifatto per i nuovi percorsi (~300 file); `./rice check` controlla anche `system/`.
-- `system-manifest.txt`: l'impostazione del tema SDDM, il puntatore nella schermata di accesso e le icone della Touch Bar (tiny-dfr).
-- Gli script di ripristino della 2.x non fanno parte della 3.0 — restano nella [`v2.5`](https://github.com/sonoyumi/yumi-rice/releases/tag/v2.5).
+**Controllo di salute e patch**
+- `yumi-doctor` ora controlla anche Touch Bar, Touch ID, pacchetti bloccati, schermata di accesso, earlyoom e luce
+  dei tasti.
+- Le patch ai sorgenti su cui gira il desktop (attesa del primo fotogramma e tastiera sulla schermata di blocco per
+  Hyprland, correzione del crash di awww) sono in [`patches/`](patches/README.md).
+
+**Tutta la shell su Quickshell**
+- Barra, tutti i menu, i popup delle notifiche e il centro notifiche, l'OSD (volume, luminosità, retroilluminazione
+  della tastiera, layout, “resta sveglio”), la schermata di blocco e la finestra della password polkit / sudo sono QML
+  in `~/.config/quickshell/yumi`, avviati come un solo servizio, `yumi-quickshell`. La logica resta in piccoli backend
+  Python (`~/.local/lib/yumi/qs`) che parlano JSON; il QML si limita a disegnare.
+- **Rimossi:** Waybar, swaync, rofi, i menu GTK e SDDM. hyprlock resta solo come riserva d'emergenza, se Quickshell
+  non risponde.
+- Colori: il modello `quickshell.dcol` → `~/.config/yumi/quickshell/colors.json`; la shell lo rilegge al volo, quindi
+  un nuovo sfondo ricolora tutto senza riavvio.
+
+**Lo stile “Inchiostro”**
+- Caratteri con grazie (Noto Serif + Noto Serif CJK JP), linee sottili al posto delle capsule, un sigillo hanko rosso
+  弓, animazioni senza molle.
+- Nella barra: spazi di lavoro 一 二 三…, didascalie 核 (CPU), 憶 (memoria), 電 (batteria), 護 (VPN); menu a schede,
+  copertina quadrata nel lettore.
+
+**Blocco, accesso, password**
+- **Schermata di blocco “Rotolo”** con il campo password **“Tratto”**: una sola linea invece di una casella.
+- **Schermata di accesso su greetd** al posto di SDDM — lo stesso aspetto, Quickshell dentro una piccola sessione sway.
+  All'avvio l'accesso automatico porta dritto a Hyprland e alla schermata di blocco; dopo “Esci” compare questa
+  schermata invece di uno schermo nero.
+- **Finestra della password** per polkit / sudo nello stesso stile: `yumi-polkit-switch on|off|status` (`off` riporta
+  hyprpolkitagent).
+
+**Menu e sfondi**
+- Menu: Pult (`SUPER+Space`), App e file, Musica, Sistema, Wi-Fi, Bluetooth, VPN, Audio, Batteria e modalità di
+  alimentazione, Appunti, Calendario, Spazi di lavoro, Processi, Tray, Scorciatoie, Emoji e glifi, Ricerca web. Il
+  centro di controllo (`SUPER+C`) fa da snodo con i collegamenti a tutti i menu.
+- **Anello della sessione** (`SUPER+Esc`, `SUPER+Delete`): blocca 鍵, sospendi 眠, esci 出, riavvia 再, spegni 終 — tieni
+  premuto per confermare.
+- **Musica** (`yumi-music`): YouTube Music + SoundCloud senza account, playlist, coda, testi sincronizzati.
+- **Widget degli sfondi** (`SUPER+SHIFT+W`): un carosello, stili (cartelle) → sfondi, frecce per scorrere, anteprima
+  del colore d'accento sotto l'immagine. I colori di tutto il desktop vengono dallo sfondo (`yumi-colors`).
+
+**Portabilità**
+- **`./install.sh`** — solo Arch Linux / Arch Linux ARM: una domanda prima di ogni passo, prima un backup,
+  `--dry-run` e `--uninstall`. Elenchi dei pacchetti in `packages/`: `arch.txt` (obbligatori), `aur.txt`,
+  `optional.txt` (gruppi che si possono saltare), `mac.txt`.
+- **Le parti per Mac sono moduli facoltativi** (`RICE_MAC`): Touch Bar, limite di carica della batteria, guardia del
+  coperchio, modalità AirPods, splash di avvio. Si installano solo se viene rilevato un MacBook. Touch ID è un
+  repository pubblico a parte: [yumi-touchid](https://github.com/sonoyumi/yumi-touchid).
+- **Monitor:** lo schermo integrato è qualsiasi uscita con nome `eDP*`; scale e nomi stanno in
+  `~/.config/yumi/monitors.conf` (un file vuoto va bene: tutto a 1.0).
+- **Licenza:** GPL-3.0-or-later invece di MIT — il motore dei colori è un port di wallbash da HyDE (GPL-3.0).
+  Vedi [NOTICE](NOTICE).
 
 <details>
-<summary><b>Versioni precedenti: 2.5 · 2.1 · 2.0</b></summary>
+<summary><b>Versioni precedenti: 3.0 · 2.5 · 2.1 · 2.0</b></summary>
+
+#### 3.0
+
+La prima versione su una base tutta mia, senza HyDE: Hyprland a moduli (`~/.config/hypr/yumi`), un motore dei colori
+mio `yumi-colors`, il Pult (`SUPER+Space`), `yumi-doctor`, collezioni di sfondi, un tema SDDM, Zen come browser. Le note
+complete sono nella [pagina della release 3.0](https://github.com/sonoyumi/yumi-rice/releases/tag/v3.0).
 
 #### Novità della 2.5
 
@@ -572,7 +640,6 @@ mia, senza HyDE. In più, uno script che tiene allineati repository e sistema, c
   attivo (`yumi-idle-action`), limite di carica della batteria (`yumi-battery-limit`).
 - **App nei colori dello sfondo** tramite gli hook dell'accento: Zen, Firefox, Vesktop, finestre hyprtoolkit, Touch Bar;
   icone delle cartelle ricolorate con la palette (`recolor.py`, `yumi-folders-update`).
-- `ai` — piccolo assistente locale per il codice (Qwen2.5-Coder 1.5B tramite Ollama).
 
 **Più ordine**
 - `~/.local/bin`: da 155 a ~90 file. 39 script `*-uninstall`, 27 copie `.bak` e 17 cartelle di backup spostati in
@@ -651,112 +718,104 @@ Misurato sulla mia macchina (MacBook Pro M1, 8 GB, con Firefox, Telegram e termi
 - **Inoltre:** promemoria del calendario (timer systemd), tray senza applet doppie, tema Telegram nei colori dello
   sfondo, launcher inutili nascosti (`yumi-app-hide`), `SUPER+K` cambia layout su tutte le tastiere insieme e la
   schermata di blocco si apre sempre con il layout inglese. Ogni aggiunta ha il proprio script `*-uninstall`.
-
 </details>
 
 ### Funzionalità
 
-- **Waybar a pillole:** il mio layout `yumi`, ogni gruppo di moduli è una pillola arrotondata a sé. A sinistra: logo,
-  spazi di lavoro, CPU / RAM. Al centro: il lettore con copertina ed equalizzatore. A destra: centro di controllo e
-  appunti · layout di tastiera, VPN, "non sospendere", Wi-Fi, Bluetooth, audio (con le icone degli AirPods) · orologio,
-  batteria, profilo energetico e modalità di lavoro · pulsante di spegnimento. Le pillole si aggiornano sugli eventi
-  D-Bus (`yumi-bar-events`), non con il polling.
-- **Menu in GTK4 (`yumi-panel`):** un unico framework — una finestra layer-shell con sfocatura, i colori dello sfondo
-  e la navigazione da tastiera. Wi-Fi, Bluetooth, audio, VPN, energia e modalità, sessione, sistema (aggiornamenti,
-  snapshot, risorse, Dottore), processi, mouse, calendario con promemoria, appunti, sfondi, spazi di lavoro, tray,
-  musica, app, emoji e glifi, ricerca web.
-- **Centro di controllo** (`yumi-menu-control`, GTK4): riquadri, cursori, scheda del lettore, dispositivi, "Non
-  disturbare" e cronologia delle notifiche. I popup li disegna swaync.
-- **Tutto segue lo sfondo:** `yumi-colors` e gli hook di `yumi-accent` ricolorano Waybar, i menu, swaync, kitty,
-  GTK/Qt, i bordi delle finestre, VS Code, Telegram, Vesktop, Zen, la Touch Bar, le icone delle cartelle, la schermata
-  di blocco e SDDM.
-- **Schermata di blocco "Yumi Google":** `yumi-hyprlock-build` la costruisce da un template per ogni monitor —
-  orologio, citazioni, lettore, informazioni di sistema. Accesso automatico SDDM → Hyprland → subito hyprlock; il
-  desktop viene disegnato *sotto* il blocco.
-- **Musica:** `yumi-music` — YouTube Music + SoundCloud con copertine, playlist e testi; il servizio `yumi-airpods`
-  mette in pausa quando togli un auricolare e restituisce gli auricolari all'iPhone quando il portatile si blocca.
+- **Barra nello stile “Inchiostro”:** a sinistra il sigillo, gli spazi di lavoro in kanji, CPU e memoria; al centro il
+  lettore con la copertina e un equalizzatore cava a quadratini; a destra centro di controllo, layout della tastiera,
+  VPN (solo quando è attiva), “resta sveglio”, Wi-Fi con il nome della rete, Bluetooth con il numero di dispositivi,
+  audio, orologio, batteria e spegnimento. Le pillole si aggiornano sugli eventi D-Bus (`yumi-bar-events`), non a
+  intervalli.
+- **Menu in QML:** un unico framework, un menu aperto alla volta, navigazione da tastiera, si chiudono con `Esc` o con
+  un clic fuori.
+- **Notifiche:** popup e un centro notifiche — un elenco con `↑` `↓`, `Enter`, `Del`, `H` per nascondere un'app, `D`
+  per “Non disturbare”, “Cancella” con una seconda pressione.
+- **OSD** per volume, microfono, luminosità, retroilluminazione della tastiera, layout e “resta sveglio”.
+- **Schermata di blocco “Rotolo”:** `yumi-lock` blocca tramite Quickshell; se non risponde in circa 2 s, subentra
+  hyprlock. All'avvio il desktop viene disegnato *sotto* il blocco.
+- **Schermata di accesso:** greetd + sway + la stessa schermata QML; una copia del tema vive in `/var/lib/yumi-greeter`
+  e segue lo sfondo (`yumi-greeter-sync`).
+- **Tutto segue lo sfondo:** `yumi-colors` e gli hook in `~/.config/yumi/accent/hooks.d` ricolorano la shell, kitty,
+  GTK/Qt, i bordi delle finestre, VS Code, Zen, Telegram, Vesktop, Obsidian, le icone delle cartelle, la
+  retroilluminazione della tastiera e la schermata di accesso.
+- **Musica:** `yumi-music` — YouTube Music + SoundCloud con copertine, playlist e testi; `yumi-airpods` mette in pausa
+  quando si toglie un auricolare.
 - **Vivere con 8 GB:** zram grande quanto la RAM + un file di swap; earlyoom chiude prima le schede del browser e mai
-  il desktop; Zen gira nel suo cgroup (`zen.slice`); `lim 1G <comando>` avvia i server di prova in `dev.slice` con un
-  tetto di memoria.
-- **Sistema:** avvio silenzioso (menu di GRUB nascosto, `quiet loglevel=3`), snapshot btrfs con snapper (snap-pac
-  prima e dopo ogni pacman, `/home` ogni ora), faillock, BlueZ Experimental per la batteria delle cuffie.
-- **Due monitor su un MacBook M1:** lo schermo esterno funziona tramite DisplayPort alt mode su USB-C grazie a
+  il desktop; Zen gira in un cgroup suo (`zen.slice`); `lim 1G <comando>` avvia i server di prova in `dev.slice` con un
+  limite di memoria.
+- **Sistema:** avvio silenzioso, snapshot btrfs con snapper (gruppo facoltativo: snap-pac prima e dopo ogni pacman),
+  faillock, BlueZ Experimental per la batteria delle cuffie.
+- **Due monitor su un MacBook M1:** lo schermo esterno funziona via USB-C in DisplayPort alt mode grazie a
   [haripako/dp-altmode](https://github.com/haripako/dp-altmode). Gli spazi 1–5 stanno sul MacBook, 6–10 sul monitor
-  esterno; scollegandolo passano al portatile. Scale e nomi dei monitor sono in un solo file, `~/.config/yumi/monitors.conf`.
-- **Logitech senza G HUB:** un menu del mouse con DPI e frequenza di polling (Solaar); la retroilluminazione della
-  tastiera segue lo sfondo tramite un server OpenRGB; Win e Alt sono scambiati solo sulla tastiera esterna; tasti
-  multimediali su `ALT+F9–F12`.
-- **Ogni modifica si può annullare:** `./rice push` conserva la versione precedente di ogni file, `./rice push-system`
-  applica `/etc` un file alla volta dopo uno snapshot di snapper, e le aggiunte si annullano con `yumi-uninstall <modulo>`.
+  esterno; scollegandolo passano al portatile.
+- **Logitech senza G HUB** (facoltativo): un menu del mouse con DPI e frequenza di polling (Solaar); la
+  retroilluminazione della tastiera segue l'accento della barra tramite un server OpenRGB.
+- **Extra per MacBook** (moduli facoltativi): livelli e stili della Touch Bar
+  ([touchbard](https://github.com/0800tim/touchbard)), limite di carica, una guardia che riaccende lo schermo integrato
+  dopo il coperchio, Touch ID per sudo e la schermata di blocco ([yumi-touchid](https://github.com/sonoyumi/yumi-touchid),
+  si installa a parte).
+- **Ogni modifica si può annullare:** `./install.sh --uninstall` rimette i backup, `./rice push` conserva la versione
+  precedente di ogni file, e le aggiunte si annullano con `yumi-uninstall <modulo>`.
 
 ### Screenshot
 
-https://github.com/user-attachments/assets/72154592-2090-4faa-a56b-40aeb462c0ba
-
-Video: finestre, layout dwindle / master / scrolling, spazi di lavoro, lettore con i testi, cambio di sfondo. Il resto è [nella galleria della sezione inglese](#screenshots).
+La galleria completa è [nella sezione inglese](#screenshots): schermata di blocco e di accesso, barra, finestra della
+password, centro di controllo, notifiche, Pult, musica, tutti i menu, widget degli sfondi, due monitor.
 
 ### Tasti e gesti
 
 | Tasti | Azione |
 |---|---|
 | `SUPER` + `Space` | Pult: app, comandi, file, calcolatrice, emoji, web |
-| `SUPER` + `Esc`, `CTRL` + `ALT` + `Canc` | Sessione: blocco, sospensione, uscita, riavvio, spegnimento |
+| `SUPER` + `A` / `SUPER` + `SHIFT` + `E` | App / file |
+| `SUPER` + `C` | Centro di controllo — collegamenti a tutti i menu |
+| `SUPER` + `CTRL` + `W` / `B` / `V` / `A` | Wi-Fi / Bluetooth / VPN / audio |
+| `SUPER` + `CTRL` + `E` / `T` / `Y` | Batteria e alimentazione / processi / tray |
+| `SUPER` + `CTRL` + `C` / `N` / `K` | Calendario / centro notifiche / scorciatoie |
+| `SUPER` + `Esc`, `SUPER` + `Delete`, `CTRL` + `ALT` + `Del` | Anello della sessione: blocca, sospendi, esci, riavvia, spegni |
 | `SUPER` + `N` | Blocca lo schermo |
-| `SUPER` + `M` / `SUPER` + `SHIFT` + `M` | Lettore / libreria musicale |
+| `SUPER` + `M` / `SUPER` + `SHIFT` + `M` | Lettore / musica |
 | `SUPER` + `V` | Appunti |
 | `SUPER` + `TAB` | Spazi di lavoro |
 | `SUPER` + `` ` `` | Menu di sistema |
-| `SUPER` + `A` | App |
 | `SUPER` + `,` / `SUPER` + `.` | Emoji / glifi |
-| `SUPER` + `SHIFT` + `W` | Scelta dello sfondo |
+| `SUPER` + `SHIFT` + `/` | Ricerca web |
+| `SUPER` + `SHIFT` + `W` | Widget degli sfondi |
 | `SUPER` + `ALT` + `←` / `→` | Sfondo precedente / successivo |
-| `SUPER` + `/` | Energia e modalità di lavoro |
 | `SUPER` + `ALT` + `↑` / `↓` | Modalità di lavoro successiva / precedente |
 | `SUPER` + `K` | Layout su tutte le tastiere |
-| `SUPER` + `F10` / `F11` / `F12`, `Stamp` | Screenshot: area / schermo congelato / monitor / tutti i monitor |
-| `ALT` + `F9`…`F12`, `ALT` + `Stamp` / `Bloc Scorr` / `Pausa` | Musica e volume dalla tastiera esterna |
-| 3 dita ← / → | Cambio di spazio di lavoro |
-| 3 dita ↓ | Panoramica degli spazi di lavoro |
+| `SUPER` + `P` / `ALT` + `P` / `SHIFT` + `P`, `Print` | Screenshot: area / schermo congelato / monitor / tutti i monitor |
+| `SUPER` + `ALT` + `Space` / `,` / `.` | Play-pausa / brano precedente / successivo |
+| `ALT` + `F9`…`F12`, `ALT` + `Print` / `Scroll Lock` / `Pause` | Media e volume sulla tastiera esterna |
+| 3 dita ← / → | Cambia spazio di lavoro |
+| 3 dita ↓ | Panoramica degli spazi |
+| 4 dita | Fuoco sulla finestra nella direzione dello scorrimento |
 
-### Avvio rapido
+### Installazione
 
 > [!WARNING]
-> Queste sono le configurazioni di **una macchina specifica**: MacBook M1, Asahi, schermo 2560×1600. HyDE non serve
-> più. Su altro hardware usatele come base e prendetene delle parti; un installer per altre distribuzioni e hardware
-> comune è previsto per la 3.1. Applicate i file di sistema (`system/`) solo consapevolmente.
+> **Solo Arch Linux e Arch Linux ARM.** Provato su un MacBook Pro M1 (Asahi); su altro hardware Arch non è ancora stato
+> provato: segnala i problemi. I file di sistema in `/etc` (GRUB, zram, earlyoom, Bluetooth) vengono dalla mia
+> macchina: l'installer chiede per ognuno, e se non sei sicuro rispondi “no”.
 
-Serve Hyprland ≥ 0.56 (configurazione Lua) e i pacchetti:
-
-```bash
-sudo pacman -S --needed hyprland hypridle hyprlock hyprsunset hyprpolkitagent hyprpicker uwsm \
-    waybar swaync awww kitty zsh starship fastfetch zoxide atuin eza fd jq cliphist wl-clipboard \
-    playerctl imagemagick inotify-tools bluez-utils power-profiles-daemon libnotify brightnessctl btop \
-    gtk4 gtk4-layer-shell python-gobject python-dbus python-requests pacman-contrib yt-dlp mpv cava \
-    grim slurp satty tesseract udiskie snapper snap-pac earlyoom zram-generator kvantum qt6ct \
-    ttf-cascadia-code-nerd ttf-jetbrains-mono-nerd noto-fonts-cjk solaar openrgb python-ytmusicapi wireproxy
-```
-
-Da AUR: `zen-browser-bin`. Plugin di zsh: oh-my-zsh con `zsh-autosuggestions` e `zsh-syntax-highlighting`.
-
-```bash
+```zsh
 git clone https://github.com/sonoyumi/yumi-rice.git ~/Projects/yumi-rice
 cd ~/Projects/yumi-rice
-./rice diff            # cosa cambierà
-./rice push            # copia i file in ~ (le vecchie versioni vanno in ~/.local/state/rice-bak/)
-systemctl --user daemon-reload
-systemctl --user enable --now yumi-awww.service yumi-wallpaper.service yumi-bar-events.service \
-    yumi-tray.service yumi-notify-log.service yumi-hyprlock-bg.service yumi-calendar-remind.timer
-$EDITOR ~/.config/yumi/monitors.conf   # i vostri monitor: scala dell'interfaccia, nome
-yumi-wallpaper random  # immagini da ~/Pictures/Wallpapers (sottocartelle = collezioni); i colori seguono
-yumi-hyprlock-build    # costruisce la schermata di blocco per i monitor di monitors.conf
-yumi-doctor            # controlla che sia tutto a posto
-./rice reload
-./rice push-system     # facoltativo: /etc, un file alla volta con conferma
-~/.local/share/yumi-sddm/install.sh   # facoltativo: il tema SDDM (ripristino: uninstall.sh accanto)
+./install.sh --dry-run   # mostra cosa verrebbe fatto, senza cambiare nulla
+./install.sh             # installa: una domanda prima di ogni passo, prima un backup
 ```
 
-Nel repository al posto del percorso della home c'è `@HOME@`, e nel file di accesso automatico `@USER@`:
-`./rice push` inserisce i vostri valori. Mettete il vostro avatar in `~/.config/hypr/hyprlock/avatar.jpg`.
+L'installer mette i pacchetti di `packages/` (AUR tramite `paru` o `yay`, gruppi facoltativi su richiesta), copia i
+file con `./rice push`, configura la schermata di accesso greetd, i servizi utente e la finestra della password. Poi
+metti qualche immagine in `~/Pictures/Wallpapers`, riavvia ed esegui `yumi-doctor`. Monitor:
+`~/.config/yumi/monitors.conf` (nomi delle uscite da `hyprctl monitors`); avatar della schermata di blocco:
+`~/.config/hypr/hyprlock/avatar.jpg`.
+
+Annullare: `./install.sh --uninstall` — rimette i file dai backup, spegne i servizi e greetd e ripristina il gestore di
+accesso precedente. I pacchetti si rimuovono solo con un consenso a parte.
+
+Passo per passo, con tutte le domande e i limiti noti: [INSTALL.md](INSTALL.md) (per ora in russo).
 
 ### Lo script `rice`
 
@@ -767,82 +826,93 @@ Il repository è la fonte di verità; `rice` lo sincronizza con il sistema.
 | `./rice pull` | Sistema → repository |
 | `./rice diff [percorso]` | Cosa differisce tra sistema e repository |
 | `./rice push` | Repository → `~` (con backup delle versioni precedenti) |
-| `./rice push-system` | Repository → `/etc` (diff e conferma per ogni file, prima uno snapshot di snapper) |
-| `./rice reload` | Ricarica Hyprland, Waybar, swaync, systemd --user |
+| `./rice push-system [filtro]` | Repository → `/etc` (diff e conferma per ogni file, prima uno snapshot snapper) |
+| `./rice files` | Quali file installa `push` (tiene conto di `RICE_LOCAL` e `RICE_MAC`) |
+| `./rice reload` | Ricarica Hyprland, Quickshell, systemd --user |
 | `./rice add <percorso>` | Inizia a tracciare un file |
-| `./rice doctor` | `yumi-doctor` più i dettagli del repository: servizi, crash, differenze, file fuori dal manifest |
-| `./rice check` | Controllo del repository prima di un commit: sintassi, dati personali, segreti (`--install-hook` lo esegue a ogni commit) |
-| `./rice gc [--apply]` | Pulizia: `__pycache__`, vecchi archivi `rice-bak`, `.bak` e ripristini da `~/.local/bin` nell'archivio (senza `--apply` mostra soltanto) |
+| `./rice doctor` | `yumi-doctor` più i dettagli del repository: servizi, crash, deriva, file fuori dal manifest |
+| `./rice check` | Controllo del repository prima del commit: sintassi, dati privati, segreti (`--install-hook` lo esegue a ogni commit) |
+| `./rice gc [--apply]` | Pulizia: `__pycache__`, vecchi archivi `rice-bak`, `.bak` e rollback da `~/.local/bin` nell'archivio (senza `--apply` mostra soltanto) |
 | `./rice drift [--notify [N]]` | Quanto il sistema si è allontanato dal repository (notifica oltre N blocchi) |
 
-Le modifiche personali stanno fuori dal repository, in `~/.config/rice-local/` (stessa struttura di `home/`, più un
-suo `manifest.txt`): `./rice` le installa al posto dei file pubblici, così le modifiche private non arrivano mai su
-GitHub. I blocchi privati dentro un file condiviso sono marcati `yumi:private-begin/-end` e tagliati da `tools/publicize`.
-`RICE_LOCAL=off ./rice push` installa la versione pubblica pulita.
+Le modifiche personali stanno fuori dal repository in `~/.config/rice-local/` (stessa struttura di `home/`, più un suo
+`manifest.txt`): `./rice` le installa al posto dei file pubblici, così le modifiche private non arrivano mai su GitHub.
+I blocchi privati dentro un file condiviso sono marcati `yumi:private-begin/-end` e li toglie `tools/publicize`.
+`RICE_LOCAL=off ./rice push` installa la versione pubblica pulita; `RICE_MAC=off` salta il blocco Mac del manifest.
 
-Flusso di lavoro: modifica in `home/…` → `./rice push` → `./rice reload` → verifica → `git commit`.
-Non piace — `git checkout -- <file>` e di nuovo `./rice push`.
+Flusso: modifica in `home/…` → `./rice push` → `./rice reload` → controlla → `git commit`.
+Non ti piace — `git checkout -- <file>` e di nuovo `./rice push`.
 
 ### Struttura del progetto
 
 ```
 yumi-rice/
+├── install.sh              # installer (Arch / Arch ARM): --dry-run, --uninstall
+├── INSTALL.md              # installazione passo per passo
+├── packages/               # arch.txt, aur.txt, optional.txt (gruppi), mac.txt
 ├── home/
-│   ├── .config/hypr/       # hyprland.lua + yumi/ (moduli, modalità di lavoro), hyprlock, hypridle
-│   ├── .config/yumi/       # monitors.conf, hook dell'accento, template dei colori, stili di menu e lettore
-│   ├── .config/waybar/     # layout yumi.jsonc, moduli e stili
-│   ├── .config/swaync/     # layout del centro di controllo e stile dei popup
+│   ├── .config/quickshell/yumi/  # la shell: barra, menu, notifiche, osd, lock, polkit, greeter.qml
+│   ├── .config/hypr/       # hyprland.lua + yumi/ (moduli, modalità di lavoro), hypridle, hyprlock di riserva
+│   ├── .config/yumi/       # monitors.conf, hook d'accento, modelli dei colori, schermata di accesso (greeter/sway.conf)
 │   ├── .config/systemd/    # servizi e timer yumi-*, dev.slice, zen.slice
 │   ├── .config/…           # kitty, zsh, starship, atuin, fastfetch, VS Code
-│   ├── .local/bin/         # comandi yumi-*: menu, pult, dottore, sfondi, colori, lettore…
-│   ├── .local/lib/yumi/    # panel (menu GTK4), bar (moduli Waybar), colors, tray, calendar, fetch…
-│   ├── .local/src/yumi-eq/ # equalizzatore CFFI per Waybar (C)
-│   └── .local/share/       # tema SDDM, tema VS Code, aiuti per la musica, dati del picker
-├── system/etc/             # GRUB, SDDM, zram, sysctl, earlyoom, BlueZ, faillock, puntatore X11, tiny-dfr
+│   ├── .local/bin/         # comandi yumi-*: blocco, sfondi, colori, musica, doctor, greeter…
+│   ├── .local/lib/yumi/    # qs (backend dei menu), bar (script della barra), colors, tray, calendar, fetch…
+│   └── .local/share/       # tema VS Code, aiuti per la musica, icone delle cartelle, dati del picker
+├── system/etc/             # greetd + PAM, GRUB, zram, sysctl, earlyoom, BlueZ, faillock
+├── patches/                # patch ai sorgenti: Hyprland, awww (vedi patches/README.md)
 ├── assets/screenshots/
-├── manifest.txt            # file tracciati da ~
+├── manifest.txt            # file tracciati da ~ (la parte Mac tra # @mac e # @end)
 ├── system-manifest.txt     # file tracciati da /etc
 ├── rice                    # script di sincronizzazione
-└── tools/                  # publicize (copia pubblica da quella privata), check (controllo prima del commit)
+├── NOTICE                  # autori e licenze di terze parti
+└── tools/                  # publicize (copia pubblica dalla privata), check (controllo pre-commit)
 ```
 
-### Insidie: Hyprland 0.56 Lua e Asahi
+### Insidie: Hyprland 0.56 Lua, Quickshell e Asahi
 
-- Le opzioni usano il punto: `hyprctl getoption decoration.rounding`. I dispatcher sono Lua:
+- Le opzioni usano i punti: `hyprctl getoption decoration.rounding`. I dispatcher sono Lua:
   `hyprctl dispatch 'hl.dsp.focus({ workspace = 3 })'`. `hyprctl keyword` non funziona — usa `hyprctl eval 'hl.config({...})'`.
 - La scala deve dividere la risoluzione: `1.666667`, non `1.67`.
-- Il modulo integrato `hyprland/language` di Waybar non funziona con Hyprland Lua — serve un modulo proprio.
-- swaync esegue i comandi senza `XDG_RUNTIME_DIR` — `wpctl` restituisce 0; i cursori vogliono `min_limit/max_limit` espliciti.
-- hyprlock: `$BACKGROUND_PATH` è inaffidabile (meglio un percorso assoluto), `onclick` funziona solo con `hide_cursor = false`,
-  `fadeOut, 0` elimina il fotogramma grigio dopo l'avvio.
-- `hypridle.conf` include **tutti** i file di `hypridle/` — qualsiasi backup accanto alla vostra configurazione la sovrascrive.
-- Alcuni pacchetti mettono un `[Autologin]` vuoto in `/etc/sddm.conf.d/` — date al vostro file un nome che venga per ultimo in ordine alfabetico (`zz-…`).
-- GRUB non scrive `grubenv` su btrfs — niente `GRUB_SAVEDEFAULT`. L'ordine dei parametri conta: `quiet loglevel=3`.
+- `Hyprland --verify-config` **esegue** i comandi `exec` della configurazione che controlla — controlla solo quella in
+  uso, mai una copia.
+- Quickshell: fermalo con `systemctl --user stop yumi-quickshell` o `qs kill -c yumi`, mai con `pkill qs` — uccide anche
+  le istanze di prova. La sorveglianza dei file è spenta: le modifiche al QML si vedono solo dopo
+  `systemctl --user restart yumi-quickshell`.
+- Non avviare e chiudere la vera schermata di blocco per provarla: una conversazione PAM interrotta conta come password
+  sbagliata per faillock (3 tentativi → 10 minuti, e si blocca anche sudo). Usa l'anteprima:
+  `qs -c yumi ipc call lock preview`.
+- greetd legge `/etc/greetd/config.toml` solo quando parte; `systemctl restart greetd` chiude la sessione in corso.
+- `hypridle.conf` include **ogni** file in `hypridle/` — qualsiasi backup accanto alla configurazione la sovrascrive.
+- GRUB non può scrivere `grubenv` su btrfs — niente `GRUB_SAVEDEFAULT`. L'ordine dei parametri conta: `quiet loglevel=3`.
 - Asahi non ha MGLRU; power-profiles-daemon offre solo `balanced` e `power-saver`.
-- Pagine da 16K: le immagini con jemalloc compilato per 4K si bloccano — aiuta `muvm`.
+- Pagine da 16K: le immagini con jemalloc compilato per 4K vanno in crash — aiuta `muvm`. Quickshell invece funziona
+  bene con le pagine da 16K.
 - `MemoryHigh` senza swap libero congela il processo invece di chiuderlo — usa `MemoryMax`.
 - AirPods con dual boot macOS: `br-connection-key-missing` → rimuovi e abbina di nuovo.
-- Solaar all'avvio riapplica le zone LED salvate e può spegnere la retroilluminazione della tastiera: segna `led_control`
-  e `led_zone_*` come `ignore` nella sua configurazione.
-- La modalità `Direct` di OpenRGB sulla tastiera PRO salta dei tasti e l'ordine dei LED non corrisponde al layout:
-  `Static` è affidabile.
-- Ogni chiamata a `openrgb` riscansiona tutti i dispositivi USB per qualche secondo e intanto Solaar non riesce a
-  leggere il mouse: avviare `openrgb --server` una volta all'accesso e inviare i colori con `--client`.
-- Un monitor collegato dopo il login ha lo sfondo nero: ridisegna lo sfondo su `monitor.added`.
+- Solaar riapplica all'avvio le zone LED salvate e può spegnere la retroilluminazione della tastiera: segna
+  `led_control` e `led_zone_*` come `ignore` nella sua configurazione.
+- La modalità `Direct` di OpenRGB sulla tastiera PRO perde tasti e l'ordine dei LED non corrisponde al layout: `Static`
+  è affidabile.
+- `openrgb` normale a ogni chiamata riscansiona per qualche secondo tutti i dispositivi USB, e intanto Solaar non
+  riesce a leggere il mouse: avvia `openrgb --server` una volta all'accesso e invia i colori con `--client`.
+- Un monitor collegato dopo l'accesso riceve uno sfondo nero: ridisegna lo sfondo sull'evento `monitor.added`.
 - dp-altmode: dopo aver scollegato il monitor e sospeso il portatile, il collegamento successivo può fallire fino al
   riavvio (bug noto e aperto). Dopo un aggiornamento del kernel la patch va ricompilata.
-- `Hyprland --verify-config` **esegue** i comandi `exec` della configurazione che controlla — verificate solo quella in uso, mai una copia.
-- atuin: un `sync_address = ""` vuoto lo rompe — per restare in locale impostate `auto_sync = false` e omettete l'indirizzo.
+- atuin: un `sync_address = ""` vuoto lo rompe — per restare in locale imposta `auto_sync = false` e non indicare
+  l'indirizzo.
 
 ### Ringraziamenti
 
-[HyDE](https://github.com/HyDE-Project/HyDE) (la base delle versioni 1.0–2.5; da lì vengono i template dei colori wallbash) ·
-[Hyprland](https://hyprland.org/) · [Asahi Linux](https://asahilinux.org/) ·
-[Hyprlock-Dots](https://github.com/mahaveergurjar/Hyprlock-Dots) (layout della schermata di blocco) ·
-[swaync](https://github.com/ErikReider/SwayNotificationCenter) · [Waybar](https://github.com/Alexays/Waybar) ·
-[Zen](https://zen-browser.app/) · [starship](https://starship.rs/) · [zoxide](https://github.com/ajeetdsouza/zoxide) · [atuin](https://atuin.sh/) · [fastfetch](https://github.com/fastfetch-cli/fastfetch) ·
-[rofi](https://github.com/davatorium/rofi) ·
-[dp-altmode](https://github.com/haripako/dp-altmode) di haripako (DisplayPort via USB-C su M1) · [Solaar](https://github.com/pwr-Solaar/Solaar) · [OpenRGB](https://openrgb.org/)
+[Hyprland](https://hyprland.org/) · [Quickshell](https://quickshell.org/) · [Asahi Linux](https://asahilinux.org/) ·
+[HyDE](https://github.com/HyDE-Project/HyDE) (la base delle versioni 1.0–2.5; `yumi-colors` è un port del suo wallbash) ·
+[greetd](https://git.sr.ht/~kennylevinsen/greetd) · [sway](https://swaywm.org/) (schermata di accesso) ·
+[touchbard](https://github.com/0800tim/touchbard) (Touch Bar) · [Zen](https://zen-browser.app/) ·
+[starship](https://starship.rs/) · [zoxide](https://github.com/ajeetdsouza/zoxide) · [atuin](https://atuin.sh/) ·
+[fastfetch](https://github.com/fastfetch-cli/fastfetch) ·
+[dp-altmode](https://github.com/haripako/dp-altmode) di haripako (DisplayPort via USB-C su M1) ·
+[Solaar](https://github.com/pwr-Solaar/Solaar) · [OpenRGB](https://openrgb.org/) ·
+font Noto Serif, Noto Serif CJK JP, Inter, JetBrains Mono
 
 ### Autore
 
@@ -856,7 +926,9 @@ yumi-rice/
 
 ### Licenza
 
-MIT, vedi [LICENSE](LICENSE).
+GPL-3.0-or-later, vedi [LICENSE](LICENSE). Le parti di terzi sono elencate in [NOTICE](NOTICE): wallbash da HyDE
+(GPL-3.0), touchbard (MIT), font (SIL OFL 1.1, installati dai repository, non inclusi).
+Le versioni fino alla 3.0 erano rilasciate con licenza MIT.
 
 ---
 
@@ -866,67 +938,101 @@ MIT, vedi [LICENSE](LICENSE).
 
 **[🇬🇧 English](#en)** · **[🇮🇹 Italiano](#it)** · **🇺🇦 Українська** · **[🇷🇺 Русский](#ru)**
 
-Мій робочий стіл Hyprland на MacBook Pro M1 з Asahi Linux: Waybar із «пігулок», меню на GTK4
-з розмиттям і кольорами шпалер, центр керування в стилі macOS, пульт у дусі Spotlight, екран блокування з плеєром —
-і все це перефарбовується під поточні шпалери. Від версії 3.0 усе працює на власній основі, без HyDE. А ще скрипт,
-який тримає репозиторій і систему синхронними та зберігає резервну копію кожного файлу, який змінює.
+Мій робочий стіл Hyprland на MacBook Pro M1 з Asahi Linux. Від версії 3.1 уся оболонка — панель, меню, сповіщення,
+екранні індикатори, екран блокування, екран входу й вікно пароля — написана на QML у
+[Quickshell](https://quickshell.org/), у стилі «Туш»: шрифти із засічками, японські підписи, червона печатка-ханко.
+Усе бере кольори з поточних шпалер. А ще встановлювач для Arch Linux / Arch Linux ARM і скрипт, який тримає репозиторій
+і систему синхронними та зберігає резервну копію кожного файлу, який змінює.
 
 | | |
 |---|---|
-| Залізо | MacBook Pro 13" M1 (2020), 8 ГБ RAM, екран 2560×1600, масштаб 1.666667 · другий монітор MSI G27C3F 1920×1080 @ 180 Гц через USB-C · клавіатура Logitech PRO і миша PRO X 2 |
+| Залізо | MacBook Pro 13" M1 (2020), 8 ГБ RAM, екран 2560×1600, масштаб 1.666667 · другий монітор MSI G27C3F 1920×1080 через USB-C · клавіатура Logitech PRO і миша PRO X 2 |
 | ОС | Arch Linux ARM ([Asahi](https://asahilinux.org/)), ядро `linux-asahi`, сторінки пам'яті 16K, btrfs |
-| Робочий стіл | Hyprland 0.56 з Lua-конфігом, власна основа `~/.config/hypr/yumi` (без HyDE), запуск через uwsm |
-| Панель / сповіщення / меню | Waybar · swaync · GTK4 (yumi-panel) |
-| Блокування / простій / шпалери / вхід | hyprlock · hypridle · awww · SDDM із власною темою |
+| Робочий стіл | Hyprland 0.56 з Lua-конфігом, власна основа `~/.config/hypr/yumi` |
+| Панель / сповіщення / меню / OSD | Quickshell (QML) — одна служба, `yumi-quickshell` |
+| Блокування / вхід / пароль | екран блокування Quickshell · greetd з екраном входу на Quickshell · агент polkit на Quickshell |
+| Простій / шпалери | hypridle · awww |
 | Термінал / оболонка / шрифт | kitty · zsh + starship · CaskaydiaCove Nerd Font Mono |
-| Браузер | [Zen](https://zen-browser.app/) |
+| Шрифти оболонки | Noto Serif · Noto Serif CJK JP · JetBrains Mono Nerd Font · Inter |
+| Браузер | [Zen](https://zen-browser.app/) (за бажанням) |
 
-### Що нового у 3.0
+### Що нового у 3.1
 
 > [!NOTE]
-> **HyDE більше немає.** 3.0 — перший випуск на повністю власній основі: усе, що робив HyDE, тепер роблять мої
-> конфіги та скрипти, а сам HyDE видалено. Збірка, як і раніше, розрахована на мою машину — переносимість (інші
-> дистрибутиви, звичайне залізо x86, встановлення однією командою) заплановано на **3.1**.
+> **Перевірено на MacBook Pro M1 (Asahi).** Встановлювач написаний для будь-якої машини з Arch Linux / Arch Linux ARM,
+> але на іншому залізі ще не випробуваний — це наступна перевірка. Якщо щось не працює, відкрийте issue.
 
-**Власна основа замість HyDE**
-- **Hyprland за модулями:** `hyprland.lua` підключає `~/.config/hypr/yumi/` — `env`, `look`, `layout`, `binds`, `rules`,
-  `autostart`, `events` — і режими роботи у `workflows/` (default, editing, gaming, powersaver, snappy), які
-  перемикає `yumi-workflow`.
-- **Власний рушій кольорів** `yumi-colors`: шаблони в `~/.config/yumi/colors/templates` для Waybar, swaync, kitty, GTK,
-  Qt/Kvantum, VS Code, Discord, cava, Obsidian, підсвічування клавіатури та значків гучності.
-- **Waybar просто з пакета** з власним лейаутом (drop-in для systemd), власне налаштування zsh (`conf.d/yumi`),
-  власна обгортка над пакетним менеджером для аліасів `in` / `un` / `up`.
-- **Одна схема назв:** усі команди — `yumi-*`, бібліотеки — у `~/.local/lib/yumi/`, налаштування — у `~/.config/yumi/`.
-  `cc` знову компілятор C, а центр керування тепер `yumi-cc`.
+**Стиль «Острів»**
+- Суцільні капсули в кольорах шпалер на панелі, в усіх меню, на екрані блокування й на Touch Bar; печатка 弓 як знак
+  системи.
+- **Dynamic Island** посередині панелі: поточний трек, таймери й Pomodoro, завантаження, увімкнений мікрофон, зміни
+  мережі та VPN, AirPods — одне місце для всього, що відбувається просто зараз (`yumi-island`).
+- Нові меню: оновлення компактним віконцем, резервні копії (borg), швидкий перегляд, завантаження, YouTube.
 
-**Нове**
-- **Пульт** (`yumi-pult`, `SUPER+Space`) — вікно в дусі Spotlight/Raycast: програми, команди Yumi, файли (`fd`),
-  калькулятор, емодзі та пошук в інтернеті в одному списку, праворуч — попередній перегляд. Знаходить і слова,
-  набрані не в тій розкладці.
-- **Лікар** (`yumi-doctor`): 13 перевірок — служби, таймери, конфіг Hyprland, биті посилання, кольори шпалер, пам'ять
-  Waybar, диск, оновлення, знімки snapper, блокування pacman — людською мовою, з `--fix` і `--json`. І рядок
-  «Лікар» у меню «Система».
-- **Колекції шпалер:** підпапки `~/Pictures/Wallpapers` стають колекціями з прев'ю, кнопками в меню шпалер і
-  командою `yumi-wallpaper collection НАЗВА|off|get`. Копії заздалегідь підігнані під кожен екран, перехід іде з
-  частотою кожного монітора, а Waybar перефарбовується одразу перед переходом, а не після.
-- **Екран входу:** власна тема SDDM `yumi`, тло якої слідує за шпалерами (`yumi-sddm-sync`).
-- **Термінал:** kitty з CaskaydiaCove Nerd Font Mono, дворядкове запрошення starship у кольорах палітри терміналу,
-  zoxide (`z` / `zi`), atuin на `Ctrl+R` (лише локально, без синхронізації), аліаси eza. fastfetch з текстовим
-  значком (лук і стріла), розділами в рамках і японською цитатою дня з перекладом.
-- **Zen** — браузер за замовчуванням (Firefox видалено), у кольорах шпалер (`yumi-zen-theme`), включно зі сторінками налаштувань.
-- **А також:** повноекранний плеєр (`yumi-player-full`) і черга в плеєрі, сторінка пристроїв усередині центру
-  керування, сповіщення про заряд миші та AirPods, `yumi-update` з кешем на 30 хвилин (Waybar більше не запускає
-  `checkupdates` щоразу), тема значків тек Yumi-Folders, тема VS Code як окреме розширення.
+**Світло клавіш MacBook** (`yumi-light`)
+- Підсвітка клавіш стежить за датчиком освітлення: у темряві вмикається, на світлі гасне. У центрі керування є
+  повзунок і перемикач «авто», на Touch Bar — свій повзунок.
+- Клавіші «дихають», коли закінчилася фаза Pomodoro або сідає батарея. Ручне налаштування завжди головніше.
 
-**`rice`**
-- Прибрано `./rice hyde-patches` і `hyde-patches.sh`; `./rice reload` перезапускає Waybar через systemd;
-  `./rice doctor` починається з `yumi-doctor`.
-- Маніфест зібрано заново під нові шляхи (~300 файлів); `./rice check` перевіряє й `system/`.
-- `system-manifest.txt`: налаштування теми SDDM, курсор на екрані входу та значки Touch Bar (tiny-dfr).
-- Скрипти відкату 2.x до 3.0 не входять — вони лишилися у [`v2.5`](https://github.com/sonoyumi/yumi-rice/releases/tag/v2.5).
+**Перевірка здоров'я та патчі**
+- `yumi-doctor` тепер перевіряє ще й Touch Bar, Touch ID, закріплені пакети, екран входу, earlyoom і світло клавіш.
+- Патчі до вихідного коду, на яких працює стіл (утримання першого кадру й клавіатура на екрані блокування для
+  Hyprland, виправлення падіння awww), лежать у [`patches/`](patches/README.md).
+
+**Уся оболонка на Quickshell**
+- Панель, усі меню, спливні сповіщення й центр сповіщень, OSD (гучність, яскравість, підсвітка клавіатури, розкладка,
+  «не засинати»), екран блокування та вікно пароля polkit / sudo — це QML у `~/.config/quickshell/yumi`, що
+  запускається однією службою, `yumi-quickshell`. Логіка лишається в невеликих Python-бекендах
+  (`~/.local/lib/yumi/qs`), які спілкуються JSON; QML лише малює.
+- **Прибрано:** Waybar, swaync, rofi, GTK-меню та SDDM. hyprlock лишився тільки аварійним запасним — на випадок, якщо
+  Quickshell не відповість.
+- Кольори: шаблон `quickshell.dcol` → `~/.config/yumi/quickshell/colors.json`; оболонка перечитує його на льоту, тож
+  нові шпалери перефарбовують усе без перезапуску.
+
+**Стиль «Туш»**
+- Шрифти із засічками (Noto Serif + Noto Serif CJK JP), тонкі риски замість капсул, червона печатка-ханко 弓, анімації
+  без пружин.
+- На панелі: робочі столи 一 二 三…, підписи 核 (процесор), 憶 (пам'ять), 電 (батарея), 護 (VPN); меню-картки,
+  квадратна обкладинка в плеєрі.
+
+**Блокування, вхід, пароль**
+- **Екран блокування «Сувій»** з полем пароля **«Риска»**: одна лінія замість рамки.
+- **Екран входу на greetd** замість SDDM — той самий вигляд, Quickshell усередині невеликого сеансу sway. Під час
+  завантаження автовхід веде одразу в Hyprland і на екран блокування; після «Вийти» з'являється цей екран входу, а не
+  чорний екран.
+- **Вікно пароля** для polkit / sudo в тому ж стилі: `yumi-polkit-switch on|off|status` (`off` повертає
+  hyprpolkitagent).
+
+**Меню та шпалери**
+- Меню: Пульт (`SUPER+Space`), Програми й файли, Музика, Система, Wi-Fi, Bluetooth, VPN, Звук, Батарея й режими
+  живлення, Буфер обміну, Календар, Робочі столи, Процеси, Трей, Гарячі клавіші, Емодзі й гліфи, Пошук в інтернеті.
+  Центр керування (`SUPER+C`) — вузол із посиланнями на всі меню.
+- **Кільце сеансу** (`SUPER+Esc`, `SUPER+Delete`): блокування 鍵, сон 眠, вихід 出, перезавантаження 再, вимкнення 終 —
+  утримання для підтвердження.
+- **Музика** (`yumi-music`): YouTube Music + SoundCloud без облікового запису, плейлисти, черга, синхронний текст пісень.
+- **Віджет шпалер** (`SUPER+SHIFT+W`): карусель, стилі (теки) → шпалери, гортання стрілками, попередній перегляд
+  акцентного кольору під картинкою. Кольори всього робочого столу беруться зі шпалер (`yumi-colors`).
+
+**Переносність**
+- **`./install.sh`** — тільки Arch Linux / Arch Linux ARM: питання перед кожним кроком, спершу резервна копія,
+  `--dry-run` і `--uninstall`. Списки пакетів у `packages/`: `arch.txt` (обов'язкові), `aur.txt`, `optional.txt`
+  (групи, які можна пропустити), `mac.txt`.
+- **Mac-частини — окремі модулі за бажанням** (`RICE_MAC`): Touch Bar, обмеження заряду батареї, захист після кришки,
+  режим AirPods, заставка під час завантаження. Встановлюються тільки якщо знайдено MacBook. Touch ID — окремий
+  публічний репозиторій: [yumi-touchid](https://github.com/sonoyumi/yumi-touchid).
+- **Монітори:** вбудований екран — будь-який вихід з назвою `eDP*`; масштаби й назви — у
+  `~/.config/yumi/monitors.conf` (порожній файл — нормально: усе отримує 1.0).
+- **Ліцензія:** GPL-3.0-or-later замість MIT — рушій кольорів є портом wallbash із HyDE (GPL-3.0).
+  Див. [NOTICE](NOTICE).
 
 <details>
-<summary><b>Попередні версії: 2.5 · 2.1 · 2.0</b></summary>
+<summary><b>Попередні версії: 3.0 · 2.5 · 2.1 · 2.0</b></summary>
+
+#### 3.0
+
+Перший реліз на повністю власній основі, без HyDE: Hyprland модулями (`~/.config/hypr/yumi`), власний рушій кольорів
+`yumi-colors`, Пульт (`SUPER+Space`), `yumi-doctor`, колекції шпалер, тема SDDM, Zen як браузер. Повний опис — на
+[сторінці релізу 3.0](https://github.com/sonoyumi/yumi-rice/releases/tag/v3.0).
 
 #### Що нового у 2.5
 
@@ -950,7 +1056,6 @@ MIT, vedi [LICENSE](LICENSE).
   (`yumi-idle-action`), обмеження заряду батареї (`yumi-battery-limit`).
 - **Застосунки в кольорах шпалер** через хуки акценту: Zen, Firefox, Vesktop, вікна hyprtoolkit, Touch Bar; значки
   тек перефарбовуються в палітру (`recolor.py`, `yumi-folders-update`).
-- `ai` — невеликий локальний помічник для коду (Qwen2.5-Coder 1.5B через Ollama).
 
 **Чистіше**
 - `~/.local/bin`: 155 → ~90 файлів. 39 скриптів `*-uninstall`, 27 копій `.bak` і 17 тек бекапів перенесено до
@@ -1028,194 +1133,198 @@ MIT, vedi [LICENSE](LICENSE).
 - **А ще:** нагадування календаря (таймер systemd), трей без дубльованих аплетів, тема Telegram у кольорах шпалер,
   приховані зайві ярлики (`yumi-app-hide`), `SUPER+K` перемикає розкладку одразу на всіх клавіатурах, а екран
   блокування завжди відкривається з англійською розкладкою. Кожне доповнення має власний скрипт `*-uninstall`.
-
 </details>
 
 ### Можливості
 
-- **Waybar із пігулок:** власний лейаут `yumi`, кожна група модулів — окрема заокруглена пігулка. Ліворуч: логотип,
-  робочі столи, ЦП / ОЗП. У центрі: плеєр з обкладинкою та еквалайзером. Праворуч: центр керування й буфер обміну ·
-  розкладка, VPN, «не засинати», Wi-Fi, Bluetooth, звук (зі значками AirPods) · годинник, батарея, профіль живлення
-  й режим роботи · кнопка живлення. Пігулки оновлюються за подіями D-Bus (`yumi-bar-events`), а не опитуванням.
-- **Меню на GTK4 (`yumi-panel`):** один каркас — вікно layer-shell з розмиттям, кольорами шпалер і керуванням
-  з клавіатури. Wi-Fi, Bluetooth, звук, VPN, живлення й режими, сеанс, система (оновлення, знімки, ресурси, лікар),
-  процеси, миша, календар з нагадуваннями, буфер обміну, шпалери, робочі столи, трей, музика, програми, емодзі та
-  символи, пошук в інтернеті.
-- **Центр керування** (`yumi-menu-control`, GTK4): плитки, повзунки, картка плеєра, пристрої, «Не турбувати»
-  і журнал сповіщень. Спливні сповіщення малює swaync.
-- **Усе під колір шпалер:** `yumi-colors` і хуки `yumi-accent` перефарбовують Waybar, меню, swaync, kitty, GTK/Qt,
-  рамки вікон, VS Code, Telegram, Vesktop, Zen, Touch Bar, значки тек, екран блокування та SDDM.
-- **Екран блокування «Yumi Google»:** `yumi-hyprlock-build` збирає його із шаблону під кожен монітор — годинник,
-  цитати, плеєр, відомості про систему. Автовхід SDDM → Hyprland → одразу hyprlock; робочий стіл малюється *під* блокуванням.
-- **Музика:** `yumi-music` — YouTube Music + SoundCloud з обкладинками, плейлистами й текстами пісень; служба
-  `yumi-airpods` ставить паузу, коли виймаєш навушник, і віддає навушники айфону під час блокування.
-- **Життя на 8 ГБ:** zram розміром з ОЗП + файл підкачки; earlyoom закриває спершу вкладки браузера і ніколи —
-  робочий стіл; Zen живе у власній cgroup (`zen.slice`); `lim 1G <команда>` запускає тестові сервери в `dev.slice`
-  зі стелею пам'яті.
-- **Система:** тихе завантаження (приховане меню GRUB, `quiet loglevel=3`), знімки btrfs через snapper (snap-pac до й
-  після кожного pacman, `/home` щогодини), faillock, BlueZ Experimental для заряду навушників.
-- **Два монітори на M1:** зовнішній екран працює через DisplayPort alt mode по USB-C завдяки
-  [haripako/dp-altmode](https://github.com/haripako/dp-altmode). Столи 1–5 — на MacBook, 6–10 — на зовнішньому моніторі;
-  відключили монітор — вони переїжджають на ноутбук. Масштаби й назви моніторів — в одному файлі `~/.config/yumi/monitors.conf`.
-- **Logitech без G HUB:** меню миші з DPI та частотою опитування (Solaar); підсвічування клавіатури слідує за
-  шпалерами через сервер OpenRGB; Win і Alt поміняні лише на зовнішній клавіатурі; медіаклавіші — на `ALT+F9–F12`.
-- **Будь-яку зміну можна скасувати:** `./rice push` зберігає попередню версію кожного файлу, `./rice push-system`
-  застосовує `/etc` по одному файлу після знімка snapper, а доповнення відкочуються через `yumi-uninstall <модуль>`.
+- **Панель у стилі «Туш»:** ліворуч — печатка, робочі столи ієрогліфами, процесор і пам'ять; по центру — плеєр з
+  обкладинкою та еквалайзер cava з квадратиків; праворуч — центр керування, розкладка, VPN (тільки коли увімкнений),
+  «не засинати», Wi-Fi з назвою мережі, Bluetooth із числом пристроїв, звук, годинник, батарея та вимкнення. Пігулки
+  оновлюються за подіями D-Bus (`yumi-bar-events`), а не опитуванням.
+- **Меню на QML:** одна основа, відкрите лише одне меню, керування з клавіатури, закриваються по `Esc` або кліку поза
+  вікном.
+- **Сповіщення:** спливні вікна й центр сповіщень — список із `↑` `↓`, `Enter`, `Del`, `H` — сховати програму, `D` —
+  «Не турбувати», «Очистити» — другим натисканням.
+- **OSD** для гучності, мікрофона, яскравості, підсвітки клавіатури, розкладки й «не засинати».
+- **Екран блокування «Сувій»:** `yumi-lock` блокує через Quickshell; якщо той не відповів приблизно за 2 с,
+  підхоплює hyprlock. Під час завантаження робочий стіл малюється *під* блокуванням.
+- **Екран входу:** greetd + sway + той самий QML-екран; копія теми живе в `/var/lib/yumi-greeter` і йде за шпалерами
+  (`yumi-greeter-sync`).
+- **Усе йде за шпалерами:** `yumi-colors` і хуки в `~/.config/yumi/accent/hooks.d` перефарбовують оболонку, kitty,
+  GTK/Qt, рамки вікон, VS Code, Zen, Telegram, Vesktop, Obsidian, значки тек, підсвітку клавіатури та екран входу.
+- **Музика:** `yumi-music` — YouTube Music + SoundCloud з обкладинками, плейлистами й текстами пісень; `yumi-airpods`
+  ставить на паузу, коли виймаєш навушник.
+- **Життя на 8 ГБ:** zram розміром з RAM + swap-файл; earlyoom першими закриває вкладки браузера і ніколи — робочий
+  стіл; Zen працює у власній cgroup (`zen.slice`); `lim 1G <команда>` запускає тестові сервери в `dev.slice` з лімітом
+  пам'яті.
+- **Система:** тихе завантаження, знімки btrfs через snapper (група за бажанням: snap-pac до і після кожного pacman),
+  faillock, BlueZ Experimental для заряду навушників.
+- **Два монітори на MacBook M1:** зовнішній екран працює через USB-C у режимі DisplayPort alt mode завдяки
+  [haripako/dp-altmode](https://github.com/haripako/dp-altmode). Столи 1–5 — на MacBook, 6–10 — на зовнішньому
+  моніторі; відключиш його — вони переїдуть на ноутбук.
+- **Logitech без G HUB** (за бажанням): меню миші з DPI і частотою опитування (Solaar); підсвітка клавіатури йде за
+  акцентом панелі через сервер OpenRGB.
+- **Додатки для MacBook** (модулі за бажанням): шари й стилі Touch Bar
+  ([touchbard](https://github.com/0800tim/touchbard)), обмеження заряду, захист, що повертає вбудований екран після
+  кришки, Touch ID для sudo та екрана блокування ([yumi-touchid](https://github.com/sonoyumi/yumi-touchid),
+  встановлюється окремо).
+- **Будь-яку зміну можна скасувати:** `./install.sh --uninstall` повертає резервні копії, `./rice push` зберігає
+  попередню версію кожного файлу, а доповнення відкочуються командою `yumi-uninstall <модуль>`.
 
 ### Скриншоти
 
-https://github.com/user-attachments/assets/72154592-2090-4faa-a56b-40aeb462c0ba
-
-Відео: вікна, розкладки dwindle / master / scrolling, робочі столи, плеєр з текстом пісні, зміна шпалер. Решта — [у галереї англійського розділу](#screenshots).
+Уся галерея — [в англійському розділі](#screenshots): екран блокування та входу, панель, вікно пароля, центр
+керування, сповіщення, Пульт, музика, усі меню, віджет шпалер, два монітори.
 
 ### Клавіші й жести
 
 | Клавіші | Дія |
 |---|---|
 | `SUPER` + `Space` | Пульт: програми, команди, файли, калькулятор, емодзі, інтернет |
-| `SUPER` + `Esc`, `CTRL` + `ALT` + `Del` | Сеанс: блокування, сон, вихід, перезавантаження, вимкнення |
+| `SUPER` + `A` / `SUPER` + `SHIFT` + `E` | Програми / файли |
+| `SUPER` + `C` | Центр керування — посилання на всі меню |
+| `SUPER` + `CTRL` + `W` / `B` / `V` / `A` | Wi-Fi / Bluetooth / VPN / звук |
+| `SUPER` + `CTRL` + `E` / `T` / `Y` | Батарея й живлення / процеси / трей |
+| `SUPER` + `CTRL` + `C` / `N` / `K` | Календар / центр сповіщень / гарячі клавіші |
+| `SUPER` + `Esc`, `SUPER` + `Delete`, `CTRL` + `ALT` + `Del` | Кільце сеансу: блокування, сон, вихід, перезавантаження, вимкнення |
 | `SUPER` + `N` | Заблокувати екран |
-| `SUPER` + `M` / `SUPER` + `SHIFT` + `M` | Плеєр / медіатека |
+| `SUPER` + `M` / `SUPER` + `SHIFT` + `M` | Плеєр / музика |
 | `SUPER` + `V` | Буфер обміну |
 | `SUPER` + `TAB` | Робочі столи |
-| `SUPER` + `` ` `` | Меню системи |
-| `SUPER` + `A` | Програми |
-| `SUPER` + `,` / `SUPER` + `.` | Емодзі / символи |
-| `SUPER` + `SHIFT` + `W` | Вибір шпалер |
+| `SUPER` + `` ` `` | Меню «Система» |
+| `SUPER` + `,` / `SUPER` + `.` | Емодзі / гліфи |
+| `SUPER` + `SHIFT` + `/` | Пошук в інтернеті |
+| `SUPER` + `SHIFT` + `W` | Віджет шпалер |
 | `SUPER` + `ALT` + `←` / `→` | Попередні / наступні шпалери |
-| `SUPER` + `/` | Живлення й режими роботи |
-| `SUPER` + `ALT` + `↑` / `↓` | Наступний / попередній режим роботи |
+| `SUPER` + `ALT` + `↑` / `↓` | Наступний / попередній робочий режим |
 | `SUPER` + `K` | Розкладка на всіх клавіатурах |
-| `SUPER` + `F10` / `F11` / `F12`, `Print` | Скриншот: область / заморожений екран / монітор / усі монітори |
-| `ALT` + `F9`…`F12`, `ALT` + `Print` / `Scroll Lock` / `Pause` | Музика й гучність із зовнішньої клавіатури |
-| 3 пальці ← / → | Перемикання столів |
+| `SUPER` + `P` / `ALT` + `P` / `SHIFT` + `P`, `Print` | Знімок: область / заморожений екран / монітор / усі монітори |
+| `SUPER` + `ALT` + `Space` / `,` / `.` | Пуск-пауза / попередній / наступний трек |
+| `ALT` + `F9`…`F12`, `ALT` + `Print` / `Scroll Lock` / `Pause` | Медіа та гучність на зовнішній клавіатурі |
+| 3 пальці ← / → | Перемкнути робочий стіл |
 | 3 пальці ↓ | Огляд робочих столів |
+| 4 пальці | Фокус на вікно в напрямку свайпу |
 
-### Швидкий старт
+### Встановлення
 
 > [!WARNING]
-> Це конфіги **конкретної машини**: MacBook M1, Asahi, екран 2560×1600. HyDE більше не потрібен. На іншому залізі
-> беріть їх за основу й запозичуйте окремі частини; інсталятор для інших дистрибутивів і звичайного заліза
-> заплановано на 3.1. Системні файли (`system/`) застосовуйте лише свідомо.
+> **Тільки Arch Linux і Arch Linux ARM.** Перевірено на MacBook Pro M1 (Asahi); на іншому залізі з Arch ще не
+> випробувано — повідомляйте про проблеми. Системні файли в `/etc` (GRUB, zram, earlyoom, Bluetooth) — з моєї машини:
+> встановлювач питає про кожен, і якщо не впевнені — відповідайте «ні».
 
-Потрібен Hyprland ≥ 0.56 (Lua-конфіг) і пакети:
-
-```bash
-sudo pacman -S --needed hyprland hypridle hyprlock hyprsunset hyprpolkitagent hyprpicker uwsm \
-    waybar swaync awww kitty zsh starship fastfetch zoxide atuin eza fd jq cliphist wl-clipboard \
-    playerctl imagemagick inotify-tools bluez-utils power-profiles-daemon libnotify brightnessctl btop \
-    gtk4 gtk4-layer-shell python-gobject python-dbus python-requests pacman-contrib yt-dlp mpv cava \
-    grim slurp satty tesseract udiskie snapper snap-pac earlyoom zram-generator kvantum qt6ct \
-    ttf-cascadia-code-nerd ttf-jetbrains-mono-nerd noto-fonts-cjk solaar openrgb python-ytmusicapi wireproxy
-```
-
-З AUR: `zen-browser-bin`. Плагіни zsh: oh-my-zsh з `zsh-autosuggestions` і `zsh-syntax-highlighting`.
-
-```bash
+```zsh
 git clone https://github.com/sonoyumi/yumi-rice.git ~/Projects/yumi-rice
 cd ~/Projects/yumi-rice
-./rice diff            # що зміниться
-./rice push            # розкласти файли по ~ (старі версії — у ~/.local/state/rice-bak/)
-systemctl --user daemon-reload
-systemctl --user enable --now yumi-awww.service yumi-wallpaper.service yumi-bar-events.service \
-    yumi-tray.service yumi-notify-log.service yumi-hyprlock-bg.service yumi-calendar-remind.timer
-$EDITOR ~/.config/yumi/monitors.conf   # ваші монітори: масштаб інтерфейсу, назва
-yumi-wallpaper random  # картинки з ~/Pictures/Wallpapers (підпапки — колекції); кольори підтягнуться самі
-yumi-hyprlock-build    # зібрати екран блокування для моніторів з monitors.conf
-yumi-doctor            # перевірити, що все на місці
-./rice reload
-./rice push-system     # за бажанням: /etc, по одному файлу з підтвердженням
-~/.local/share/yumi-sddm/install.sh   # за бажанням: тема SDDM (відкат — uninstall.sh поруч)
+./install.sh --dry-run   # показати, що буде зроблено, нічого не змінюючи
+./install.sh             # встановлення: питання перед кожним кроком, спершу резервна копія
 ```
 
-У репозиторії замість домашнього шляху стоїть мітка `@HOME@`, а в автовході — `@USER@`: `./rice push` підставить
-ваші значення. Свій аватар покладіть у `~/.config/hypr/hyprlock/avatar.jpg`.
+Встановлювач ставить пакети з `packages/` (AUR через `paru` або `yay`, необов'язкові групи — на запит), копіює файли
+через `./rice push`, налаштовує екран входу greetd, служби користувача й вікно пароля. Далі покладіть кілька картинок у
+`~/Pictures/Wallpapers`, перезавантажтеся й запустіть `yumi-doctor`. Монітори: `~/.config/yumi/monitors.conf` (назви
+виходів — з `hyprctl monitors`); аватар екрана блокування: `~/.config/hypr/hyprlock/avatar.jpg`.
+
+Відкат: `./install.sh --uninstall` — повертає файли з резервних копій, вимикає служби та greetd і повертає попередній
+менеджер входу. Пакети видаляються тільки за окремою згодою.
+
+Покроково, з усіма питаннями й відомими обмеженнями: [INSTALL.md](INSTALL.md) (поки що російською).
 
 ### Скрипт `rice`
 
-Репозиторій — джерело істини, `rice` синхронізує його із системою.
+Репозиторій — джерело істини; `rice` синхронізує його із системою.
 
 | Команда | Що робить |
 |---|---|
 | `./rice pull` | Система → репозиторій |
 | `./rice diff [шлях]` | Чим система відрізняється від репозиторію |
-| `./rice push` | Репозиторій → `~` (з резервною копією попередніх версій) |
-| `./rice push-system` | Репозиторій → `/etc` (diff і підтвердження для кожного файлу, спершу знімок snapper) |
-| `./rice reload` | Перечитати Hyprland, Waybar, swaync, systemd --user |
+| `./rice push` | Репозиторій → `~` (зберігає попередні версії) |
+| `./rice push-system [фільтр]` | Репозиторій → `/etc` (diff і підтвердження для кожного файлу, спершу знімок snapper) |
+| `./rice files` | Які файли ставить `push` (з урахуванням `RICE_LOCAL` і `RICE_MAC`) |
+| `./rice reload` | Перечитати Hyprland, Quickshell, systemd --user |
 | `./rice add <шлях>` | Почати відстежувати файл |
-| `./rice doctor` | `yumi-doctor` і подробиці для репозиторію: служби, падіння, розбіжності, файли поза маніфестом |
-| `./rice check` | Перевірка репозиторію перед комітом: синтаксис, особисте, секрети (`--install-hook` — на кожен коміт) |
+| `./rice doctor` | `yumi-doctor` плюс подробиці репозиторію: служби, збої, розбіжності, файли поза маніфестом |
+| `./rice check` | Перевірка репозиторію перед комітом: синтаксис, особисті дані, секрети (`--install-hook` — на кожен коміт) |
 | `./rice gc [--apply]` | Прибирання: `__pycache__`, старі архіви `rice-bak`, `.bak` і відкати з `~/.local/bin` в архів (без `--apply` лише показує) |
-| `./rice drift [--notify [N]]` | Наскільки система відійшла від репозиторію (сповіщення понад N блоків) |
+| `./rice drift [--notify [N]]` | Наскільки система відійшла від репозиторію (сповіщення, якщо блоків більше N) |
 
-Особисті правки лежать поза репозиторієм, у `~/.config/rice-local/` (та сама структура, що в `home/`, плюс власний
-`manifest.txt`): `./rice` ставить їх замість публічних файлів, тож особисті зміни не потрапляють на GitHub.
-Особисті блоки всередині спільного файлу позначаються `yumi:private-begin/-end` і вирізаються `tools/publicize`.
-`RICE_LOCAL=off ./rice push` ставить чисту публічну версію.
+Особисті правки живуть поза репозиторієм у `~/.config/rice-local/` (та сама структура, що й `home/`, плюс власний
+`manifest.txt`): `./rice` ставить їх замість публічних файлів, тож приватні зміни ніколи не потрапляють на GitHub.
+Приватні блоки всередині спільного файлу позначені `yumi:private-begin/-end`, їх вирізає `tools/publicize`.
+`RICE_LOCAL=off ./rice push` ставить чисту публічну версію; `RICE_MAC=off` пропускає Mac-блок маніфесту.
 
-Робота: правка в `home/…` → `./rice push` → `./rice reload` → перевірити → `git commit`.
-Не сподобалося — `git checkout -- <файл>` і знову `./rice push`.
+Порядок роботи: правка в `home/…` → `./rice push` → `./rice reload` → перевірка → `git commit`.
+Не сподобалось — `git checkout -- <файл>` і знову `./rice push`.
 
 ### Структура проєкту
 
 ```
 yumi-rice/
+├── install.sh              # встановлювач (Arch / Arch ARM): --dry-run, --uninstall
+├── INSTALL.md              # встановлення крок за кроком
+├── packages/               # arch.txt, aur.txt, optional.txt (групи), mac.txt
 ├── home/
-│   ├── .config/hypr/       # hyprland.lua + yumi/ (модулі, режими роботи), hyprlock, hypridle
-│   ├── .config/yumi/       # monitors.conf, хуки акценту, шаблони кольорів, стилі меню й плеєра
-│   ├── .config/waybar/     # лейаут yumi.jsonc, модулі та стилі
-│   ├── .config/swaync/     # розкладки центру керування й стиль спливних сповіщень
+│   ├── .config/quickshell/yumi/  # оболонка: панель, меню, сповіщення, osd, lock, polkit, greeter.qml
+│   ├── .config/hypr/       # hyprland.lua + yumi/ (модулі, робочі режими), hypridle, запасний hyprlock
+│   ├── .config/yumi/       # monitors.conf, хуки акценту, шаблони кольорів, екран входу (greeter/sway.conf)
 │   ├── .config/systemd/    # служби й таймери yumi-*, dev.slice, zen.slice
 │   ├── .config/…           # kitty, zsh, starship, atuin, fastfetch, VS Code
-│   ├── .local/bin/         # команди yumi-*: меню, пульт, лікар, шпалери, кольори, плеєр…
-│   ├── .local/lib/yumi/    # panel (меню GTK4), bar (модулі Waybar), colors, tray, calendar, fetch…
-│   ├── .local/src/yumi-eq/ # CFFI-еквалайзер для Waybar (C)
-│   └── .local/share/       # тема SDDM, тема VS Code, помічники музики, дані пікера
-├── system/etc/             # GRUB, SDDM, zram, sysctl, earlyoom, BlueZ, faillock, курсор X11, tiny-dfr
+│   ├── .local/bin/         # команди yumi-*: блокування, шпалери, кольори, музика, doctor, greeter…
+│   ├── .local/lib/yumi/    # qs (бекенди меню), bar (скрипти панелі), colors, tray, calendar, fetch…
+│   └── .local/share/       # тема VS Code, помічники музики, значки тек, дані пікера
+├── system/etc/             # greetd + PAM, GRUB, zram, sysctl, earlyoom, BlueZ, faillock
+├── patches/                # патчі до вихідного коду: Hyprland, awww (див. patches/README.md)
 ├── assets/screenshots/
-├── manifest.txt            # які файли з ~ відстежуються
-├── system-manifest.txt     # які файли з /etc відстежуються
+├── manifest.txt            # відстежувані файли з ~ (Mac-частина між # @mac і # @end)
+├── system-manifest.txt     # відстежувані файли з /etc
 ├── rice                    # скрипт синхронізації
-└── tools/                  # publicize (публічна копія з особистої), check (перевірка перед комітом)
+├── NOTICE                  # автори й ліцензії сторонніх частин
+└── tools/                  # publicize (публічна копія з приватної), check (перевірка перед комітом)
 ```
 
-### Підводні камені: Hyprland 0.56 Lua та Asahi
+### Підводні камені: Hyprland 0.56 Lua, Quickshell та Asahi
 
-- Опції через крапку: `hyprctl getoption decoration.rounding`. Диспетчери — Lua:
-  `hyprctl dispatch 'hl.dsp.focus({ workspace = 3 })'`. `hyprctl keyword` не працює — `hyprctl eval 'hl.config({...})'`.
-- Масштаб має ділити роздільну здатність: `1.666667`, а не `1.67`.
-- Вбудований модуль Waybar `hyprland/language` не працює з Lua-Hyprland — потрібен власний.
-- swaync запускає команди без `XDG_RUNTIME_DIR` — `wpctl` повертає 0; повзункам потрібні явні `min_limit/max_limit`.
-- hyprlock: `$BACKGROUND_PATH` ненадійний (краще абсолютний шлях), `onclick` працює лише з `hide_cursor = false`,
-  `fadeOut, 0` прибирає сірий кадр після завантаження.
-- `hypridle.conf` підключає **всі** файли з `hypridle/` — будь-який бекап поруч перебиває ваш конфіг.
-- Деякі пакети кладуть у `/etc/sddm.conf.d/` порожній `[Autologin]` — називайте свій файл так, щоб він був останнім за абеткою (`zz-…`).
-- GRUB не пише `grubenv` на btrfs — без `GRUB_SAVEDEFAULT`. Порядок параметрів важливий: `quiet loglevel=3`.
-- На Asahi немає MGLRU; power-profiles-daemon має лише `balanced` і `power-saver`.
-- Сторінки 16K: образи з jemalloc, зібраним під 4K, падають — рятує `muvm`.
-- `MemoryHigh` без вільного свопу заморожує процес замість того, щоб закрити його, — використовуйте `MemoryMax`.
-- AirPods при подвійному завантаженні з macOS: `br-connection-key-missing` → видалити й спарити знову.
-- Solaar під час запуску застосовує збережені зони підсвітки і може вимкнути підсвітку клавіатури: позначте `led_control`
-  і `led_zone_*` як `ignore` у його конфігурації.
-- Режим `Direct` в OpenRGB на клавіатурі PRO пропускає клавіші, а порядок світлодіодів не збігається з розкладкою:
+- Опції через крапку: `hyprctl getoption decoration.rounding`. Диспетчери — на Lua:
+  `hyprctl dispatch 'hl.dsp.focus({ workspace = 3 })'`. `hyprctl keyword` не працює — використовуйте `hyprctl eval 'hl.config({...})'`.
+- Масштаб має ділити роздільність: `1.666667`, а не `1.67`.
+- `Hyprland --verify-config` **виконує** команди `exec` з конфігу, який перевіряє, — перевіряйте лише робочий конфіг,
+  не копію.
+- Quickshell: зупиняйте через `systemctl --user stop yumi-quickshell` або `qs kill -c yumi`, ніколи `pkill qs` — він
+  уб'є й тестові екземпляри. Стеження за файлами вимкнене: правки QML видно лише після
+  `systemctl --user restart yumi-quickshell`.
+- Не запускайте й не закривайте справжній екран блокування для перевірки: перервана розмова PAM для faillock — це
+  неправильний пароль (3 спроби → 10 хвилин, і sudo теж блокується). Є попередній перегляд:
+  `qs -c yumi ipc call lock preview`.
+- greetd читає `/etc/greetd/config.toml` лише під час свого запуску; `systemctl restart greetd` завершує поточний сеанс.
+- `hypridle.conf` підключає **кожен** файл у `hypridle/` — будь-яка резервна копія поруч перебиває ваш конфіг.
+- GRUB не вміє писати `grubenv` на btrfs — без `GRUB_SAVEDEFAULT`. Порядок параметрів важливий: `quiet loglevel=3`.
+- В Asahi немає MGLRU; power-profiles-daemon дає лише `balanced` і `power-saver`.
+- Сторінки 16K: образи з jemalloc, зібраним під 4K, падають — допомагає `muvm`. Сам Quickshell на сторінках 16K
+  працює нормально.
+- `MemoryHigh` без вільного свопу заморожує процес замість того, щоб його закрити, — використовуйте `MemoryMax`.
+- AirPods при подвійному завантаженні з macOS: `br-connection-key-missing` → видалити й спарувати знову.
+- Solaar під час запуску знову застосовує збережені LED-зони й може вимкнути підсвітку клавіатури: позначте
+  `led_control` і `led_zone_*` як `ignore` у його конфігу.
+- Режим `Direct` в OpenRGB на клавіатурі PRO губить клавіші, а порядок світлодіодів не збігається з розкладкою:
   надійний `Static`.
-- Звичайний `openrgb` за кожного виклику кілька секунд заново опитує всі USB-пристрої, і Solaar тим часом не може
-  прочитати мишу: запускати `openrgb --server` один раз під час входу, а колір надсилати через `--client`.
-- Монітор, під'єднаний після входу, отримує чорне тло: перемальовуйте шпалери за подією `monitor.added`.
-- dp-altmode: якщо від'єднати монітор і приспати ноутбук, наступне під'єднання може не спрацювати до перезавантаження
+- Звичайний `openrgb` за кожного виклику кілька секунд опитує всі USB-пристрої, і в цей час Solaar не може прочитати
+  мишу: запускайте `openrgb --server` один раз під час входу, а колір надсилайте через `--client`.
+- Монітор, підключений після входу, отримує чорне тло: перемальовуйте шпалери за подією `monitor.added`.
+- dp-altmode: якщо відключити монітор і приспати ноутбук, наступне підключення може не спрацювати до перезавантаження
   (відомий відкритий баг). Після оновлення ядра патч треба перезібрати.
-- `Hyprland --verify-config` **виконує** команди `exec` з конфігу, який перевіряє, — перевіряйте лише живий конфіг, не копію.
-- atuin: порожній `sync_address = ""` ламає його — щоб усе було локально, ставте `auto_sync = false` і не вказуйте адресу.
+- atuin: порожній `sync_address = ""` ламає його — щоб усе було локально, ставте `auto_sync = false` і не вказуйте
+  адресу.
 
 ### Подяки
 
-[HyDE](https://github.com/HyDE-Project/HyDE) (основа версій 1.0–2.5; з нього виросли шаблони кольорів wallbash) ·
-[Hyprland](https://hyprland.org/) · [Asahi Linux](https://asahilinux.org/) ·
-[Hyprlock-Dots](https://github.com/mahaveergurjar/Hyprlock-Dots) (розкладка екрана блокування) ·
-[swaync](https://github.com/ErikReider/SwayNotificationCenter) · [Waybar](https://github.com/Alexays/Waybar) ·
-[Zen](https://zen-browser.app/) · [starship](https://starship.rs/) · [zoxide](https://github.com/ajeetdsouza/zoxide) · [atuin](https://atuin.sh/) · [fastfetch](https://github.com/fastfetch-cli/fastfetch) ·
-[rofi](https://github.com/davatorium/rofi) ·
-[dp-altmode](https://github.com/haripako/dp-altmode) від haripako (DisplayPort по USB-C на M1) · [Solaar](https://github.com/pwr-Solaar/Solaar) · [OpenRGB](https://openrgb.org/)
+[Hyprland](https://hyprland.org/) · [Quickshell](https://quickshell.org/) · [Asahi Linux](https://asahilinux.org/) ·
+[HyDE](https://github.com/HyDE-Project/HyDE) (основа версій 1.0–2.5; `yumi-colors` — порт його wallbash) ·
+[greetd](https://git.sr.ht/~kennylevinsen/greetd) · [sway](https://swaywm.org/) (екран входу) ·
+[touchbard](https://github.com/0800tim/touchbard) (Touch Bar) · [Zen](https://zen-browser.app/) ·
+[starship](https://starship.rs/) · [zoxide](https://github.com/ajeetdsouza/zoxide) · [atuin](https://atuin.sh/) ·
+[fastfetch](https://github.com/fastfetch-cli/fastfetch) ·
+[dp-altmode](https://github.com/haripako/dp-altmode) від haripako (DisplayPort через USB-C на M1) ·
+[Solaar](https://github.com/pwr-Solaar/Solaar) · [OpenRGB](https://openrgb.org/) ·
+шрифти Noto Serif, Noto Serif CJK JP, Inter, JetBrains Mono
 
 ### Автор
 
@@ -1229,7 +1338,9 @@ yumi-rice/
 
 ### Ліцензія
 
-MIT — див. [LICENSE](LICENSE).
+GPL-3.0-or-later — див. [LICENSE](LICENSE). Сторонні частини перелічені в [NOTICE](NOTICE): wallbash із HyDE
+(GPL-3.0), touchbard (MIT), шрифти (SIL OFL 1.1, ставляться з репозиторіїв, у комплект не входять).
+Версії до 3.0 включно виходили під ліцензією MIT.
 
 ---
 
@@ -1239,66 +1350,100 @@ MIT — див. [LICENSE](LICENSE).
 
 **[🇬🇧 English](#en)** · **[🇮🇹 Italiano](#it)** · **[🇺🇦 Українська](#uk)** · **🇷🇺 Русский**
 
-Мой рабочий стол Hyprland на MacBook Pro M1 с Asahi Linux: Waybar из «пилюль», меню на GTK4
-с размытием и цветами обоев, центр управления в стиле macOS, пульт в духе Spotlight, экран блокировки с плеером —
-и всё это перекрашивается под текущие обои. С версии 3.0 всё работает на своей основе, без HyDE. А ещё скрипт,
-который держит репозиторий и систему синхронными и сохраняет резервную копию каждого файла, который меняет.
+Мой рабочий стол Hyprland на MacBook Pro M1 с Asahi Linux. С версии 3.1 вся оболочка — бар, меню, уведомления,
+экранные индикаторы, экран блокировки, экран входа и окно пароля — написана на QML в
+[Quickshell](https://quickshell.org/), в стиле «Тушь»: шрифты с засечками, японские подписи, красная печать-ханко.
+Всё берёт цвета из текущих обоев. А ещё установщик для Arch Linux / Arch Linux ARM и скрипт, который держит
+репозиторий и систему синхронными и сохраняет резервную копию каждого файла, который меняет.
 
 | | |
 |---|---|
-| Железо | MacBook Pro 13" M1 (2020), 8 ГБ RAM, экран 2560×1600, масштаб 1.666667 · второй монитор MSI G27C3F 1920×1080 @ 180 Гц через USB-C · клавиатура Logitech PRO и мышь PRO X 2 |
+| Железо | MacBook Pro 13" M1 (2020), 8 ГБ RAM, экран 2560×1600, масштаб 1.666667 · второй монитор MSI G27C3F 1920×1080 через USB-C · клавиатура Logitech PRO и мышь PRO X 2 |
 | ОС | Arch Linux ARM ([Asahi](https://asahilinux.org/)), ядро `linux-asahi`, страницы памяти 16K, btrfs |
-| Рабочий стол | Hyprland 0.56 с Lua-конфигом, своя основа `~/.config/hypr/yumi` (без HyDE), запуск через uwsm |
-| Бар / уведомления / меню | Waybar · swaync · GTK4 (yumi-panel) |
-| Блокировка / простой / обои / вход | hyprlock · hypridle · awww · SDDM со своей темой |
+| Рабочий стол | Hyprland 0.56 с Lua-конфигом, своя основа `~/.config/hypr/yumi` |
+| Бар / уведомления / меню / OSD | Quickshell (QML) — одна служба, `yumi-quickshell` |
+| Блокировка / вход / пароль | экран блокировки Quickshell · greetd с экраном входа на Quickshell · агент polkit на Quickshell |
+| Простой / обои | hypridle · awww |
 | Терминал / оболочка / шрифт | kitty · zsh + starship · CaskaydiaCove Nerd Font Mono |
-| Браузер | [Zen](https://zen-browser.app/) |
+| Шрифты оболочки | Noto Serif · Noto Serif CJK JP · JetBrains Mono Nerd Font · Inter |
+| Браузер | [Zen](https://zen-browser.app/) (по желанию) |
 
-### Что нового в 3.0
+### Что нового в 3.1
 
 > [!NOTE]
-> **HyDE больше нет.** 3.0 — первый выпуск на полностью своей основе: всё, что делал HyDE, теперь делают мои
-> конфиги и скрипты, а сам HyDE удалён. Сборка по-прежнему рассчитана на мою машину — переносимость (другие
-> дистрибутивы, обычное железо x86, установка одной командой) запланирована на **3.1**.
+> **Проверено на MacBook Pro M1 (Asahi).** Установщик написан для любой машины с Arch Linux / Arch Linux ARM, но на
+> другом железе ещё не опробован — это следующая проверка. Если что-то не работает, откройте issue.
 
-**Своя основа вместо HyDE**
-- **Hyprland по модулям:** `hyprland.lua` подключает `~/.config/hypr/yumi/` — `env`, `look`, `layout`, `binds`, `rules`,
-  `autostart`, `events` — и режимы работы в `workflows/` (default, editing, gaming, powersaver, snappy), которые
-  переключает `yumi-workflow`.
-- **Свой движок цветов** `yumi-colors`: шаблоны в `~/.config/yumi/colors/templates` для Waybar, swaync, kitty, GTK,
-  Qt/Kvantum, VS Code, Discord, cava, Obsidian, подсветки клавиатуры и значков громкости.
-- **Waybar прямо из пакета** со своим лейаутом (drop-in для systemd), своя настройка zsh (`conf.d/yumi`), своя обёртка
-  над пакетным менеджером для алиасов `in` / `un` / `up`.
-- **Одна схема имён:** все команды — `yumi-*`, библиотеки — в `~/.local/lib/yumi/`, настройки — в `~/.config/yumi/`.
-  `cc` снова компилятор C, а центр управления теперь `yumi-cc`.
+**Стиль «Остров»**
+- Сплошные капсулы в цветах обоев на баре, во всех меню, на экране блокировки и на Touch Bar; печать 弓 как знак
+  системы.
+- **Dynamic Island** посередине бара: текущий трек, таймеры и Pomodoro, загрузки, включённый микрофон, смена сети
+  и VPN, AirPods — одно место для всего, что происходит прямо сейчас (`yumi-island`).
+- Новые меню: обновления компактным окошком, резервные копии (borg), быстрый просмотр, загрузки, YouTube.
 
-**Новое**
-- **Пульт** (`yumi-pult`, `SUPER+Space`) — окно в духе Spotlight/Raycast: программы, команды Yumi, файлы (`fd`),
-  калькулятор, эмодзи и поиск в интернете в одном списке, справа — предпросмотр. Находит и слова, набранные не в той раскладке.
-- **Доктор** (`yumi-doctor`): 13 проверок — службы, таймеры, конфиг Hyprland, битые ссылки, цвета обоев, память
-  Waybar, диск, обновления, снимки snapper, блокировка pacman — человеческим языком, с `--fix` и `--json`. И строка
-  «Доктор» в меню «Система».
-- **Коллекции обоев:** подпапки `~/Pictures/Wallpapers` становятся коллекциями с превью, кнопками в меню обоев и
-  командой `yumi-wallpaper collection ИМЯ|off|get`. Копии заранее подогнаны под каждый экран, переход идёт с частотой
-  каждого монитора, а Waybar перекрашивается прямо перед переходом, а не после.
-- **Экран входа:** своя тема SDDM `yumi`, фон которой следует за обоями (`yumi-sddm-sync`).
-- **Терминал:** kitty с CaskaydiaCove Nerd Font Mono, двухстрочное приглашение starship в цветах палитры терминала,
-  zoxide (`z` / `zi`), atuin на `Ctrl+R` (только локально, без синхронизации), алиасы eza. fastfetch с текстовым
-  значком (лук и стрела), разделами в рамках и японской цитатой дня с переводом.
-- **Zen** — браузер по умолчанию (Firefox удалён), в цветах обоев (`yumi-zen-theme`), включая страницы настроек.
-- **А также:** полноэкранный плеер (`yumi-player-full`) и очередь в плеере, страница устройств внутри центра
-  управления, уведомления о заряде мыши и AirPods, `yumi-update` с кэшем на 30 минут (Waybar больше не гоняет
-  `checkupdates` каждый раз), тема значков папок Yumi-Folders, тема VS Code как отдельное расширение.
+**Свет клавиш MacBook** (`yumi-light`)
+- Подсветка клавиш следит за датчиком освещённости: в темноте включается, на свету гаснет. В центре управления есть
+  ползунок и переключатель «авто», на Touch Bar — свой ползунок.
+- Клавиши «дышат», когда закончилась фаза Pomodoro или садится батарея. Ручная настройка всегда главнее.
 
-**`rice`**
-- Убраны `./rice hyde-patches` и `hyde-patches.sh`; `./rice reload` перезапускает Waybar через systemd;
-  `./rice doctor` начинается с `yumi-doctor`.
-- Манифест собран заново под новые пути (~300 файлов); `./rice check` проверяет и `system/`.
-- `system-manifest.txt`: настройка темы SDDM, курсор на экране входа и значки Touch Bar (tiny-dfr).
-- Скрипты откатов 2.x в 3.0 не входят — они остались в [`v2.5`](https://github.com/sonoyumi/yumi-rice/releases/tag/v2.5).
+**Проверка здоровья и патчи**
+- `yumi-doctor` теперь проверяет ещё и Touch Bar, Touch ID, закреплённые пакеты, экран входа, earlyoom и свет клавиш.
+- Патчи к исходному коду, на которых работает стол (удержание первого кадра и клавиатура на экране блокировки для
+  Hyprland, исправление падения awww), лежат в [`patches/`](patches/README.md).
+
+**Вся оболочка на Quickshell**
+- Бар, все меню, всплывающие уведомления и центр уведомлений, OSD (громкость, яркость, подсветка клавиатуры,
+  раскладка, «не засыпать»), экран блокировки и окно пароля polkit / sudo — это QML в `~/.config/quickshell/yumi`,
+  который запускается одной службой, `yumi-quickshell`. Логика остаётся в небольших Python-бэкендах
+  (`~/.local/lib/yumi/qs`), которые общаются JSON; QML только рисует.
+- **Убраны:** Waybar, swaync, rofi, GTK-меню и SDDM. hyprlock остался только аварийным запасным — на случай, если
+  Quickshell не ответит.
+- Цвета: шаблон `quickshell.dcol` → `~/.config/yumi/quickshell/colors.json`; оболочка перечитывает его на лету, так что
+  новые обои перекрашивают всё без перезапуска.
+
+**Стиль «Тушь»**
+- Шрифты с засечками (Noto Serif + Noto Serif CJK JP), тонкие черты вместо капсул, красная печать-ханко 弓, анимации
+  без пружин.
+- В баре: рабочие столы 一 二 三…, подписи 核 (процессор), 憶 (память), 電 (батарея), 護 (VPN); меню-карточки,
+  квадратная обложка в плеере.
+
+**Блокировка, вход, пароль**
+- **Экран блокировки «Свиток»** с полем пароля **«Черта»**: одна линия вместо рамки.
+- **Экран входа на greetd** вместо SDDM — тот же вид, Quickshell внутри небольшого сеанса sway. При загрузке автовход
+  ведёт сразу в Hyprland и на экран блокировки; после «Выйти» появляется этот экран входа, а не чёрный экран.
+- **Окно пароля** для polkit / sudo в том же стиле: `yumi-polkit-switch on|off|status` (`off` возвращает
+  hyprpolkitagent).
+
+**Меню и обои**
+- Меню: Пульт (`SUPER+Space`), Программы и файлы, Музыка, Система, Wi-Fi, Bluetooth, VPN, Звук, Батарея и режимы
+  питания, Буфер обмена, Календарь, Рабочие столы, Процессы, Трей, Горячие клавиши, Эмодзи и глифы, Поиск в интернете.
+  Центр управления (`SUPER+C`) — узел со ссылками на все меню.
+- **Кольцо сеанса** (`SUPER+Esc`, `SUPER+Delete`): блокировка 鍵, сон 眠, выход 出, перезагрузка 再, выключение 終 —
+  удержание для подтверждения.
+- **Музыка** (`yumi-music`): YouTube Music + SoundCloud без учётной записи, плейлисты, очередь, синхронный текст песен.
+- **Виджет обоев** (`SUPER+SHIFT+W`): карусель, стили (папки) → обои, листание стрелками, предпросмотр акцентного
+  цвета под картинкой. Цвета всего рабочего стола берутся из обоев (`yumi-colors`).
+
+**Переносимость**
+- **`./install.sh`** — только Arch Linux / Arch Linux ARM: вопрос перед каждым шагом, сначала резервная копия,
+  `--dry-run` и `--uninstall`. Списки пакетов в `packages/`: `arch.txt` (обязательные), `aur.txt`, `optional.txt`
+  (группы, которые можно пропустить), `mac.txt`.
+- **Mac-части — отдельные модули по желанию** (`RICE_MAC`): Touch Bar, ограничение заряда батареи, защита после
+  крышки, режим AirPods, заставка при загрузке. Ставятся, только если найден MacBook. Touch ID — отдельный публичный
+  репозиторий: [yumi-touchid](https://github.com/sonoyumi/yumi-touchid).
+- **Мониторы:** встроенный экран — любой выход с именем `eDP*`; масштабы и названия — в `~/.config/yumi/monitors.conf`
+  (пустой файл — нормально: всё получает 1.0).
+- **Лицензия:** GPL-3.0-or-later вместо MIT — движок цветов является портом wallbash из HyDE (GPL-3.0).
+  См. [NOTICE](NOTICE).
 
 <details>
-<summary><b>Прошлые версии: 2.5 · 2.1 · 2.0</b></summary>
+<summary><b>Прошлые версии: 3.0 · 2.5 · 2.1 · 2.0</b></summary>
+
+#### 3.0
+
+Первый релиз на полностью своей основе, без HyDE: Hyprland модулями (`~/.config/hypr/yumi`), свой движок цветов
+`yumi-colors`, Пульт (`SUPER+Space`), `yumi-doctor`, коллекции обоев, тема SDDM, Zen как браузер. Полное описание — на
+[странице релиза 3.0](https://github.com/sonoyumi/yumi-rice/releases/tag/v3.0).
 
 #### Что нового в 2.5
 
@@ -1322,7 +1467,6 @@ MIT — див. [LICENSE](LICENSE).
   (`yumi-idle-action`), ограничение заряда батареи (`yumi-battery-limit`).
 - **Приложения в цветах обоев** через хуки акцента: Zen, Firefox, Vesktop, окна hyprtoolkit, Touch Bar; значки папок
   перекрашиваются в палитру (`recolor.py`, `yumi-folders-update`).
-- `ai` — маленький локальный помощник по коду (Qwen2.5-Coder 1.5B через Ollama).
 
 **Чище**
 - `~/.local/bin`: 155 → ~90 файлов. 39 скриптов `*-uninstall`, 27 копий `.bak` и 17 папок бэкапов переехали в
@@ -1401,194 +1545,199 @@ MIT — див. [LICENSE](LICENSE).
 - **А ещё:** напоминания календаря (таймер systemd), трей без дублирующихся апплетов, тема Telegram в цветах обоев,
   скрытие лишних ярлыков (`yumi-app-hide`), `SUPER+K` переключает раскладку сразу на всех клавиатурах, а экран
   блокировки всегда открывается с английской раскладкой. У каждой доработки свой скрипт `*-uninstall`.
-
 </details>
 
 ### Возможности
 
-- **Waybar из пилюль:** свой лейаут `yumi`, каждая группа модулей — отдельная скруглённая пилюля. Слева: логотип,
-  рабочие столы, ЦП / ОЗУ. В центре: плеер с обложкой и эквалайзером. Справа: центр управления и буфер обмена ·
-  раскладка, VPN, «не засыпать», Wi-Fi, Bluetooth, звук (со значками AirPods) · часы, батарея, профиль питания и режим
-  работы · кнопка питания. Пилюли обновляются по событиям D-Bus (`yumi-bar-events`), а не опросом.
-- **Меню на GTK4 (`yumi-panel`):** один каркас — окно layer-shell с размытием, цветами обоев и управлением
-  с клавиатуры. Wi-Fi, Bluetooth, звук, VPN, питание и режимы, сеанс, система (обновления, снимки, ресурсы, доктор),
-  процессы, мышь, календарь с напоминаниями, буфер обмена, обои, рабочие столы, трей, музыка, программы, эмодзи и
-  символы, поиск в интернете.
-- **Центр управления** (`yumi-menu-control`, GTK4): плитки, ползунки, карточка плеера, устройства, «Не беспокоить»
-  и журнал уведомлений. Всплывающие уведомления рисует swaync.
-- **Всё под цвет обоев:** `yumi-colors` и хуки `yumi-accent` перекрашивают Waybar, меню, swaync, kitty, GTK/Qt,
-  рамки окон, VS Code, Telegram, Vesktop, Zen, Touch Bar, значки папок, экран блокировки и SDDM.
-- **Экран блокировки «Yumi Google»:** `yumi-hyprlock-build` собирает его из шаблона под каждый монитор — часы,
-  цитаты, плеер, сведения о системе. Автовход SDDM → Hyprland → сразу hyprlock; рабочий стол рисуется *под* блокировкой.
-- **Музыка:** `yumi-music` — YouTube Music + SoundCloud с обложками, плейлистами и текстами песен; служба
-  `yumi-airpods` ставит паузу, когда вынимаешь наушник, и отдаёт наушники айфону при блокировке.
-- **Жизнь на 8 ГБ:** zram размером с ОЗУ + файл подкачки; earlyoom закрывает сначала вкладки браузера и никогда —
-  рабочий стол; Zen живёт в своей cgroup (`zen.slice`); `lim 1G <команда>` запускает тестовые серверы в `dev.slice`
-  с потолком памяти.
-- **Система:** тихая загрузка (скрытое меню GRUB, `quiet loglevel=3`), снимки btrfs через snapper (snap-pac до и
-  после каждого pacman, `/home` каждый час), faillock, BlueZ Experimental для заряда наушников.
-- **Два монитора на M1:** внешний экран работает через DisplayPort alt mode по USB-C благодаря
+- **Бар в стиле «Тушь»:** слева — печать, рабочие столы иероглифами, процессор и память; в центре — плеер с обложкой
+  и эквалайзер cava из квадратиков; справа — центр управления, раскладка, VPN (только когда включён), «не засыпать»,
+  Wi-Fi с именем сети, Bluetooth с числом устройств, звук, часы, батарея и выключение. Пилюли обновляются по событиям
+  D-Bus (`yumi-bar-events`), а не опросом.
+- **Меню на QML:** одна основа, открыто только одно меню, управление с клавиатуры, закрываются по `Esc` или щелчку
+  вне окна.
+- **Уведомления:** всплывающие окна и центр уведомлений — список с `↑` `↓`, `Enter`, `Del`, `H` — скрыть программу,
+  `D` — «Не беспокоить», «Очистить» — вторым нажатием.
+- **OSD** для громкости, микрофона, яркости, подсветки клавиатуры, раскладки и «не засыпать».
+- **Экран блокировки «Свиток»:** `yumi-lock` блокирует через Quickshell; если тот не ответил примерно за 2 с,
+  подхватывает hyprlock. При загрузке рабочий стол рисуется *под* блокировкой.
+- **Экран входа:** greetd + sway + тот же QML-экран; копия темы живёт в `/var/lib/yumi-greeter` и следует за обоями
+  (`yumi-greeter-sync`).
+- **Всё следует за обоями:** `yumi-colors` и хуки в `~/.config/yumi/accent/hooks.d` перекрашивают оболочку, kitty,
+  GTK/Qt, рамки окон, VS Code, Zen, Telegram, Vesktop, Obsidian, значки папок, подсветку клавиатуры и экран входа.
+- **Музыка:** `yumi-music` — YouTube Music + SoundCloud с обложками, плейлистами и текстами песен; `yumi-airpods`
+  ставит на паузу, когда вынимаешь наушник.
+- **Жизнь на 8 ГБ:** zram размером с RAM + swap-файл; earlyoom первыми закрывает вкладки браузера и никогда — рабочий
+  стол; Zen работает в своей cgroup (`zen.slice`); `lim 1G <команда>` запускает тестовые серверы в `dev.slice` с
+  лимитом памяти.
+- **Система:** тихая загрузка, снимки btrfs через snapper (группа по желанию: snap-pac до и после каждого pacman),
+  faillock, BlueZ Experimental для заряда наушников.
+- **Два монитора на MacBook M1:** внешний экран работает через USB-C в режиме DisplayPort alt mode благодаря
   [haripako/dp-altmode](https://github.com/haripako/dp-altmode). Столы 1–5 — на MacBook, 6–10 — на внешнем мониторе;
-  отключили монитор — они переезжают на ноутбук. Масштабы и имена мониторов — в одном файле `~/.config/yumi/monitors.conf`.
-- **Logitech без G HUB:** меню мыши с DPI и частотой опроса (Solaar); подсветка клавиатуры следует за обоями через
-  сервер OpenRGB; Win и Alt поменяны только на внешней клавиатуре; медиаклавиши — на `ALT+F9–F12`.
-- **Любую правку можно откатить:** `./rice push` хранит прежнюю версию каждого файла, `./rice push-system`
-  применяет `/etc` по одному файлу после снимка snapper, а доработки откатываются через `yumi-uninstall <модуль>`.
+  отключишь его — они переедут на ноутбук.
+- **Logitech без G HUB** (по желанию): меню мыши с DPI и частотой опроса (Solaar); подсветка клавиатуры следует за
+  акцентом бара через сервер OpenRGB.
+- **Дополнения для MacBook** (модули по желанию): слои и стили Touch Bar
+  ([touchbard](https://github.com/0800tim/touchbard)), ограничение заряда, защита, которая возвращает встроенный экран
+  после крышки, Touch ID для sudo и экрана блокировки ([yumi-touchid](https://github.com/sonoyumi/yumi-touchid),
+  ставится отдельно).
+- **Любое изменение можно отменить:** `./install.sh --uninstall` возвращает резервные копии, `./rice push` хранит
+  прежнюю версию каждого файла, а дополнения откатываются командой `yumi-uninstall <модуль>`.
 
 ### Скриншоты
 
-https://github.com/user-attachments/assets/72154592-2090-4faa-a56b-40aeb462c0ba
-
-Видео: окна, раскладки dwindle / master / scrolling, рабочие столы, плеер с текстом песни, смена обоев. Остальное — [в галерее английского раздела](#screenshots).
+Вся галерея — [в английском разделе](#screenshots): экран блокировки и входа, бар, окно пароля, центр управления,
+уведомления, Пульт, музыка, все меню, виджет обоев, два монитора.
 
 ### Клавиши и жесты
 
 | Клавиши | Действие |
 |---|---|
 | `SUPER` + `Space` | Пульт: программы, команды, файлы, калькулятор, эмодзи, интернет |
-| `SUPER` + `Esc`, `CTRL` + `ALT` + `Del` | Сеанс: блокировка, сон, выход, перезагрузка, выключение |
+| `SUPER` + `A` / `SUPER` + `SHIFT` + `E` | Программы / файлы |
+| `SUPER` + `C` | Центр управления — ссылки на все меню |
+| `SUPER` + `CTRL` + `W` / `B` / `V` / `A` | Wi-Fi / Bluetooth / VPN / звук |
+| `SUPER` + `CTRL` + `E` / `T` / `Y` | Батарея и питание / процессы / трей |
+| `SUPER` + `CTRL` + `C` / `N` / `K` | Календарь / центр уведомлений / горячие клавиши |
+| `SUPER` + `Esc`, `SUPER` + `Delete`, `CTRL` + `ALT` + `Del` | Кольцо сеанса: блокировка, сон, выход, перезагрузка, выключение |
 | `SUPER` + `N` | Заблокировать экран |
-| `SUPER` + `M` / `SUPER` + `SHIFT` + `M` | Плеер / медиатека |
+| `SUPER` + `M` / `SUPER` + `SHIFT` + `M` | Плеер / музыка |
 | `SUPER` + `V` | Буфер обмена |
 | `SUPER` + `TAB` | Рабочие столы |
-| `SUPER` + `` ` `` | Меню системы |
-| `SUPER` + `A` | Программы |
-| `SUPER` + `,` / `SUPER` + `.` | Эмодзи / символы |
-| `SUPER` + `SHIFT` + `W` | Выбор обоев |
+| `SUPER` + `` ` `` | Меню «Система» |
+| `SUPER` + `,` / `SUPER` + `.` | Эмодзи / глифы |
+| `SUPER` + `SHIFT` + `/` | Поиск в интернете |
+| `SUPER` + `SHIFT` + `W` | Виджет обоев |
 | `SUPER` + `ALT` + `←` / `→` | Предыдущие / следующие обои |
-| `SUPER` + `/` | Питание и режимы работы |
-| `SUPER` + `ALT` + `↑` / `↓` | Следующий / предыдущий режим работы |
+| `SUPER` + `ALT` + `↑` / `↓` | Следующий / предыдущий рабочий режим |
 | `SUPER` + `K` | Раскладка на всех клавиатурах |
-| `SUPER` + `F10` / `F11` / `F12`, `Print` | Скриншот: область / замороженный экран / монитор / все мониторы |
-| `ALT` + `F9`…`F12`, `ALT` + `Print` / `Scroll Lock` / `Pause` | Музыка и громкость с внешней клавиатуры |
-| 3 пальца ← / → | Переключение столов |
+| `SUPER` + `P` / `ALT` + `P` / `SHIFT` + `P`, `Print` | Снимок: область / замороженный экран / монитор / все мониторы |
+| `SUPER` + `ALT` + `Space` / `,` / `.` | Пуск-пауза / предыдущий / следующий трек |
+| `ALT` + `F9`…`F12`, `ALT` + `Print` / `Scroll Lock` / `Pause` | Медиа и громкость на внешней клавиатуре |
+| 3 пальца ← / → | Переключить рабочий стол |
 | 3 пальца ↓ | Обзор рабочих столов |
+| 4 пальца | Фокус на окно в сторону свайпа |
 
-### Быстрый старт
+### Установка
 
 > [!WARNING]
-> Это конфиги **конкретной машины**: MacBook M1, Asahi, экран 2560×1600. HyDE больше не нужен. На другом железе
-> берите их за основу и заимствуйте отдельные части; установщик для других дистрибутивов и обычного железа
-> запланирован на 3.1. Системные файлы (`system/`) применяйте только осознанно.
+> **Только Arch Linux и Arch Linux ARM.** Проверено на MacBook Pro M1 (Asahi); на другом железе с Arch ещё не
+> опробовано — сообщайте о проблемах. Системные файлы в `/etc` (GRUB, zram, earlyoom, Bluetooth) — с моей машины:
+> установщик спрашивает про каждый, и если не уверены — отвечайте «нет».
 
-Нужен Hyprland ≥ 0.56 (Lua-конфиг) и пакеты:
-
-```bash
-sudo pacman -S --needed hyprland hypridle hyprlock hyprsunset hyprpolkitagent hyprpicker uwsm \
-    waybar swaync awww kitty zsh starship fastfetch zoxide atuin eza fd jq cliphist wl-clipboard \
-    playerctl imagemagick inotify-tools bluez-utils power-profiles-daemon libnotify brightnessctl btop \
-    gtk4 gtk4-layer-shell python-gobject python-dbus python-requests pacman-contrib yt-dlp mpv cava \
-    grim slurp satty tesseract udiskie snapper snap-pac earlyoom zram-generator kvantum qt6ct \
-    ttf-cascadia-code-nerd ttf-jetbrains-mono-nerd noto-fonts-cjk solaar openrgb python-ytmusicapi wireproxy
-```
-
-Из AUR: `zen-browser-bin`. Плагины zsh: oh-my-zsh с `zsh-autosuggestions` и `zsh-syntax-highlighting`.
-
-```bash
+```zsh
 git clone https://github.com/sonoyumi/yumi-rice.git ~/Projects/yumi-rice
 cd ~/Projects/yumi-rice
-./rice diff            # что изменится
-./rice push            # разложить файлы по ~ (старые версии — в ~/.local/state/rice-bak/)
-systemctl --user daemon-reload
-systemctl --user enable --now yumi-awww.service yumi-wallpaper.service yumi-bar-events.service \
-    yumi-tray.service yumi-notify-log.service yumi-hyprlock-bg.service yumi-calendar-remind.timer
-$EDITOR ~/.config/yumi/monitors.conf   # ваши мониторы: масштаб интерфейса, название
-yumi-wallpaper random  # картинки из ~/Pictures/Wallpapers (подпапки — коллекции); цвета подтянутся сами
-yumi-hyprlock-build    # собрать экран блокировки для мониторов из monitors.conf
-yumi-doctor            # проверить, что всё на месте
-./rice reload
-./rice push-system     # по желанию: /etc, по одному файлу с подтверждением
-~/.local/share/yumi-sddm/install.sh   # по желанию: тема SDDM (откат — uninstall.sh рядом)
+./install.sh --dry-run   # показать, что будет сделано, ничего не меняя
+./install.sh             # установка: вопрос перед каждым шагом, сначала резервная копия
 ```
 
-В репозитории вместо домашнего пути стоит метка `@HOME@`, а в автовходе — `@USER@`: `./rice push` подставит
-ваши значения. Свой аватар положите в `~/.config/hypr/hyprlock/avatar.jpg`.
+Установщик ставит пакеты из `packages/` (AUR через `paru` или `yay`, необязательные группы — по запросу), копирует
+файлы через `./rice push`, настраивает экран входа greetd, службы пользователя и окно пароля. Дальше положите
+несколько картинок в `~/Pictures/Wallpapers`, перезагрузитесь и запустите `yumi-doctor`. Мониторы:
+`~/.config/yumi/monitors.conf` (имена выходов — из `hyprctl monitors`); аватар экрана блокировки:
+`~/.config/hypr/hyprlock/avatar.jpg`.
+
+Откат: `./install.sh --uninstall` — возвращает файлы из резервных копий, выключает службы и greetd и возвращает
+прежний менеджер входа. Пакеты удаляются только по отдельному согласию.
+
+По шагам, со всеми вопросами и известными ограничениями: [INSTALL.md](INSTALL.md).
 
 ### Скрипт `rice`
 
-Репозиторий — источник истины, `rice` синхронизирует его с системой.
+Репозиторий — источник истины; `rice` синхронизирует его с системой.
 
 | Команда | Что делает |
 |---|---|
 | `./rice pull` | Система → репозиторий |
 | `./rice diff [путь]` | Чем система отличается от репозитория |
-| `./rice push` | Репозиторий → `~` (с резервной копией прежних версий) |
-| `./rice push-system` | Репозиторий → `/etc` (diff и подтверждение для каждого файла, сначала снимок snapper) |
-| `./rice reload` | Перечитать Hyprland, Waybar, swaync, systemd --user |
+| `./rice push` | Репозиторий → `~` (сохраняет прежние версии) |
+| `./rice push-system [фильтр]` | Репозиторий → `/etc` (diff и подтверждение для каждого файла, сначала снимок snapper) |
+| `./rice files` | Какие файлы ставит `push` (с учётом `RICE_LOCAL` и `RICE_MAC`) |
+| `./rice reload` | Перечитать Hyprland, Quickshell, systemd --user |
 | `./rice add <путь>` | Начать отслеживать файл |
-| `./rice doctor` | `yumi-doctor` и подробности для репозитория: службы, падения, расхождения, файлы вне манифеста |
-| `./rice check` | Проверка репозитория перед коммитом: синтаксис, личное, секреты (`--install-hook` — на каждый коммит) |
+| `./rice doctor` | `yumi-doctor` плюс подробности репозитория: службы, сбои, расхождения, файлы вне манифеста |
+| `./rice check` | Проверка репозитория перед коммитом: синтаксис, личные данные, секреты (`--install-hook` — на каждый коммит) |
 | `./rice gc [--apply]` | Уборка: `__pycache__`, старые архивы `rice-bak`, `.bak` и откаты из `~/.local/bin` в архив (без `--apply` только показывает) |
-| `./rice drift [--notify [N]]` | Насколько система ушла от репозитория (уведомление больше N блоков) |
+| `./rice drift [--notify [N]]` | Насколько система ушла от репозитория (уведомление, если блоков больше N) |
 
-Личные правки лежат вне репозитория, в `~/.config/rice-local/` (та же структура, что у `home/`, плюс свой
-`manifest.txt`): `./rice` ставит их вместо публичных файлов, поэтому личные изменения не попадают на GitHub.
-Личные блоки внутри общего файла помечаются `yumi:private-begin/-end` и вырезаются `tools/publicize`.
-`RICE_LOCAL=off ./rice push` ставит чистую публичную версию.
+Личные правки живут вне репозитория в `~/.config/rice-local/` (та же структура, что и `home/`, плюс свой
+`manifest.txt`): `./rice` ставит их вместо публичных файлов, так что приватные изменения никогда не попадают на GitHub.
+Приватные блоки внутри общего файла помечены `yumi:private-begin/-end`, их вырезает `tools/publicize`.
+`RICE_LOCAL=off ./rice push` ставит чистую публичную версию; `RICE_MAC=off` пропускает Mac-блок манифеста.
 
-Работа: правка в `home/…` → `./rice push` → `./rice reload` → проверить → `git commit`.
+Порядок работы: правка в `home/…` → `./rice push` → `./rice reload` → проверка → `git commit`.
 Не понравилось — `git checkout -- <файл>` и снова `./rice push`.
 
 ### Структура проекта
 
 ```
 yumi-rice/
+├── install.sh              # установщик (Arch / Arch ARM): --dry-run, --uninstall
+├── INSTALL.md              # установка по шагам
+├── packages/               # arch.txt, aur.txt, optional.txt (группы), mac.txt
 ├── home/
-│   ├── .config/hypr/       # hyprland.lua + yumi/ (модули, режимы работы), hyprlock, hypridle
-│   ├── .config/yumi/       # monitors.conf, хуки акцента, шаблоны цветов, стили меню и плеера
-│   ├── .config/waybar/     # лейаут yumi.jsonc, модули и стили
-│   ├── .config/swaync/     # раскладки центра управления и стиль всплывашек
+│   ├── .config/quickshell/yumi/  # оболочка: бар, меню, уведомления, osd, lock, polkit, greeter.qml
+│   ├── .config/hypr/       # hyprland.lua + yumi/ (модули, рабочие режимы), hypridle, запасной hyprlock
+│   ├── .config/yumi/       # monitors.conf, хуки акцента, шаблоны цветов, экран входа (greeter/sway.conf)
 │   ├── .config/systemd/    # службы и таймеры yumi-*, dev.slice, zen.slice
 │   ├── .config/…           # kitty, zsh, starship, atuin, fastfetch, VS Code
-│   ├── .local/bin/         # команды yumi-*: меню, пульт, доктор, обои, цвета, плеер…
-│   ├── .local/lib/yumi/    # panel (меню GTK4), bar (модули Waybar), colors, tray, calendar, fetch…
-│   ├── .local/src/yumi-eq/ # CFFI-эквалайзер для Waybar (C)
-│   └── .local/share/       # тема SDDM, тема VS Code, помощники музыки, данные пикера
-├── system/etc/             # GRUB, SDDM, zram, sysctl, earlyoom, BlueZ, faillock, курсор X11, tiny-dfr
+│   ├── .local/bin/         # команды yumi-*: блокировка, обои, цвета, музыка, doctor, greeter…
+│   ├── .local/lib/yumi/    # qs (бэкенды меню), bar (скрипты бара), colors, tray, calendar, fetch…
+│   └── .local/share/       # тема VS Code, помощники музыки, значки папок, данные пикера
+├── system/etc/             # greetd + PAM, GRUB, zram, sysctl, earlyoom, BlueZ, faillock
+├── patches/                # патчи к исходному коду: Hyprland, awww (см. patches/README.md)
 ├── assets/screenshots/
-├── manifest.txt            # какие файлы из ~ отслеживаются
-├── system-manifest.txt     # какие файлы из /etc отслеживаются
+├── manifest.txt            # отслеживаемые файлы из ~ (Mac-часть между # @mac и # @end)
+├── system-manifest.txt     # отслеживаемые файлы из /etc
 ├── rice                    # скрипт синхронизации
+├── NOTICE                  # авторы и лицензии сторонних частей
 └── tools/                  # publicize (публичная копия из личной), check (проверка перед коммитом)
 ```
 
-### Грабли: Hyprland 0.56 Lua и Asahi
+### Грабли: Hyprland 0.56 Lua, Quickshell и Asahi
 
-- Опции через точку: `hyprctl getoption decoration.rounding`. Диспатчеры — Lua:
-  `hyprctl dispatch 'hl.dsp.focus({ workspace = 3 })'`. `hyprctl keyword` не работает — `hyprctl eval 'hl.config({...})'`.
+- Опции через точку: `hyprctl getoption decoration.rounding`. Диспетчеры — на Lua:
+  `hyprctl dispatch 'hl.dsp.focus({ workspace = 3 })'`. `hyprctl keyword` не работает — используйте `hyprctl eval 'hl.config({...})'`.
 - Масштаб должен делить разрешение: `1.666667`, а не `1.67`.
-- Встроенный модуль Waybar `hyprland/language` не работает с Lua-Hyprland — нужен свой.
-- swaync запускает команды без `XDG_RUNTIME_DIR` — `wpctl` возвращает 0; ползункам нужны явные `min_limit/max_limit`.
-- hyprlock: `$BACKGROUND_PATH` ненадёжен (лучше абсолютный путь), `onclick` работает только с `hide_cursor = false`,
-  `fadeOut, 0` убирает серый кадр после загрузки.
-- `hypridle.conf` подключает **все** файлы из `hypridle/` — любой бэкап рядом перебивает ваш конфиг.
-- Некоторые пакеты кладут в `/etc/sddm.conf.d/` пустой `[Autologin]` — называйте свой файл так, чтобы он был последним по алфавиту (`zz-…`).
-- GRUB не пишет `grubenv` на btrfs — без `GRUB_SAVEDEFAULT`. Порядок параметров важен: `quiet loglevel=3`.
-- На Asahi нет MGLRU; у power-profiles-daemon только `balanced` и `power-saver`.
-- Страницы 16K: образы с jemalloc, собранным под 4K, падают — выручает `muvm`.
-- `MemoryHigh` без свободного свопа замораживает процесс вместо того, чтобы закрыть, — используйте `MemoryMax`.
+- `Hyprland --verify-config` **выполняет** команды `exec` из проверяемого конфига — проверяйте только живой конфиг,
+  не копию.
+- Quickshell: останавливайте через `systemctl --user stop yumi-quickshell` или `qs kill -c yumi`, никогда `pkill qs` —
+  он убьёт и тестовые экземпляры. Слежение за файлами выключено: правки QML видны только после
+  `systemctl --user restart yumi-quickshell`.
+- Не запускайте и не закрывайте настоящий экран блокировки для проверки: прерванный разговор PAM для faillock — это
+  неверный пароль (3 попытки → 10 минут, и sudo тоже блокируется). Есть предпросмотр:
+  `qs -c yumi ipc call lock preview`.
+- greetd читает `/etc/greetd/config.toml` только при своём запуске; `systemctl restart greetd` завершает текущий сеанс.
+- `hypridle.conf` подключает **каждый** файл в `hypridle/` — любая резервная копия рядом перебивает ваш конфиг.
+- GRUB не умеет писать `grubenv` на btrfs — без `GRUB_SAVEDEFAULT`. Порядок параметров важен: `quiet loglevel=3`.
+- В Asahi нет MGLRU; power-profiles-daemon даёт только `balanced` и `power-saver`.
+- Страницы 16K: образы с jemalloc, собранным под 4K, падают — помогает `muvm`. Сам Quickshell на страницах 16K
+  работает нормально.
+- `MemoryHigh` без свободного свопа замораживает процесс вместо того, чтобы его закрыть, — используйте `MemoryMax`.
 - AirPods при двойной загрузке с macOS: `br-connection-key-missing` → удалить и сопрячь заново.
-- Solaar при запуске применяет сохранённые зоны подсветки и может погасить клавиатуру: пометьте `led_control` и
-  `led_zone_*` как `ignore` в его конфиге.
-- Режим `Direct` в OpenRGB на клавиатуре PRO пропускает клавиши, а порядок светодиодов не совпадает с раскладкой:
+- Solaar при запуске заново применяет сохранённые LED-зоны и может выключить подсветку клавиатуры: пометьте
+  `led_control` и `led_zone_*` как `ignore` в его конфиге.
+- Режим `Direct` в OpenRGB на клавиатуре PRO теряет клавиши, а порядок светодиодов не совпадает с раскладкой:
   надёжен `Static`.
-- Обычный `openrgb` при каждом вызове несколько секунд заново опрашивает все USB-устройства, и Solaar в это время не
-  может прочитать мышь: запускать `openrgb --server` один раз при входе, а цвет отправлять через `--client`.
+- Обычный `openrgb` при каждом вызове несколько секунд опрашивает все USB-устройства, и в это время Solaar не может
+  прочитать мышь: запускайте `openrgb --server` один раз при входе, а цвет отправляйте через `--client`.
 - Монитор, подключённый после входа, получает чёрный фон: перерисовывайте обои по событию `monitor.added`.
 - dp-altmode: если отключить монитор и усыпить ноутбук, следующее подключение может не сработать до перезагрузки
   (известный открытый баг). После обновления ядра патч нужно пересобрать.
-- `Hyprland --verify-config` **выполняет** команды `exec` из проверяемого конфига — проверяйте только живой конфиг, не копию.
-- atuin: пустой `sync_address = ""` ломает его — чтобы всё было локально, ставьте `auto_sync = false` и не указывайте адрес.
+- atuin: пустой `sync_address = ""` ломает его — чтобы всё было локально, ставьте `auto_sync = false` и не указывайте
+  адрес.
 
 ### Благодарности
 
-[HyDE](https://github.com/HyDE-Project/HyDE) (основа версий 1.0–2.5; из него выросли шаблоны цветов wallbash) ·
-[Hyprland](https://hyprland.org/) · [Asahi Linux](https://asahilinux.org/) ·
-[Hyprlock-Dots](https://github.com/mahaveergurjar/Hyprlock-Dots) (раскладка экрана блокировки) ·
-[swaync](https://github.com/ErikReider/SwayNotificationCenter) · [Waybar](https://github.com/Alexays/Waybar) ·
-[Zen](https://zen-browser.app/) · [starship](https://starship.rs/) · [zoxide](https://github.com/ajeetdsouza/zoxide) · [atuin](https://atuin.sh/) · [fastfetch](https://github.com/fastfetch-cli/fastfetch) ·
-[rofi](https://github.com/davatorium/rofi) ·
-[dp-altmode](https://github.com/haripako/dp-altmode) от haripako (DisplayPort по USB-C на M1) · [Solaar](https://github.com/pwr-Solaar/Solaar) · [OpenRGB](https://openrgb.org/)
+[Hyprland](https://hyprland.org/) · [Quickshell](https://quickshell.org/) · [Asahi Linux](https://asahilinux.org/) ·
+[HyDE](https://github.com/HyDE-Project/HyDE) (основа версий 1.0–2.5; `yumi-colors` — порт его wallbash) ·
+[greetd](https://git.sr.ht/~kennylevinsen/greetd) · [sway](https://swaywm.org/) (экран входа) ·
+[touchbard](https://github.com/0800tim/touchbard) (Touch Bar) · [Zen](https://zen-browser.app/) ·
+[starship](https://starship.rs/) · [zoxide](https://github.com/ajeetdsouza/zoxide) · [atuin](https://atuin.sh/) ·
+[fastfetch](https://github.com/fastfetch-cli/fastfetch) ·
+[dp-altmode](https://github.com/haripako/dp-altmode) от haripako (DisplayPort по USB-C на M1) ·
+[Solaar](https://github.com/pwr-Solaar/Solaar) · [OpenRGB](https://openrgb.org/) ·
+шрифты Noto Serif, Noto Serif CJK JP, Inter, JetBrains Mono
 
 ### Автор
 
@@ -1602,4 +1751,6 @@ yumi-rice/
 
 ### Лицензия
 
-MIT — см. [LICENSE](LICENSE).
+GPL-3.0-or-later — см. [LICENSE](LICENSE). Сторонние части перечислены в [NOTICE](NOTICE): wallbash из HyDE
+(GPL-3.0), touchbard (MIT), шрифты (SIL OFL 1.1, ставятся из репозиториев, в комплект не входят).
+Версии до 3.0 включительно выходили под лицензией MIT.

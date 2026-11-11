@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# yumi-boot-bridge — первая команда Hyprland при загрузке (env.lua): заставка yumi-splash окном Wayland продолжает
+# анимацию (полоска по реальному времени, точки дышат) до экрана блокировки. Старая версия без --wayland — swaybg
+# с кадром загрузки (как раньше).
+if /usr/local/bin/yumi-splash --has-wayland 2>/dev/null; then
+    exec /usr/local/bin/yumi-splash --wayland
+fi
+exec swaybg -o eDP-1 -i "$HOME/.local/share/yumi/boot/frame-2560x1600.png" -m center -c 000000

@@ -1,0 +1,18 @@
+.env*
+*.key
+*credentials*
+*.pem
+__pycache__/
+.venv/
+node_modules/
+.DS_Store
+
+# 19.10: бэкапы правок и сохранённые варианты — в репо не класть (откат — по истории git)
+*.bak*
+*-variant-*
+*.tmp*
+# сборка Hyprland с патчем: исходники, объекты и пакеты (сотни МБ; сам патч и скрипты — в репо)
+docs/boot/hyprland-patch/src/
+docs/boot/hyprland-patch/pkg/
+docs/boot/hyprland-patch/*.tar.gz
+docs/boot/hyprland-patch/*.pkg.tar.*

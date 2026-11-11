@@ -2,11 +2,18 @@
 """yumi-touchbar-theme — цвета тачбара (touchbard) из живого акцента обоев (yumi-accent).
 Пишет ~/.local/state/omarchy/current/theme/colors.toml — этот файл touchbar-agent читает как «тему Omarchy»
 и применяет на лету. Запускается хуком ~/.config/yumi/accent/hooks.d/80-touchbar при смене обоев.
-Стили со своим [theme] в ~/.config/touchbar/config.toml перекрывают эти цвета (кроме стиля «Обои»)."""
-import os, re
+Стили со своим [theme] в ~/.config/touchbar/config.toml перекрывают эти цвета (кроме стиля «Обои»).
+Стиль с [yumi] palette = "sunset" (6-yumi-boot) получает фиксированный «Закат» загрузочной заставки:
+через [theme] нельзя задать второй цвет градиентов (accent2), поэтому он пишется сюда ([yumi] accent2)."""
+import os, re, tomllib
 HOME = os.path.expanduser("~")
 src = os.path.join(HOME, ".cache/yumi-accent/accent-gtk.css")
 dst = os.path.join(HOME, ".local/state/omarchy/current/theme/colors.toml")
+SUNSET = {"yumi_deep": "#000000", "yumi_btn": "#16242a", "yumi_hover": "#305861", "yumi_acc": "#f2a07b"}
+try:
+    yumi = tomllib.load(open(os.path.join(HOME, ".config/touchbar/config.toml"), "rb")).get("yumi", {})
+except (OSError, tomllib.TOMLDecodeError):
+    yumi = {}
 c = {}
 try:
     for name, val in re.findall(r"@define-color\s+(\w+)\s+(#[0-9A-Fa-f]{6})", open(src).read()):
@@ -15,6 +22,10 @@ except OSError:
     raise SystemExit(0)
 deep, bg, btn, hov = c.get("yumi_deep", "#111111"), c.get("yumi_bg", "#1b1b1b"), c.get("yumi_btn", "#303030"), c.get("yumi_hover", "#474747")
 acc, acc5 = c.get("yumi_acc", "#c0c0c0"), c.get("yumi_acc5", "#808080")
+acc2 = acc
+if yumi.get("palette") == "sunset":                      # «Закат» как у заставки Touch Bar
+    deep, btn, hov, acc = SUNSET["yumi_deep"], SUNSET["yumi_btn"], SUNSET["yumi_hover"], SUNSET["yumi_acc"]
+    acc5 = acc2 = str(yumi.get("accent2", "#6fb0b9"))
 toml = f'''# yumi-touchbar-theme: из обоев (yumi-accent), генерируется — не править
 mode = "dark"
 darker_background = "#000000"
@@ -28,7 +39,7 @@ dark_foreground = "{acc5}"
 accent = "{acc}"
 blue = "{acc}"
 magenta = "{acc5}"
-bright_magenta = "{acc}"
+bright_magenta = "{acc2}"
 red = "#ed8796"
 green = "#a6da95"
 yellow = "#eed49f"

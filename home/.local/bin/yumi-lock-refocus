@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# yumi-lock-refocus — после сна вернуть клавиатуру экрану блокировки (02.11.2026).
+#
+# Причина: на s2idle-пробуждении logind/libseat пересоздаёт seat (Aquamarine:
+# «Disabling seat» → «Enabling seat»), все libinput-устройства удаляются и
+# добавляются заново. Hyprland пересоздаёт клавиатуры, но уже отрисованной
+# поверхности ext-session-lock (Quickshell WlSessionLock) не отправляет
+# wl_keyboard.enter. В журнале это видно так:
+#   qs: lock-focus: eDP-1 клавиатура у поверхности = false
+# Пароль не печатается (события клавиш уходят в никуда), а Touch ID работает —
+# он идёт через PAM/fprintd и клавиатура ему не нужна.
+#
+# ВАЖНО (02.11, проверено): одного cursor.move НЕ хватает. mouseMoveUnified()
+# вызывает rawSurfaceFocus(lockSurface), но тот делает ранний return, если
+# m_state.keyboardFocus уже равен этой поверхности — а он равен, хотя клиент
+# enter потерял. Поэтому настоящее лечение — патч Hyprland 0003
+# (resendEnterEvents при добавлении клавиатуры в заблокированной сессии,
+# ~/.config/quickshell/yumi/docs/boot/hyprland-patch). Этот скрипт оставлен
+# как страховка и диагностика: он ждёт клавиатуру и возвращает курсор.
+#
+# Важно про тайминг: after_sleep_cmd срабатывает сразу после PrepareForSleep,
+# а клавиатура появляется только через ~2 с (seat сначала выключается, потом
+# включается). Поэтому сначала ждём клавиатуру в hyprctl devices, затем ещё
+# немного — на «drm: Restoring after VT switch» — и только потом двигаем курсор.
+#
+# Вызывается из ~/.config/hypr/hypridle/yumi.conf (after_sleep_cmd).
+# Ручная проверка: yumi-lock-refocus; журнал: journalctl -t yumi-lock-refocus.
+# Откат: убрать вызов из after_sleep_cmd и удалить этот файл.
+
+set -u
+
+log() { printf '%s\n' "$*" | systemd-cat -t yumi-lock-refocus 2>/dev/null || true; }
+
+locked() { "$HOME/.local/bin/yumi-lock" --status >/dev/null 2>&1; }
+
+# только когда экран действительно заблокирован (иначе не трогаем курсор)
+locked || { log "не заблокирован — пропускаю"; exit 0; }
+
+# Ждём, пока Hyprland снова увидит встроенную клавиатуру (после пересоздания seat).
+# Именно apple-spi-keyboard, а не .main: Hyprland назначает main последнему
+# устройству (у нас это бывает AirPods AVRCP), к тому же main не про фокус.
+keyboard_ready() {
+    hyprctl -j devices 2>/dev/null |
+        jq -e 'any(.keyboards[]?; .name == "apple-spi-keyboard")' >/dev/null 2>&1
+}
+
+waited=0
+until keyboard_ready; do
+    if (( waited >= 150 )); then
+        log "клавиатура не вернулась за 15 с — пропускаю"
+        exit 0
+    fi
+    sleep 0.1
+    waited=$((waited + 1))
+done
+log "клавиатура вернулась через ~$((waited / 10)),$((waited % 10)) с"
+
+# 09.11.2026: курсор не помогал (журнал 02.11–09.11: после него экран всё равно «без клавиатуры»).
+# Теперь фокус отдаёт плагин yumi-diag (~/.local/src/yumi-hypr-lockfix): снимает фокус клавиатуры и ставит
+# заново на поверхность блокировки + resendEnterEvents. Несколько проходов (см. цикл ниже).
+# Состояние до/после — в /tmp/yumi-hypr-diag.log. Откат: бэкап yumi-lock-refocus.bak-lockfix-20261109.
+hyprctl plugin list 2>/dev/null | grep -q yumi-diag ||
+    hyprctl plugin load "$HOME/.local/src/yumi-hypr-lockfix/yumi-diag.so" >/dev/null 2>&1
+
+hyprctl yumidiag >/dev/null 2>&1
+# 09.11 проверено: Hyprland держит фокус на замке, клиент enter потерял; первый проход через 1 с вернул клавиатуру.
+# Ускорено: проходы через 0,2 / 0,5 / 1 / 2,5 с от пробуждения (ранний может прийти до новой wl_keyboard — следующий добьёт)
+for d in 0.2 0.3 0.5 1.5; do
+    sleep "$d"
+    locked || { log "разблокирован во время ожидания — пропускаю"; exit 0; }
+    log "yumirefocus: $(hyprctl yumirefocus 2>&1 | tr '\n' ' ')"
+done
+exit 0

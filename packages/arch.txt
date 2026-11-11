@@ -1,0 +1,90 @@
+# Пакеты из официальных репозиториев (core/extra; на Arch Linux ARM — те же имена).
+# Ставит ./install.sh: sudo pacman -S --needed <список>. Формат: пакет  # зачем.
+# Сверено с тем, что реально вызывают скрипты ~/.local/bin, ~/.local/lib/yumi, конфиги Hyprland и Quickshell.
+
+# --- Сеанс: Hyprland и Quickshell ---
+hyprland                     # композитор; нужен ≥ 0.56 (конфиг на Lua: ~/.config/hypr/hyprland.lua)
+quickshell                   # бар, меню, уведомления, OSD, экран блокировки и окно пароля (qs -c yumi)
+hypridle                     # простой: гашение экрана, блокировка, сон (hypridle.service)
+hyprlock                     # запасной экран блокировки, если Quickshell не ответил (yumi-lock)
+hyprsunset                   # ночной фильтр (hyprsunset.service, ~/.config/hypr/hyprsunset.conf)
+hyprpolkitagent              # окна пароля polkit, пока не включён свой агент Quickshell (yumi-polkit-switch)
+hyprpicker                   # пипетка (SUPER+CTRL+SHIFT+P) и заморозка экрана при скриншоте области
+uwsm                         # `uwsm app` — отдельные области systemd для hyprlock, btop, обновлений
+xdg-desktop-portal-hyprland  # порталы: запись и показ экрана, скриншоты из программ
+xdg-desktop-portal-gtk       # порталы: диалоги открытия файлов, настройки внешнего вида
+awww                         # демон обоев с переходами (yumi-awww.service); см. примечание в aur.txt
+xdg-user-dirs                # стандартные папки (~/Pictures для обоев и скриншотов)
+xdg-utils                    # xdg-open — открыть файл, папку, ссылку из меню
+
+# --- Экран входа ---
+greetd                       # вход: автовход при загрузке, после выхода — экран входа (/etc/greetd/config.toml)
+sway                         # композитор только для экрана входа greetd (yumi-greeter, ~/.config/yumi/greeter/sway.conf)
+
+# --- Терминал и оболочка ---
+kitty                        # терминал по умолчанию (цвета обоев: ~/.config/kitty)
+zsh                          # оболочка (~/.zshenv → ~/.config/zsh)
+starship                     # приглашение командной строки (~/.config/starship/starship.toml)
+atuin                        # история команд с поиском (~/.config/atuin/config.toml)
+zoxide                       # быстрый переход по папкам (z)
+eza                          # ls с значками (functions/eza.zsh)
+fzf                          # выбор из списка в zsh и pm.sh
+fd                           # поиск файлов в «Пульте» (SUPER+Space)
+fastfetch                    # сведения о системе при открытии терминала (стиль «Свиток»)
+btop                         # системный монитор (yumi-sysmon, меню «Система»)
+
+# --- Звук и музыка ---
+pipewire                     # звук
+pipewire-pulse               # совместимость с PulseAudio: pactl, источник .monitor для cava
+wireplumber                  # менеджер сеанса PipeWire (wpctl — громкость)
+libpulse                     # pactl: выходы, микрофон (yumi-mic, yumi-cava-source)
+pamixer                      # громкость и mute (yumi-volume)
+pavucontrol                  # кнопка «Настройки» в меню звука
+cava                         # эквалайзер в баре и плеере
+playerctl                    # управление плеерами (MPRIS): медиаклавиши, плеер, AirPods
+mpv                          # движок плеера yumi-music
+
+# --- Буфер обмена, скриншоты, картинки ---
+cliphist                     # история буфера (yumi-clip-text / yumi-clip-image)
+wl-clipboard                 # wl-copy / wl-paste
+wl-clip-persist              # буфер не пропадает после закрытия окна (yumi-clip-persist)
+wtype                        # вставка выбранного символа из пикера эмодзи и значков
+grim                         # снимок экрана (yumi-screenshot)
+slurp                        # выбор области для снимка
+satty                        # редактор снимка после захвата
+imagemagick                  # миниатюры и палитра обоев, аватар, экран блокировки (magick)
+
+# --- Утилиты для скриптов ---
+python                       # большая часть yumi-* написана на Python
+python-gobject               # gi: Gio/GLib/GdkPixbuf — Bluetooth, уведомления, трей, обложки
+jq                           # разбор JSON из hyprctl в скриптах
+inotify-tools                # inotifywait — слежение за файлами (уведомления, обои)
+curl                         # обложки, погода, тексты песен
+git                          # клонирование репозитория, обновления (yumi-update)
+libnotify                    # notify-send — уведомления из скриптов
+brightnessctl                # яркость экрана и подсветки клавиатуры (yumi-brightness, OSD)
+pacman-contrib               # checkupdates и paccache — проверка обновлений в меню и yumi-doctor
+
+# --- Сеть, Bluetooth, питание ---
+networkmanager               # nmcli — меню Wi-Fi и VPN
+nm-connection-editor         # кнопка «Настройки сети» в меню Wi-Fi
+bluez                        # Bluetooth
+bluez-utils                  # bluetoothctl — меню Bluetooth, пилюля в баре
+blueman                      # агент сопряжения (окно PIN), стартует из /etc/xdg/autostart
+power-profiles-daemon        # режимы питания (powerprofilesctl) в меню и баре
+upower                       # заряд батареи для бара (Quickshell UPower)
+
+# --- Шрифты, курсор, значки, темы Qt ---
+noto-fonts                   # Noto Serif — заголовки меню и экран блокировки
+noto-fonts-cjk               # Noto Serif CJK JP — японские подписи и печать 弓
+noto-fonts-emoji             # эмодзи в пикере и уведомлениях
+ttf-jetbrains-mono-nerd      # JetBrainsMono Nerd Font — основной шрифт бара и меню, значки Nerd Font
+ttf-cascadia-code-nerd       # CaskaydiaCove Nerd Font Mono — шрифт kitty
+inter-font                   # Inter — часы и имя на экране блокировки и входа
+adwaita-cursors              # курсор Adwaita 20 (Hyprland, экран входа)
+breeze-icons                 # основа темы значков Yumi-Folders (Inherits=…,breeze-dark)
+qt6ct                        # тема Qt6 в цветах обоев (QT_QPA_PLATFORMTHEME=qt6ct)
+kvantum                      # стиль Qt в цветах обоев (шаблоны kvantum, tone.py qt)
+
+# --- Программы по умолчанию ---
+dolphin                      # файловый менеджер (SUPER+E, «показать в папке» из Пульта)

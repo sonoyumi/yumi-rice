@@ -1,0 +1,103 @@
+#!/usr/bin/env -S python3 -I
+"""yumi-island-downloads — загрузки браузера → Dynamic Island (id dl, priority 4). 30.10.2026.
+
+inotifywait на ~/Downloads (только чтение): временные файлы *.crdownload (Chromium) и *.part (Firefox/Zen).
+Пока они есть — активность «Загрузка · <имя>» и размер (раз в 2 с stat только этих файлов; общий объём браузер
+наружу не отдаёт, поэтому без полоски). Временный файл исчез и появился итоговый → галочка «Загружено»;
+исчез без итога → активность уходит (отменена). Клик — открыть папку.
+Папка: YUMI_ISLAND_DL_DIR (по умолч. ~/Downloads). Служба: yumi-island-downloads.service (не включена).
+"""
+import os
+import re
+import select
+import subprocess
+import sys
+import time
+
+ISLAND = os.path.expanduser("~/.local/bin/yumi-island")
+DIR = os.path.expanduser(os.environ.get("YUMI_ISLAND_DL_DIR", "~/Downloads"))
+TMP = re.compile(r"\.(crdownload|part)$")
+TICK, SETTLE = 2.0, 0.7
+
+
+def island(*args):
+    subprocess.run([ISLAND, *args], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                   stderr=None if os.environ.get("YUMI_ISLAND_DRY") else subprocess.DEVNULL)
+
+
+def human(n):
+    for unit, k in (("ГБ", 1e9), ("МБ", 1e6), ("КБ", 1e3)):
+        if n >= k:
+            return f"{n / k:.1f} {unit}".replace(".", ",")
+    return f"{n} Б"
+
+
+def pretty(name):
+    name = TMP.sub("", name)
+    return "файл" if name.startswith("Unconfirmed ") or name.startswith(".") else name
+
+
+def main():
+    w = subprocess.Popen(["inotifywait", "-m", "-q", "-e", "create,moved_to,moved_from,delete",
+                          "--format", "%e|%f", DIR], stdout=subprocess.PIPE)
+    fd, buf = w.stdout.fileno(), b""
+    active = {f for f in os.listdir(DIR) if TMP.search(f)} if os.path.isdir(DIR) else set()
+    gone, shown, last_tick, settle, sent = [], False, 0.0, None, None   # gone — что исчезло (проверить итоговый файл)
+    while True:
+        now = time.monotonic()
+        timeout = None
+        if active:
+            timeout = max(0.0, TICK - (now - last_tick))
+        if settle:
+            timeout = max(0.0, min(timeout if timeout is not None else 9e9, settle - now))
+        r, _, _ = select.select([fd], [], [], timeout)
+        if r:
+            chunk = os.read(fd, 4096)
+            if not chunk:
+                return 1
+            buf += chunk
+            *lines, buf = buf.split(b"\n")
+            for l in lines:
+                ev, _, name = l.decode(errors="replace").partition("|")
+                if not TMP.search(name):
+                    continue
+                if "CREATE" in ev or "MOVED_TO" in ev:
+                    active.add(name)
+                    last_tick = 0.0
+                else:
+                    active.discard(name)
+                    gone.append(name)
+                    settle = time.monotonic() + SETTLE
+            continue
+        now = time.monotonic()
+        if settle and now >= settle:
+            settle = None
+            if not active and shown:
+                # 30.10: итог «Загружено» (имя, размер, «Открыть» / «В папке») показывает yumi-downloads (id dl-done) —
+                # здесь только убрать прогресс, иначе два «Загружено» подряд. Галочка была: .bak-dldone-20261030
+                island("end", "dl")
+                shown = False
+            gone = [] if not active else gone
+        if active and now - last_tick >= TICK:
+            last_tick = now
+            size, names = 0, sorted(active)
+            for n in names:
+                try:
+                    size += os.path.getsize(os.path.join(DIR, n))
+                except OSError:
+                    pass
+            title = pretty(names[-1]) if len(names) == 1 else f"{len(names)} файла(ов)"
+            if shown and (title, size) == sent:
+                continue                    # ничего не поменялось — не дёргать остров
+            sent = (title, size)
+            island("update" if shown else "start", "dl", "--title", title[:80], "--sub", "Загрузка",
+                   "--trail", human(size), "--icon", "download", "--tone", "acc", "--prio", "4",
+                   "--open", f"xdg-open '{DIR}'")
+            shown = True
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(0)

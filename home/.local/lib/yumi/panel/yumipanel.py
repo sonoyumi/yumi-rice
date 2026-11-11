@@ -3,7 +3,7 @@
 Что даёт каждому меню:
   • шапку из текущих обоев (~/.cache/yumi/theme/wall.thmb, как в rofi style_10) с названием поверх;
   • цвета из обоев — тот же wallbash-файл, что у yumi-player (меняются на лету);
-  • масштаб под монитор (MSI DP-1 ×0.8), окно под курсором у бара или по центру;
+  • масштаб под монитор (коэффициент из ~/.config/yumi/monitors.conf), окно под курсором у бара или по центру;
   • одно окно на меню (повторный вызов закрывает), Esc и уход мыши закрывают.
 
 Меню — отдельный скрипт: создаёт PanelApp(id, title, icon, build), где build(panel, body) наполняет body.
@@ -726,9 +726,14 @@ class PanelApp(Gtk.Application):
     def do_shutdown(self):
         # меню закрыто — пилюли Waybar сразу показывают новое состояние (☕ 15, Wi-Fi 16, Bluetooth 17)
         if not DRY:
-            for sig in (15, 16, 17):
+            for sig, qs_name in ((15, "caffeine"), (16, "wifi"), (17, "bt")):
                 subprocess.run(["pkill", f"-RTMIN+{sig}", "-x", "waybar"], env=CHILD_ENV,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                try:   # те же пилюли в Quickshell (без него — тихо)
+                    subprocess.run(["qs", "-c", "yumi", "ipc", "call", "bar", "refresh", qs_name], env=CHILD_ENV,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+                except (OSError, subprocess.SubprocessError):
+                    pass
         Gtk.Application.do_shutdown(self)
 
     def do_command_line(self, cmdline):

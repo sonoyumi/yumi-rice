@@ -12,6 +12,8 @@ if command -v starship &>/dev/null; then
     eval "$(starship init zsh)"
     export STARSHIP_CACHE=$XDG_CACHE_HOME/starship
     export STARSHIP_CONFIG=$XDG_CONFIG_HOME/starship/starship.toml
+    # 10.11: в терминале VS Code — компактное приглашение (одна строка, папка + ветка)
+    [[ $TERM_PROGRAM == (vscode|zed) ]] && export STARSHIP_CONFIG=$XDG_CONFIG_HOME/starship/vscode.toml
 # ===== конец Starship =====
 elif [ -r $HOME/.p10k.zsh ] || [ -r $ZDOTDIR/.p10k.zsh ]; then
     # ===== Powerlevel10k =====

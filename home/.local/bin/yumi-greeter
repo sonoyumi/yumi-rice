@@ -1,0 +1,25 @@
+#!/bin/sh
+# yumi-greeter (19.10.2026) — экран входа greetd после выхода из Hyprland (вместо текстового agreety: на VT нет консоли,
+# fbcon выключен ради плавной загрузки). Тот же экран, что блокировка (LockSurface), из копии yumi-greeter-sync.
+# Композитор — sway (~/.config/yumi/greeter/sway.conf: мониторы и масштаб как в Hyprland); до 19.10 был cage.
+# greetd запускает КОПИЮ этого файла: /var/lib/yumi-greeter/yumi-greeter, от пользователя greeter
+# (/etc/greetd/config.toml → [default_session]). Проверка без greetd: YUMI_GREETER_ROOT=… yumi-greeter (превью, пароль «yumi»).
+ROOT=${YUMI_GREETER_ROOT:-$(dirname "$(readlink -f "$0")")}
+RUN=${XDG_RUNTIME_DIR:-/tmp}
+# чей экран входа: владелец копии "$ROOT/home" (её делает yumi-greeter-sync от этого пользователя);
+# переопределить — YUMI_GREETER_USER=имя
+GUSER=${YUMI_GREETER_USER:-$(stat -c %U "$ROOT/home" 2>/dev/null)}
+export HOME="$ROOT/home" USER="$GUSER" YUMI_GREETER_USER="$GUSER"
+export XDG_CONFIG_HOME="$HOME/.config" XDG_DATA_HOME="$HOME/.local/share"
+export XDG_CACHE_HOME="$RUN/yumi-greeter/cache" XDG_STATE_HOME="$RUN/yumi-greeter/state"
+export XCURSOR_THEME=Adwaita XCURSOR_SIZE=20 QS_DISABLE_CRASH_HANDLER=1 LC_CTYPE=C.UTF-8
+# seatd (/run/seatd.sock) открыт только группе seat, greeter в ней нет — место (seat0) берём через logind
+export LIBSEAT_BACKEND=logind
+export YUMI_GREETER_QML="$HOME/.config/quickshell/yumi/greeter.qml"
+CONF="$HOME/.config/yumi/greeter/sway.conf"
+mkdir -p "$XDG_CACHE_HOME" "$XDG_STATE_HOME"
+# вывод — в журнал (journalctl -t yumi-greeter): у greetd консоли нет, иначе ошибки не увидеть
+if [ -n "${GREETD_SOCK:-}" ] && command -v systemd-cat >/dev/null; then
+    exec systemd-cat -t yumi-greeter sway -c "$CONF"
+fi
+exec sway -c "$CONF"

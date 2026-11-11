@@ -9,9 +9,10 @@
 #   yumi-wallpaper get           путь к текущим
 #   yumi-wallpaper list          все обои папки (по пути, как в HyDE)
 #   yumi-wallpaper scan          новые картинки в папке: миниатюры и палитра в кэш (делает служба сама)
-#   yumi-wallpaper warm          собрать готовые цвета (комплекты) для всех обоев — потом смена мгновенная
-# Смена синхронная: сначала всё готовится (~0,4 с), потом новые обои «вырастают» из курсора, и под конец перехода
-# Waybar, kitty, рамки, VS Code, Zen и подсветка клавиатуры меняются в один момент (yumi-colors prepare/commit).
+#   yumi-wallpaper warm [--idle] собрать готовые цвета (комплекты) для всех обоев — потом смена мгновенная;
+#                                --idle — тихо, пока экраны погашены (hypridle); warm-stop — прервать его
+# Смена: новые обои сразу «вырастают» из курсора, цвета готовятся параллельно (yumi-colors prepare), и под конец
+# перехода панель, kitty, рамки, VS Code, Zen и подсветка клавиатуры меняются в один момент (yumi-colors commit).
 # Программы, которых нет на экране, — следом в фоне. Настройки: YUMI_TRANSITION_SEC=0.4 (переход),
 # YUMI_FLIP_AT=0.6 (когда запускать перекраску — доля перехода; ~0,1 с уходит на сам запуск, так что цвета меняются к концу перехода),
 # YUMI_APPS_LEAD=0.2 (на сколько секунд раньше общего момента отдать новые темы VS Code и Telegram — они перерисовываются
@@ -89,12 +90,17 @@ show() {
     while read -r name w hh hz; do
         [ -n "$name" ] || continue
         n=$((n + 1))
-        awww img -o "$name" "$(scaled "$wall" "$h" "$w" "$hh")" --transition-bezier .43,1.19,1,.4 \
-            --transition-type "$trans" --transition-duration "$TRANS_SEC" --transition-fps "${hz:-60}" \
+        # 19.10: YUMI_INSTANT_OUTPUT — монитор, где виджет обоев сам «становится» картиной: там без перехода,
+        # на остальных — переход как задан (иначе они переключались резко).
+        # 29.10: можно список через запятую (eDP-1,DP-1) или all — виджет рисует «становление» на всех мониторах сам
+        local t="$trans"
+        case ",${YUMI_INSTANT_OUTPUT:-}," in ",all,"|*",$name,"*) t=none ;; esac
+        awww img -o "$name" "$(scaled "$wall" "$h" "$w" "$hh")" --transition-bezier "${BEZ:-${YUMI_BEZ:-.43,1.19,1,.4}}" \
+            --transition-type "$t" --transition-duration "$TRANS_SEC" --transition-fps "${hz:-60}" \
             --invert-y --transition-pos "$pos" &
     done < <(monitors)
     if [ "$n" = 0 ]; then                       # hyprctl/jq не ответили — как раньше, одним вызовом
-        awww img "$wall" --transition-bezier .43,1.19,1,.4 --transition-type "$trans" --transition-duration "$TRANS_SEC" \
+        awww img "$wall" --transition-bezier "${BEZ:-.43,1.19,1,.4}" --transition-type "$trans" --transition-duration "$TRANS_SEC" \
             --transition-fps 60 --invert-y --transition-pos "$pos"
     fi
     wait
@@ -106,40 +112,56 @@ link_wall() {   # link_wall ФАЙЛ SHA — ссылки на текущие о
 }
 
 apply() {   # apply ФАЙЛ [переход]
-    local wall h cached=0
+    local wall h spid t0 flip lead
+    local tfile="${XDG_RUNTIME_DIR:-/tmp}/yumi-wallpaper.t0"
     wall="$(realpath "$1")" || die "нет файла $1"
     [ -f "$wall" ] || die "нет файла $wall"
     h="$(sha1sum "$wall" | cut -d' ' -f1)"
     thumbs "$wall" "$h"
-    "$COLORS" is-cached "$wall" 9>&- && cached=1
-    # Полная смена (комплекта ещё нет): хуки читают текущие обои по ссылке wall.set — ставим её сразу.
-    # Из комплекта: хуков нет — ссылки в самом конце, чтобы фон экрана блокировки (yumi-hyprlock-bg-watch,
-    # тяжёлый magick) пересчитывался ПОСЛЕ перехода, а не во время него.
-    [ "$cached" = 1 ] || link_wall "$wall" "$h"
-    # подготовить цвета: из комплекта — разложить готовые файлы (~0,05 с), иначе хуки; всё видимое — в очередь
-    "$COLORS" prepare "$wall" >/dev/null 9>&-              # 9>&- — детям не достаётся блокировка смены обоев
-    # анимация обоев идёт на свободном процессоре, а цвета выпускаются под её конец (YUMI_FLIP_AT — доля
-    # длительности перехода): если стартовать всё разом, перезапуск Waybar и перерисовка окон рвут кадры
-    # Waybar перезапускается ~160 мс и потом проявляется — запускаем его ДО перехода и даём ему фору
-    # YUMI_BAR_LEAD, чтобы новый бар появлялся вместе с обоями, а не последним
-    "$COLORS" early waybar 9>&-
-    sleep "${YUMI_BAR_LEAD:-0.15}"
-    ensure_daemon && show "$wall" "${2:-grow}" "$h" 9>&-
-    # VS Code и Telegram перерисовываются дольше kitty — их темы подменяются за YUMI_APPS_LEAD до общего момента;
-    # момент commit считается от конца show по часам, так что сам вызов early-apps его не сдвигает
-    local t0 flip lead
-    t0="${EPOCHREALTIME/,/.}"                       # с русской локалью там запятая
+    # 19.10 (нагрузка): YUMI_LIGHT=1 — листание по бинду: только картинка и ссылки, без перекраски системы;
+    # перекраску один раз делает step, когда листание остановилось (было: 14 хуков на каждые пролистанные обои).
+    # 30.10 (скорость): есть готовый комплект — перекраска дешёвая (~0,05 с), поэтому сразу полная смена:
+    # цвета меняются вместе с картинкой, а не после паузы step
+    if [ -n "${YUMI_LIGHT:-}" ] && ! "$COLORS" is-cached "$wall" 9>&-; then
+        t0="${EPOCHREALTIME/,/.}"
+        ensure_daemon && show "$wall" "${2:-grow}" "$h"
+        link_wall "$wall" "$h"
+        sleep_until "$t0" "$(awk -v d="$TRANS_SEC" 'BEGIN { printf "%.3f", d + 0.05 }')"   # переходы не накладывать (роняет awww)
+        return 0
+    fi
+    # Сначала обои: переход стартует сразу по нажатию, а цвета готовятся параллельно, пока он идёт
+    # (из комплекта ~0,05 с, полным путём ~0,3 с — успевает к общему моменту). show пишет в tfile время,
+    # когда awww принял переход: от него по часам считаются early-apps и commit, как раньше от конца show.
+    rm -f "$tfile"
+    if ensure_daemon; then
+        { show "$wall" "${2:-grow}" "$h"; echo "${EPOCHREALTIME/,/.}" > "$tfile"; } 9>&- &
+        spid=$!
+    fi
+    # Цвета: из комплекта — разложить готовые файлы, иначе хуки (они сами ставят ссылку wall.set до запуска);
+    # всё видимое — в очередь до commit. nice — кадрам перехода процессор в первую очередь
+    nice -n 5 "$COLORS" prepare "$wall" >/dev/null 9>&-   # 9>&- — детям не достаётся блокировка смены обоев
+    [ -n "${spid:-}" ] && wait "$spid"
+    t0="$(cat "$tfile" 2>/dev/null)"; [ -n "$t0" ] || t0="${EPOCHREALTIME/,/.}"
+    # VS Code и Telegram перерисовываются дольше kitty — их темы подменяются за YUMI_APPS_LEAD до общего момента
     flip="$(awk -v d="$TRANS_SEC" -v f="${YUMI_FLIP_AT:-0.6}" 'BEGIN { printf "%.2f", d * f }')"
     lead="$(awk -v l="${YUMI_APPS_LEAD:-0.2}" -v t="$flip" 'BEGIN { l += 0; if (l > t) l = t; if (l < 0) l = 0; printf "%.2f", l }')"
     if [ "$lead" != "0.00" ]; then
-        sleep "$(awk -v t="$flip" -v l="$lead" 'BEGIN { printf "%.2f", t - l }')"
+        sleep_until "$t0" "$(awk -v t="$flip" -v l="$lead" 'BEGIN { printf "%.3f", t - l }')"
         "$COLORS" early-apps 9>&-
     fi
-    sleep "$(awk -v t0="$t0" -v now="${EPOCHREALTIME/,/.}" -v t="$flip" 'BEGIN { r = t - (now - t0); printf "%.3f", (r > 0 ? r : 0) }')"
+    sleep_until "$t0" "$flip"
     "$COLORS" commit 9>&-
-    [ "$cached" = 1 ] && link_wall "$wall" "$h"
+    # ссылки на текущие обои — после общего момента: фон экрана блокировки (yumi-hyprlock-bg-watch, тяжёлый
+    # magick) пересчитывается ПОСЛЕ перехода (при полном пути prepare уже поставил их сам — повтор ничего не меняет)
+    link_wall "$wall" "$h"
     # следующий переход — только когда этот закончился (наложение переходов роняет awww-daemon)
-    sleep "$(awk -v d="$TRANS_SEC" -v f="${YUMI_FLIP_AT:-0.6}" 'BEGIN { f = 1 - f; printf "%.2f", (f > 0 ? d * f : 0) + 0.05 }')"
+    sleep_until "$t0" "$(awk -v d="$TRANS_SEC" 'BEGIN { printf "%.3f", d + 0.05 }')"
+}
+
+sleep_until() {   # sleep_until T0 СЕКУНД — спать до момента T0 + СЕКУНД (если он прошёл — сразу дальше)
+    local r
+    r="$(awk -v t0="$1" -v off="$2" -v now="${EPOCHREALTIME/,/.}" 'BEGIN { r = t0 + off - now; printf "%.3f", (r > 0 ? r : 0) }')"
+    [ "$r" = "0.000" ] || sleep "$r"
 }
 
 # Сканирование новых обоев (служба yumi-wallpaper-scan.path следит за папкой): миниатюры, палитра, анализ
@@ -149,9 +171,11 @@ scan() {
     exec 8>"${XDG_RUNTIME_DIR:-/tmp}/yumi-wallpaper-scan.lock"; flock 8
     local w h n=0 name mw mh hz
     local -a mons
+    local -A keep=()
     mapfile -t mons < <(monitors)
     while IFS= read -r w; do
         h="$(sha1sum "$w" | cut -d' ' -f1)"
+        keep[$h]=1
         for m in "${mons[@]}"; do                      # копии под экраны — у всех обоев, и у старых тоже
             read -r name mw mh hz <<< "$m"
             [ -s "$SCALED/$h-${mw}x${mh}.jpg" ] || nice -n 10 bash -c "$(declare -f scaled); SCALED='$SCALED'; scaled \"\$1\" '$h' '$mw' '$mh'" _ "$w" >/dev/null
@@ -164,34 +188,87 @@ scan() {
     done < <(list_paths)
     [ "$n" -gt 0 ] && notify-send -t 3000 -a "Обои" "Новые обои готовы" "Подготовлено: $n" 2>/dev/null
     echo "новых обоев: $n"
+    prune
 }
 
-# Прогрев: собрать комплекты для всех обоев без них. Цвета программ при этом мелькают (хуки пишут живые
-# файлы), обои на экране не меняются. В конце возвращаются текущие обои — уже из комплекта.
+# Кэш удалённых обоев (19.10): миниатюры, копии под экраны, палитры, комплекты, kmeans акцента — по sha,
+# которых больше нет в папке (текущие обои оставляем всегда). Папка пустая/недоступна — ничего не трогаем.
+# Плюс забытые очереди queue-<sha>.txt (смену перебили раньше, чем собрался комплект).
+prune() {
+    [ ${#keep[@]} -gt 0 ] || return 0
+    local f b h d=0 cur
+    cur="$(sha1sum "$(current)" 2>/dev/null | cut -d' ' -f1)"
+    [ -n "$cur" ] && keep[$cur]=1
+    for f in "$THUMBS"/* "$SCALED"/* "$CACHE"/dcols/* "${XDG_CACHE_HOME:-$HOME/.cache}"/yumi/bundles/* \
+             "${XDG_CACHE_HOME:-$HOME/.cache}"/yumi-accent/kmeans/*; do
+        b="${f##*/}"; h="${b:0:40}"
+        [[ $h =~ ^[0-9a-f]{40}$ ]] || continue
+        [ -n "${keep[$h]-}" ] && continue
+        rm -rf -- "$f" && d=$((d + 1))
+    done
+    find "${XDG_CACHE_HOME:-$HOME/.cache}/yumi/colors" -maxdepth 1 -name 'queue-*.txt' -mmin +10 -delete 2>/dev/null
+    echo "удалено из кэша удалённых обоев: $d"
+}
+
+# Прогрев: собрать комплекты для всех обоев без годного комплекта (нет или собран старой версией хуков).
+# Цвета программ при этом мелькают (хуки пишут живые файлы), обои на экране не меняются. В конце — снова текущие.
+#   warm          вручную: уведомления, ~3 с на обои
+#   warm --idle   тихо, пока ВСЕ экраны погашены (hypridle, слушатель после DPMS): без уведомлений, под nice;
+#                 экран включился (warm-stop из on-resume) или проснулся — останавливается и возвращает текущие обои
+WARM_PID="${XDG_RUNTIME_DIR:-/tmp}/yumi-wallpaper.warm.pid"
+
+screens_off() {   # все экраны в DPMS off?
+    local on
+    on="$(hyprctl -j monitors 2>/dev/null | jq '[.[] | select(.dpmsStatus)] | length' 2>/dev/null)"
+    [ "$on" = 0 ]
+}
+
 warm() {
-    exec 9>"$LOCK"; flock -w 10 9 || die "смена обоев занята"
-    local orig h n=0 total
+    local idle=0 orig h n=0 total stop=0
+    [ "${1:-}" = "--idle" ] && idle=1
+    exec 9>"$LOCK"
+    if [ "$idle" = 1 ]; then
+        screens_off || exit 0
+        flock -n 9 || exit 0                                    # идёт смена обоев — в другой раз
+        renice -n 10 $$ >/dev/null 2>&1
+    else
+        flock -w 10 9 || die "смена обоев занята"
+    fi
+    echo $$ > "$WARM_PID"
+    trap 'stop=1' TERM INT
     orig="$(current)"
     local -a list
     mapfile -t list < <(list_paths)
     total=${#list[@]}
-    systemctl --user stop yumi-hyprlock-bg.service 2>/dev/null     # не пересчитывать фон блокировки 30 раз
-    notify-send -t 4000 -a "Обои" "Готовлю цвета для обоев" "Цвета программ поморгают около минуты" 2>/dev/null
+    [ "$idle" = 1 ] || notify-send -t 4000 -a "Обои" "Готовлю цвета для обоев" "Цвета программ поморгают около минуты" 2>/dev/null
     for w in "${list[@]}"; do
-        h="$(sha1sum "$w" | cut -d' ' -f1)"
+        [ "$stop" = 1 ] && break
+        [ "$idle" = 1 ] && ! screens_off && break
         "$COLORS" is-cached "$w" 9>&- && continue
+        h="$(sha1sum "$w" | cut -d' ' -f1)"
         n=$((n + 1))
         echo "[$n] ${w##*/}"
         thumbs "$w" "$h"
         link_wall "$w" "$h"
-        "$COLORS" warm "$w" 9>&-
+        "$COLORS" warm "$w" 9>&- &                              # в фоне + wait: TERM прерывает сразу, а не после
+        wait $! || true
     done
     h="$(sha1sum "$orig" | cut -d' ' -f1)"
     link_wall "$orig" "$h"
-    systemctl --user start yumi-hyprlock-bg.service 2>/dev/null
-    apply "$orig"                                               # вернуть текущие — из комплекта, всё разом
-    notify-send -t 3000 -a "Обои" "Цвета готовы" "Собрано комплектов: $n из $total" 2>/dev/null
+    rm -f "$WARM_PID"
+    trap - TERM INT
+    # вернуть текущие — из комплекта, всё разом (при --idle без перехода: экран погашен или только что включился)
+    if [ "$idle" = 1 ]; then TRANS_SEC=0.01 apply "$orig" none; else apply "$orig"; fi
+    [ "$idle" = 1 ] || notify-send -t 3000 -a "Обои" "Цвета готовы" "Собрано комплектов: $n из $total" 2>/dev/null
     echo "собрано комплектов: $n (всего обоев $total)"
+}
+
+warm_stop() {   # прервать warm --idle (hypridle on-resume): текущий прогон обоев прерывается, текущие обои возвращаются
+    local pid
+    pid="$(cat "$WARM_PID" 2>/dev/null)" || return 0
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || return 0
+    pkill -TERM -P "$pid" -f 'yumi-colors warm' 2>/dev/null
+    kill -TERM "$pid" 2>/dev/null
 }
 
 # Быстрые нажатия схлопываются: каждый вызов добавляет свой шаг (+1/−1) в счётчик, а работает один —
@@ -268,7 +345,10 @@ step_to() {   # step_to N — сдвинуться на N обоев от тек
     # текущие не из коллекции: вперёд — с первых, назад — с последних
     [ "$found" = 1 ] || [ -z "$(active_collection)" ] || { [ "$1" -gt 0 ] && idx=-1 || idx=0; }
     idx=$(( ((idx + $1) % n + n) % n ))
-    apply "${list[$idx]}" "$([ "$1" -gt 0 ] && echo grow || echo outer)"
+    # 19.10 «Тушь»: по бинду — строгая шторка без отскока: вперёд — справа, назад — слева, 0,26 с
+    # (было grow/outer из курсора с отскоком, 0,4 с). YUMI_STEP_SEC — длительность.
+    local TRANS_SEC="${YUMI_STEP_SEC:-0.26}" BEZ=".25,0,.25,1"
+    apply "${list[$idx]}" "$([ "$1" -gt 0 ] && echo right || echo left)"
 }
 
 step() {   # step +1|-1
@@ -278,8 +358,14 @@ step() {   # step +1|-1
     local s
     while :; do
         while s="$(take_pending)"; [ "${s:-0}" != 0 ]; do
-            step_to "$s"
+            YUMI_LIGHT=1 step_to "$s"                   # лёгкий шаг: только обои
         done
+        # листание остановилось на YUMI_SETTLE_SEC (30.10: 0,12 с, было 0,4) — перекрасить систему один раз под
+        # итоговые обои (картинка уже на экране); если они уже перекрашены (шли из комплекта) — ничего не делать
+        sleep "${YUMI_SETTLE_SEC:-0.12}"
+        [ "$(cat "$PENDING" 2>/dev/null || echo 0)" != 0 ] && continue
+        [ "$(cat "${XDG_CACHE_HOME:-$HOME/.cache}/yumi/colors/applied" 2>/dev/null)" = "$(sha1sum "$(current)" | cut -d' ' -f1)" ] \
+            || TRANS_SEC=0.01 apply "$(current)" none
         flock -u 9                                  # отпустить — и проверить, не нажали ли в этот миг
         [ "$(cat "$PENDING" 2>/dev/null || echo 0)" != 0 ] && flock -n 9 && continue
         break
@@ -291,6 +377,8 @@ start() {
     wall="$(current)"
     [ -f "$wall" ] || { wall="$(list_paths | head -1)"; [ -n "$wall" ] || die "нет обоев"; ln -sfn "$wall" "$CACHE/wall.set"; }
     ensure_daemon || die "awww-daemon (yumi-awww.service) не запустился"
+    # загрузка: пока не появился экран блокировки, на экране кадр загрузки (yumi-awww-post) — обои после
+    [ -x "$HOME/.local/bin/yumi-boot-wait-lock" ] && "$HOME/.local/bin/yumi-boot-wait-lock"   # только MacBook (раздел @mac)
     awww img "$wall" --transition-type none
     h="$(sha1sum "$wall" | cut -d' ' -f1)"
     # цвета уже от этих обоев — не трогаем (вход быстрее); иначе — полный пересчёт
@@ -301,15 +389,17 @@ start() {
 }
 
 case "${1:-}" in
-set) [ $# -ge 2 ] || die "использование: yumi-wallpaper set ФАЙЛ"
-    exec 9>"$LOCK"; flock -w 10 9 || die "смена обоев занята дольше 10 с"; apply "$2" ;;
+set) [ $# -ge 2 ] || die "использование: yumi-wallpaper set ФАЙЛ [ПЕРЕХОД]"
+    # ПЕРЕХОД — тип awww (grow по умолчанию; none — сразу: виджет обоев сам «становится» картиной, 19.10)
+    exec 9>"$LOCK"; flock -w 10 9 || die "смена обоев занята дольше 10 с"; apply "$2" "${3:-grow}" ;;
 next) step 1 ;;
 prev) step -1 ;;
 random) mapfile -t l < <(cycle_paths); [ ${#l[@]} -gt 0 ] || die "нет обоев"
     exec 9>"$LOCK"; flock -w 10 9 || die "смена обоев занята"; apply "${l[RANDOM % ${#l[@]}]}" ;;
 get) current ;;
 collection) collection "${2:-get}" ;;
-warm) warm ;;
+warm) warm "${2:-}" ;;
+warm-stop) warm_stop ;;
 scan) scan ;;
 list) list_paths ;;
 start) start ;;

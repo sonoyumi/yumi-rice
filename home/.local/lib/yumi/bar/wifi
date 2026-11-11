@@ -5,6 +5,12 @@ export LANG=C.UTF-8 LC_ALL=C.UTF-8
 esc() { local s=${1//&/&amp;}; s=${s//</&lt;}; printf '%s' "${s//\"/\\\"}"; }
 act=$(nmcli -t -f NAME,TYPE,DEVICE connection show --active 2>/dev/null)
 if grep -q ':802-3-ethernet:' <<< "$act"; then
+    # 19.10: модем iPhone по USB (драйвер ipheth) — значок телефона и класс phone (бар пишет «Phone»)
+    for d in $(awk -F: '$2=="802-3-ethernet"{print $3}' <<< "$act"); do
+        if [ "$(basename "$(readlink -f "/sys/class/net/$d/device/driver" 2>/dev/null)")" = ipheth ]; then
+            printf '{"text":"\U000f011c","tooltip":"<b>Phone</b>\\nИнтернет с iPhone по кабелю (режим модема)","class":"ethernet phone"}\n'; exit
+        fi
+    done
     printf '{"text":"󰈀","tooltip":"Проводная сеть","class":"ethernet"}\n'; exit
 fi
 if [ "$(nmcli radio wifi 2>/dev/null)" != "enabled" ]; then

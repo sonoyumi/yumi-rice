@@ -1,0 +1,364 @@
+#!/usr/bin/env -S python3 -I
+"""Бэкенд острова плеера Quickshell (player/PlayerIsland.qml). MPRIS читает сам QML (Quickshell.Services.Mpris);
+сюда — то, что уже умеют Python-модули yumi-player, без переписывания:
+  · чистые артист/название треков yumi-music (yumimeta, meta.tsv);
+  · текст песни (yumilyrics: YouTube Music → Apple → LRCLIB, кэш) со сдвигом подсветки из lyrics.conf;
+  · очередь yumi-music по сокету mpv и клик «играть этот трек»;
+  · плейлисты yumi-music и ♡ — добавить текущий трек (yumi-music pl-add → added.json);
+  · панель «Текст / Очередь / выкл.» — тот же файл состояния, что у yumi-player.
+Протокол: stdin — команды JSON, stdout — ответы JSON-строками:
+  {"cmd":"track","title","artist","length","url","bt":bool} → {"type":"meta",…} сразу, затем {"type":"lyrics",…}
+  {"cmd":"queue"}            → {"type":"queue","ok":bool,"head":…,"msg":…,"items":[{n,title,artist,dur,cover}]}
+  {"cmd":"play","n":N}       → играть трек очереди N
+  {"cmd":"playlists"}        → {"type":"playlists","items":[{id,short,count}]}
+  {"cmd":"pl-add","pid",…}   → {"type":"toast","text"}
+  {"cmd":"panel","value":"lyrics|queue|off"} → запомнить;   при запуске: {"type":"panel","value"}
+  {"cmd":"save","title","artist","url","art","length","pos","identity"} → ~/.local/state/yumi-player/last.json (+ очередь
+      и точная позиция yumi-music по сокету), ответ {"type":"last",…}; при запуске тоже {"type":"last",…}
+  {"cmd":"resume"}           → yumi-music ensure + сохранённая очередь, тот же трек, seek на позицию (браузерный — xdg-open url)
+YP_DRYRUN=1 — pl-add и play только печатаются. Откат: yumi-uninstall quickshell"""
+import json
+import urllib.parse
+import time
+import shutil
+import os
+import socket
+import subprocess
+import sys
+import threading
+
+HOME = os.path.expanduser("~")
+sys.path.insert(0, os.path.join(HOME, ".local/lib/yumi/panel"))
+import yumilyrics  # noqa: E402
+import yumimeta  # noqa: E402
+
+DRY = bool(os.environ.get("YP_DRYRUN"))
+CONF = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.join(HOME, ".config")), "yumi/player")
+LYRICS_CONF = os.path.join(CONF, "lyrics.conf")
+LYRICS_STATE = os.path.join(os.environ.get("XDG_STATE_HOME", os.path.join(HOME, ".local/state")), "yumi-player", "lyrics")
+LYRICS_LEAD = 0.2
+RUN = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+MUSIC_SOCK = os.path.join(RUN, "yumi-music.sock")
+CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.join(HOME, ".cache")), "yumi-music")
+COVERS = os.path.join(CACHE, "covers")
+PLAYLISTS = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.join(HOME, ".config")), "yumi/music/playlists.json")
+MUSIC_CLI = os.path.join(HOME, ".local/bin/yumi-music")
+QUEUE_MAX = 30
+STATE_DIR = os.path.join(os.environ.get("XDG_STATE_HOME", os.path.join(HOME, ".local/state")), "yumi-player")
+LAST = os.path.join(STATE_DIR, "last.json")       # последний трек: показать после закрытия плеера и продолжить с места
+RESUME_M3U = os.path.join(CACHE, "resume.m3u")
+OUT = threading.Lock()
+
+
+def emit(obj):
+    with OUT:
+        sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
+
+
+def load_json(path, default):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return default
+
+
+def tracks_word(n):
+    if n % 10 == 1 and n % 100 != 11:
+        return "трек"
+    return "трека" if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14 else "треков"
+
+
+def mpv_ipc(*command):
+    """Команда mpv yumi-music → её data или None (сокета нет — yumi-music не запущен)."""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as c:
+            c.settimeout(1.5)
+            c.connect(MUSIC_SOCK)
+            c.sendall((json.dumps({"command": list(command), "request_id": 7}) + "\n").encode())
+            buf = b""
+            while True:
+                chunk = c.recv(1 << 20)
+                if not chunk:
+                    return None
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    msg = json.loads(line)
+                    if msg.get("request_id") == 7:
+                        return msg.get("data")
+    except (OSError, ValueError):
+        return None
+
+
+def lyrics_shift(bt):
+    """Сдвиг подсветки, сек: LEAD + offset − задержка Bluetooth (как read_lyrics_shift в yumi-player)."""
+    conf = {"offset": 0.0, "bluetooth": 0.2}
+    try:
+        with open(LYRICS_CONF) as f:
+            for line in f:
+                k, _, v = line.partition("=")
+                if k.strip() in conf:
+                    conf[k.strip()] = float(v.split("#")[0])
+    except (OSError, ValueError):
+        pass
+    return LYRICS_LEAD + conf["offset"] - (conf["bluetooth"] if bt else 0.0)
+
+
+def read_panel():
+    try:
+        with open(LYRICS_STATE) as f:
+            return {"off": "off", "queue": "queue"}.get(f.read().strip(), "lyrics")
+    except OSError:
+        return "lyrics"
+
+
+def write_panel(value):
+    os.makedirs(os.path.dirname(LYRICS_STATE), exist_ok=True)
+    with open(LYRICS_STATE, "w") as f:
+        f.write({"lyrics": "on", "queue": "queue"}.get(value, "off") + "\n")
+
+
+def playlists():
+    out = []
+    for p in load_json(PLAYLISTS, []):
+        d = load_json(os.path.join(CACHE, f"pl-{p['id']}.json"), {})
+        name = (d.get("name") or p.get("name") or p["id"]).replace(" (SoundCloud)", "")
+        out.append({"id": p["id"], "short": name.split("/")[0].strip(), "count": len(d.get("tracks") or [])})
+    return out
+
+
+class Backend:
+    def __init__(self):
+        self.token = 0
+
+    def track(self, c):
+        self.token += 1
+        token = self.token
+        url = c.get("url") or ""
+        title, artist = c.get("title") or "", c.get("artist") or ""
+        clean = yumimeta.lookup(url)
+        if clean and clean["title"]:
+            title, artist = clean["title"], clean["artist"]
+        emit({"type": "meta", "url": url, "title": title, "artist": artist,
+              "key": yumimeta.key_for(url) or "", "q_ok": os.path.exists(MUSIC_SOCK)})
+        if not title:
+            emit({"type": "lyrics", "url": url, "lines": [], "msg": "Ничего не играет"})
+            return
+        length = float(c.get("length") or 0)
+        shift = lyrics_shift(bool(c.get("bt")))
+        threading.Thread(target=self.fetch, args=(token, url, title, artist, length, shift), daemon=True).start()
+
+    def fetch(self, token, url, title, artist, length, shift):
+        try:
+            res = yumilyrics.fetch(title, artist, length, url)
+        except Exception as e:  # noqa: BLE001 — сеть/источники: текст просто не найден
+            print(f"lyrics: {e}", file=sys.stderr, flush=True)
+            res = None
+        if token != self.token:
+            return
+        if not res or not res.get("lines"):
+            emit({"type": "lyrics", "url": url, "lines": [], "msg": "Текст не найден"})
+            return
+        emit({"type": "lyrics", "url": url, "synced": bool(res["synced"]), "shift": shift,
+              "source": res["source"] + ("" if res["synced"] else " · без таймингов"),
+              "lines": [[round(float(t), 2), s or "♪"] for t, s in res["lines"]]})
+
+    def queue(self):
+        pl = mpv_ipc("get_property", "playlist") if os.path.exists(MUSIC_SOCK) else None
+        if not pl:                                   # yumi-music закрыт или пуст — сохранённая очередь (last.json)
+            last = load_json(LAST, {})
+            if last.get("queue"):
+                pl = [dict(e, current=(i == last.get("qpos", -1))) for i, e in enumerate(last["queue"])]
+            elif not os.path.exists(MUSIC_SOCK):
+                return emit({"type": "queue", "ok": False, "msg": "Очередь есть только у yumi-music", "items": []})
+        if not pl:
+            return emit({"type": "queue", "ok": False, "msg": "Очередь пуста", "items": []})
+        cur = next((i for i, e in enumerate(pl) if e.get("current")), -1)
+        nxt = list(enumerate(pl))[cur + 1:cur + 1 + QUEUE_MAX]
+        left = len(pl) - cur - 1
+        if not left:
+            return emit({"type": "queue", "ok": False, "msg": "Это последний трек в очереди", "items": []})
+        items = []
+        for i, e in nxt:
+            url, raw = e.get("filename", ""), e.get("title")
+            m = yumimeta.lookup(url)
+            if m and m["title"]:
+                title, artist, dur = m["title"], m["artist"], m.get("dur") or 0
+            else:
+                raw = raw or os.path.basename(url)
+                artist, _, title = raw.partition(" — ") if " — " in raw else ("", "", raw)
+                dur = 0
+            key = yumimeta.key_for(url)
+            cover = os.path.join(COVERS, key + ".jpg") if key else ""
+            items.append({"n": i, "title": title, "artist": artist, "dur": dur,
+                          "cover": cover if cover and os.path.exists(cover) else ""})
+        emit({"type": "queue", "ok": True, "head": f"Далее · {left} {tracks_word(left)}", "items": items})
+
+    def play(self, n):
+        if not os.path.exists(MUSIC_SOCK) or not mpv_ipc("get_property", "playlist"):             # yumi-music закрыт — продолжить сохранённую очередь с трека n
+            return self.resume(int(n), 0)
+        if DRY:
+            print("[dry-run] mpv playlist-play-index", n, file=sys.stderr, flush=True)
+            return
+        mpv_ipc("playlist-play-index", int(n))
+        mpv_ipc("set_property", "pause", False)
+        threading.Timer(0.4, self.queue).start()
+
+    def pl_add(self, c):
+        key = yumimeta.key_for(c.get("url") or "")
+        if not key:
+            return emit({"type": "toast", "text": "Только для треков YouTube и SoundCloud", "error": True})
+        t = {"id": key, "key": key, "url": c.get("url"), "title": c.get("title") or "", "artist": c.get("artist") or "",
+             "dur": int(c.get("dur") or 0)}
+        if str(c.get("thumb") or "").startswith("http"):
+            t["thumb"] = c["thumb"]
+        if DRY:
+            print("[dry-run] yumi-music pl-add", c["pid"], json.dumps(t, ensure_ascii=False), file=sys.stderr, flush=True)
+            return emit({"type": "toast", "text": "[проверка] Добавлено", "error": False})
+
+        def work():
+            try:
+                r = subprocess.run([MUSIC_CLI, "pl-add", c["pid"], json.dumps(t, ensure_ascii=False)],
+                                   capture_output=True, text=True, timeout=60)
+                d = json.loads(r.stdout) if r.returncode == 0 else None
+            except (OSError, ValueError, subprocess.SubprocessError):
+                d = None
+            if not d:
+                return emit({"type": "toast", "text": "Не удалось добавить", "error": True})
+            name = d["name"].replace(" (SoundCloud)", "")
+            emit({"type": "toast", "text": f"Уже есть в «{name}»" if d["dup"] else f"Добавлено в «{name}»", "error": False})
+        threading.Thread(target=work, daemon=True).start()
+
+    # ---------- последний трек: сохранить / продолжить ----------
+    def save(self, c):
+        """Снимок трека в last.json. У yumi-music (mpv) — ещё очередь, номер и точная позиция по сокету.
+        Обложка: из кэша yumi-music по ключу трека, file:// — копия (браузер удаляет файл при смене трека)."""
+        url = c.get("url") or ""
+        if not url:
+            return
+        d = {"title": c.get("title") or "", "artist": c.get("artist") or "", "url": url,
+             "length": float(c.get("length") or 0), "pos": float(c.get("pos") or 0),
+             "identity": c.get("identity") or "", "t": int(time.time())}
+        mpv = d["identity"].lower().startswith("mpv") and os.path.exists(MUSIC_SOCK)
+        if mpv:
+            pl = mpv_ipc("get_property", "playlist") or []
+            cur = next((i for i, e in enumerate(pl) if e.get("current")), -1)
+            if pl and cur >= 0 and pl[cur].get("filename") == url:
+                d["queue"] = [{"filename": e.get("filename", ""), "title": e.get("title") or ""} for e in pl]
+                d["qpos"] = cur
+                tp = mpv_ipc("get_property", "time-pos")
+                if isinstance(tp, (int, float)):
+                    d["pos"] = float(tp)
+        art = c.get("art") or ""
+        key = yumimeta.key_for(url)
+        cached = os.path.join(COVERS, key + ".jpg") if key else ""
+        if cached and os.path.exists(cached):
+            d["art"] = "file://" + cached
+        elif art.startswith("file://"):
+            src = urllib.parse.unquote(art[7:])
+            dst = os.path.join(STATE_DIR, "last-cover" + (os.path.splitext(src)[1] or ".jpg"))
+            try:
+                if os.path.abspath(src) != dst:
+                    os.makedirs(STATE_DIR, exist_ok=True)
+                    shutil.copyfile(src, dst + ".tmp")
+                    os.replace(dst + ".tmp", dst)
+                d["art"] = "file://" + dst + "?" + str(d["t"])   # новый адрес — QML перечитает картинку
+            except OSError:
+                d["art"] = ""
+        else:
+            d["art"] = art
+        d["resumable"] = bool(d.get("queue")) or (d["identity"].lower().startswith("mpv") and bool(key))
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(LAST + ".tmp", "w") as f:
+            json.dump(d, f, ensure_ascii=False)
+        os.replace(LAST + ".tmp", LAST)
+        emit(dict(d, type="last", queue=None))
+
+    def resume(self, qpos=None, pos=None):
+        """▶ на остановленном: запустить yumi-music (mpv) с сохранённой очередью, тем же треком и местом.
+        Браузерный трек — открыть его ссылку."""
+        last = load_json(LAST, {})
+        if not last.get("url"):
+            return emit({"type": "toast", "text": "Нечего продолжать", "error": True})
+        if not last.get("resumable"):
+            if DRY:
+                print("[dry-run] xdg-open", last["url"], file=sys.stderr, flush=True)
+                return
+            subprocess.Popen(["xdg-open", last["url"]], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+            return emit({"type": "toast", "text": "Открываю в браузере", "error": False})
+        queue = last.get("queue") or [{"filename": last["url"], "title": last.get("title", "")}]
+        qpos = last.get("qpos", 0) if qpos is None else qpos
+        pos = last.get("pos", 0) if pos is None else pos
+        if DRY:
+            print(f"[dry-run] yumi-music ensure; loadlist {len(queue)} треков; play-index {qpos}; seek {pos:.0f}",
+                  file=sys.stderr, flush=True)
+            return emit({"type": "toast", "text": "[проверка] Продолжаю", "error": False})
+        emit({"type": "toast", "text": "Продолжаю…", "error": False})
+
+        def work():
+            try:
+                subprocess.run([MUSIC_CLI, "ensure"], timeout=20, stdin=subprocess.DEVNULL,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except (OSError, subprocess.SubprocessError):
+                pass
+            if not os.path.exists(MUSIC_SOCK):
+                return emit({"type": "toast", "text": "yumi-music не запустился", "error": True})
+            os.makedirs(CACHE, exist_ok=True)
+            with open(RESUME_M3U, "w") as f:
+                f.write("#EXTM3U\n")
+                for e in queue:
+                    if e.get("title"):
+                        f.write(f"#EXTINF:-1,{e['title']}\n")
+                    f.write(e["filename"] + "\n")
+            mpv_ipc("loadlist", RESUME_M3U, "replace")
+            mpv_ipc("playlist-play-index", int(qpos))
+            mpv_ipc("set_property", "pause", False)
+            if pos > 1:                                  # перемотка, когда трек загрузится (как yumi-music restart)
+                for _ in range(100):
+                    time.sleep(0.2)
+                    if mpv_ipc("get_property", "seekable"):
+                        mpv_ipc("seek", pos, "absolute")
+                        break
+        threading.Thread(target=work, daemon=True).start()
+
+    def handle(self, c):
+        cmd = c.get("cmd")
+        if cmd == "track":
+            self.track(c)
+        elif cmd == "queue":
+            threading.Thread(target=self.queue, daemon=True).start()
+        elif cmd == "play":
+            threading.Thread(target=self.play, args=(c["n"],), daemon=True).start()
+        elif cmd == "playlists":
+            emit({"type": "playlists", "items": playlists()})
+        elif cmd == "pl-add":
+            self.pl_add(c)
+        elif cmd == "save":
+            threading.Thread(target=self.save, args=(c,), daemon=True).start()
+        elif cmd == "resume":
+            self.resume()
+        elif cmd == "panel":
+            write_panel(c.get("value", "off"))
+
+
+def main():
+    b = Backend()
+    emit({"type": "panel", "value": read_panel(), "q_ok": os.path.exists(MUSIC_SOCK)})
+    last = load_json(LAST, {})
+    if last.get("title"):
+        emit(dict(last, type="last", queue=None))
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            b.handle(json.loads(line))
+        except (ValueError, KeyError, TypeError) as e:
+            print("player: плохая команда:", line, e, file=sys.stderr, flush=True)
+
+
+if __name__ == "__main__":
+    main()

@@ -25,6 +25,14 @@ LANGS+=(osd)
 run() { if [[ -n $DRY ]]; then printf 'DO:'; printf ' %q' "$@"; echo; else "$@"; fi; }
 note() { [[ ${YUMI_SHOT_NOTIFY:-1} == 0 ]] && return 0; run notify-send "$@"; }
 fail() { note -a "$ALERT" "$@"; exit 1; }
+# 30.10: Dynamic Island — «Снимок сохранён» (в фоне; нет IPC острова = молча ничего)
+island_shot() {
+    [[ -n $DRY || ${YUMI_SHOT_NOTIFY:-1} == 0 || ! -x $HOME/.local/bin/yumi-island ]] && return 0
+    local f=$1 q; printf -v q '%q' "$f"
+    { "$HOME/.local/bin/yumi-island" start shot --title "Снимок экрана" --sub "${f/#$HOME/\~}" --icon cam --prio 4 \
+          --open "xdg-open $q"
+      "$HOME/.local/bin/yumi-island" end shot --done "Снимок сохранён"; } >/dev/null 2>&1 &
+}
 unfreeze() { [[ -n $FROZEN ]] && kill "$FROZEN" 2>/dev/null; FROZEN=""; }
 
 # Один снимок за раз (как lock-файл grimblast): второе нажатие во время выделения ничего не делает
@@ -91,6 +99,7 @@ shoot() {
     run rm -f "$TMP"
     if [[ -n $DRY || -f $FILE ]]; then
         note -r 9 -a "$ALERT" -i "$FILE" "saved in $DIR"
+        island_shot "$FILE"
         echo "$FILE"
     fi
 }

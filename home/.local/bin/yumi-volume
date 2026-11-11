@@ -5,7 +5,8 @@
 #   yumi-volume -p ПЛЕЕР i|d|m [шаг]  громкость плеера через playerctl ('' — все плееры)
 #   -q — без уведомления. i — громче, d — тише, m — звук вкл/выкл. Шаг по умолчанию 5 (YUMI_VOLUME_STEP).
 # Принимает и старую запись из биндов HyDE: yumi-volume '-o' 'd'.
-# Вид уведомления — как был у HyDE: значок-«крутилка» knob-N.svg (шаг 5 %), заголовок «55...» (точка на
+# Показ — капсула Quickshell: `qs -c yumi ipc call -- osd show vol|mic ПРОЦЕНТ` (выкл/вкл — `osd show vol -`, капсула читает сама).
+# Без Quickshell — запасной вариант, уведомление как было у HyDE: значок-«крутилка» knob-N.svg (шаг 5 %), заголовок «55...» (точка на
 # каждые 15 %), ниже имя устройства; одно и то же окно (-r 8) на 2 с. Выкл/вкл звука — muted-/unmuted-speaker
 # (или -microphone). Значки: YUMI_OSD_ICONS (по умолчанию Wallbash-Icon/media — их перекрашивает под обои wallbash).
 # Отправитель «Звук и яркость» (YUMI_OSD_APP): по нему ~/.config/yumi/notify/ignore.json не пишет громкость в журнал.
@@ -21,6 +22,7 @@ NOTIFY=1
 
 run() { if [[ -n $DRY ]]; then printf 'DO:'; printf ' %q' "$@"; echo; else "$@"; fi; }
 note() { ((NOTIFY)) || return 0; run notify-send -a "$APP" -r 8 -t 2000 "$@"; }
+osd()  { ((NOTIFY)) || return 0; run qs -c yumi ipc call -- osd show "$@" >/dev/null 2>&1; }   # капсула Quickshell; код ≠ 0 — его нет
 usage() { sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
 # Имя устройства, как в HyDE: node.description из wpctl, запасной вариант — pactl
@@ -36,6 +38,7 @@ dev_name() {
 # «55» → заголовок «55...» (seq-приём HyDE: N/15 чисел через точку, цифры вырезаны → N/15−1 точек)
 show_level() {
     local vol=$1 name=$2 angle bar
+    osd "$([[ $kind == source ]] && echo mic || echo vol)" "$vol" && return 0
     angle=$(((vol + 2) / 5 * 5)); ((angle > 100)) && angle=100; ((angle < 0)) && angle=0
     bar=$(seq -s "." $((vol / 15)) 2>/dev/null | sed 's/[0-9]//g')
     note -i "$ICONS/knob-$angle.svg" "$vol$bar" "$name"
@@ -65,8 +68,13 @@ case "$kind:$action" in
         show_level "$vol" "$(dev_name "$target")"
         ;;
     sink:m | source:m)
-        run wpctl set-mute "$target" toggle
+        # 18.10: не «toggle» вслепую — нужное состояние ставится и через 0,25 с подтверждается ещё раз
+        # (раз из нескольких нажатий с тачбара mute терялся: бар показывал одно, звук — другое)
+        want=1; wpctl get-volume "$target" 2>/dev/null | grep -q MUTED && want=0
+        run wpctl set-mute "$target" "$want"
+        ( sleep 0.25; run wpctl set-mute "$target" "$want" ) &
         if [[ $kind == source ]]; then dev=microphone; src=(--default-source); else dev=speaker; src=(); fi
+        osd "$([[ $kind == source ]] && echo mic || echo vol)" - && exit 0
         if [[ $(pamixer "${src[@]}" --get-mute) == true ]]; then
             note -i "$ICONS/muted-$dev.svg" "muted" "$(dev_name "$target")"
         else
@@ -85,10 +93,10 @@ case "$kind:$action" in
         if [[ $cur != 0.00 ]]; then
             [[ -n $DRY ]] || printf '%s' "$cur" >"$last"
             run playerctl --player="$player" volume 0
-            note -i "$ICONS/muted-speaker.svg" "muted" "$player"
+            osd vol 0 || note -i "$ICONS/muted-speaker.svg" "muted" "$player"
         else
             run playerctl --player="$player" volume "$(cat "$last" 2>/dev/null || echo 0.5)"
-            note -i "$ICONS/unmuted-speaker.svg" "unmuted" "$player"
+            osd vol "$(awk '{printf "%.0f", $0 * 100}' "$last" 2>/dev/null || echo 50)" || note -i "$ICONS/unmuted-speaker.svg" "unmuted" "$player"
         fi
         ;;
     *) usage ;;

@@ -1,0 +1,304 @@
+#!/usr/bin/env python3
+"""yumi-light — подсветка клавиш MacBook: автояркость по датчику света и «дыхание» при событиях. 11.11.2026.
+
+  yumi-light daemon                 служба (yumi-light.service): следит за датчиком и принимает команды
+  yumi-light auto on|off|toggle     включить / выключить автояркость клавиш (запоминается)
+  yumi-light pulse [вид]            клавиши «дышат» и возвращаются к прежнему уровню
+                                    вид: pomodoro (3) · battery (3, медленнее) · test (1)
+  yumi-light status                 JSON: {"auto":…, "lux":…, "kbd":…, "dark":…, "daemon":…}
+
+Как работает автояркость: датчик aop-sensors-als (люксы) читается раз в секунду и сглаживается.
+Темнее dark_below — клавиши загораются до уровня level; светлее bright_above — гаснут (между порогами
+ничего не меняется, чтобы не мигало). Подвинул ползунок сам — служба это видит: пока клавиши горят,
+твой уровень запоминается как новый level; служба не спорит с ручной правкой, пока свет не перейдёт порог.
+Пока экран затемнён по простою (флаг yumi-idle-dimmed) — автояркость ждёт.
+Вспышка не показывается при «не беспокоить» и на экране блокировки.
+
+Запись яркости — через logind (SetBrightness), без root. Настройки: ~/.config/yumi/light/config.toml
+Состояние: ~/.local/state/yumi/light.json. Отладка: YUMI_LIGHT_DRY=1 — не писать яркость, а печатать.
+Откат: yumi-uninstall light
+"""
+import json
+import math
+import os
+import socket
+import subprocess
+import sys
+import time
+import tomllib
+from pathlib import Path
+
+HOME = Path.home()
+RUN = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp"))
+SOCK = RUN / "yumi-light.sock"
+IDLE_FLAG = RUN / "yumi-idle-dimmed"
+CONF = HOME / ".config/yumi/light/config.toml"
+STATE = HOME / ".local/state/yumi/light.json"
+LED = Path("/sys/class/leds/kbd_backlight")
+DRY = bool(os.environ.get("YUMI_LIGHT_DRY"))
+
+DEFAULTS = {
+    "dark_below": 80,      # люксы: темнее — клавиши загораются
+    "bright_above": 200,   # люксы: светлее — клавиши гаснут
+    "level": 60,           # % яркости клавиш в темноте (меняется сам, когда двигаешь ползунок)
+    "smooth": 4,           # секунд сглаживания датчика
+    "fade": 0.8,           # секунд на плавный переход
+}
+PULSES = {  # вид: (сколько раз, секунд на одно «дыхание»)
+    "pomodoro": (3, 0.8), "battery": (3, 1.3), "test": (1, 0.9),
+}
+
+
+def log(*a):
+    print(*a, flush=True)
+
+
+def conf():
+    c = dict(DEFAULTS)
+    try:
+        c.update({k: v for k, v in tomllib.loads(CONF.read_text()).items() if k in DEFAULTS})
+    except (OSError, ValueError):
+        pass
+    return c
+
+
+def load_state():
+    try:
+        return json.loads(STATE.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(st):
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = STATE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(st))
+    tmp.replace(STATE)
+
+
+def als_path():
+    for d in Path("/sys/bus/iio/devices").glob("iio:device*"):
+        f = d / "in_illuminance_input"
+        if f.exists():
+            return f
+    return None
+
+
+def read_int(p, default=-1):
+    try:
+        return int(Path(p).read_text().strip())
+    except (OSError, ValueError):
+        return default
+
+
+MAX = max(read_int(LED / "max_brightness", 255), 1)
+
+
+def kbd_raw():
+    return read_int(LED / "brightness", 0)
+
+
+def set_raw(v):
+    v = max(0, min(MAX, int(round(v))))
+    if DRY:
+        log(f"[пробный режим] клавиши = {v}/{MAX}")
+        return True
+    r = subprocess.run(["busctl", "call", "org.freedesktop.login1", "/org/freedesktop/login1/session/auto",
+                        "org.freedesktop.login1.Session", "SetBrightness", "ssu", "leds", "kbd_backlight", str(v)],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    if r.returncode:
+        log("не удалось записать яркость:", r.stderr.strip())
+    return r.returncode == 0
+
+
+def quiet_now():
+    """Не мигать: режим «не беспокоить» или экран заблокирован."""
+    try:
+        r = subprocess.run(["qs", "-c", "yumi", "ipc", "call", "notif", "state"], capture_output=True, text=True, timeout=1.5)
+        if json.loads(r.stdout or "{}").get("dnd"):
+            return "не беспокоить"
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    try:
+        if subprocess.run([str(HOME / ".local/bin/yumi-lock"), "--status"], capture_output=True, timeout=1.5).returncode == 0:
+            return "экран заблокирован"
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return ""
+
+
+class Daemon:
+    def __init__(self):
+        self.c = conf()
+        st = load_state()
+        self.auto = bool(st.get("auto", True))
+        cur = round(read_int(LED / "brightness", 0) * 100 / MAX)
+        # первый запуск: клавиши уже горят — берём их яркость как уровень в темноте (не сбивать привычное)
+        self.level = int(st.get("level", cur if cur > 0 else self.c["level"]))   # % в темноте
+        self.als = als_path()
+        self.lux = None          # сглаженные люксы
+        self.dark = None         # True — темно (клавиши горят), None — ещё не решали
+        self.last = kbd_raw()    # что мы (или пользователь) поставили последним
+        self.manual = False      # пользователь подвинул сам — не спорим до смены порога
+
+    # ---- запись ----
+    def fade_to(self, target):
+        cur = kbd_raw()
+        target = max(0, min(MAX, int(round(target))))
+        if abs(target - cur) <= 2:
+            self.last = cur
+            return
+        steps = max(1, int(self.c["fade"] / 0.05))
+        for i in range(1, steps + 1):
+            set_raw(cur + (target - cur) * i / steps)
+            time.sleep(0.05)
+        self.last = kbd_raw() if not DRY else target
+
+    def pulse(self, kind):
+        n, period = PULSES.get(kind, PULSES["test"])
+        why = quiet_now()
+        if why:
+            log(f"вспышка {kind}: пропущена ({why})")
+            return
+        base = kbd_raw()
+        # горят ярко — «дышим» вниз, иначе вверх; размах не меньше половины шкалы
+        other = base - MAX * 0.7 if base > MAX * 0.5 else base + MAX * 0.7
+        other = max(0, min(MAX, other))
+        steps = max(6, int(period / 0.04))
+        for _ in range(n):
+            for i in range(1, steps + 1):
+                k = (1 - math.cos(2 * math.pi * i / steps)) / 2     # 0 → 1 → 0, мягко
+                set_raw(base + (other - base) * k)
+                time.sleep(period / steps)
+        set_raw(base)
+        self.last = kbd_raw() if not DRY else base
+        log(f"вспышка {kind}: {n} раз, вернул {base}/{MAX}")
+
+    # ---- автояркость ----
+    def tick(self):
+        if self.als is None:
+            return
+        raw = read_int(self.als)
+        if raw < 0:
+            return
+        a = 1.0 / max(1.0, float(self.c["smooth"]))
+        self.lux = raw if self.lux is None else self.lux + (raw - self.lux) * a
+        now = kbd_raw()
+        if abs(now - self.last) > 2:                 # кто-то подвинул ползунок
+            self.last = now
+            self.manual = True
+            if self.dark and now > 0:
+                self.level = max(5, round(now * 100 / MAX))
+                self.persist()
+            log(f"ручная правка: {now}/{MAX}" + (f", новый уровень в темноте {self.level} %" if self.dark and now > 0 else ""))
+        if not self.auto or IDLE_FLAG.exists():
+            return
+        dark = self.dark
+        if self.lux < self.c["dark_below"]:
+            dark = True
+        elif self.lux > self.c["bright_above"]:
+            dark = False
+        elif dark is None:
+            return                                    # между порогами при старте — оставляем как есть
+        if dark == self.dark:
+            return
+        self.dark, self.manual = dark, False
+        target = MAX * self.level / 100 if dark else 0
+        log(f"свет {self.lux:.0f} лк → {'темно' if dark else 'светло'}: клавиши {round(target)}/{MAX}")
+        self.fade_to(target)
+
+    def persist(self):
+        save_state({"auto": self.auto, "level": self.level})
+
+    def status(self):
+        return {"auto": self.auto, "lux": None if self.lux is None else round(self.lux), "kbd": round(kbd_raw() * 100 / MAX),
+                "dark": self.dark, "level": self.level, "daemon": True}
+
+    def command(self, words):
+        cmd = words[0] if words else ""
+        if cmd == "auto":
+            arg = words[1] if len(words) > 1 else "toggle"
+            self.auto = {"on": True, "off": False}.get(arg, not self.auto)
+            self.dark, self.manual = None, False      # решить заново по текущему свету
+            if self.auto and self.lux is not None and self.c["dark_below"] <= self.lux <= self.c["bright_above"]:
+                self.dark = kbd_raw() > 0
+            self.persist()
+            log("автояркость:", "вкл" if self.auto else "выкл")
+        elif cmd == "pulse":
+            self.pulse(words[1] if len(words) > 1 else "test")
+        return self.status()
+
+    def run(self):
+        try:
+            SOCK.unlink()
+        except OSError:
+            pass
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.bind(str(SOCK))
+        os.chmod(SOCK, 0o600)
+        s.listen(4)
+        s.settimeout(1.0)
+        log(f"yumi-light: датчик {'есть' if self.als else 'НЕ найден'}, автояркость {'вкл' if self.auto else 'выкл'}, "
+            f"пороги {self.c['dark_below']}/{self.c['bright_above']} лк, уровень {self.level} %")
+        nxt = 0.0
+        while True:
+            try:
+                conn, _ = s.accept()
+            except socket.timeout:
+                conn = None
+            if conn:
+                with conn:
+                    try:
+                        conn.settimeout(1.0)
+                        words = conn.recv(256).decode().split()
+                        conn.sendall(json.dumps(self.command(words)).encode())
+                    except OSError:
+                        pass
+            if time.monotonic() >= nxt:
+                nxt = time.monotonic() + 1.0
+                try:
+                    self.tick()
+                except Exception as e:   # служба не должна падать из-за одного сбоя чтения
+                    log("ошибка:", e)
+
+
+def ask(words, timeout=12.0):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    s.connect(str(SOCK))
+    s.sendall(" ".join(words).encode())
+    return json.loads(s.recv(1024).decode() or "{}")
+
+
+def main():
+    a = sys.argv[1:]
+    if not a or a[0] in ("-h", "--help", "help"):
+        print(__doc__)
+        return 0
+    if a[0] == "daemon":
+        Daemon().run()
+        return 0
+    if a[0] not in ("auto", "pulse", "status"):
+        print("использование: yumi-light daemon | auto on|off|toggle | pulse [вид] | status", file=sys.stderr)
+        return 2
+    try:
+        print(json.dumps(ask(a), ensure_ascii=False))
+        return 0
+    except OSError:
+        pass
+    # службы нет — отвечаем сами (вспышку и переключатель не теряем)
+    st = load_state()
+    if a[0] == "auto":
+        arg = a[1] if len(a) > 1 else "toggle"
+        st["auto"] = {"on": True, "off": False}.get(arg, not st.get("auto", True))
+        save_state(st)
+    elif a[0] == "pulse":
+        d = Daemon()
+        d.pulse(a[1] if len(a) > 1 else "test")
+    print(json.dumps({"auto": bool(st.get("auto", True)), "lux": read_int(als_path()) if als_path() else None,
+                      "kbd": round(kbd_raw() * 100 / MAX), "dark": None, "daemon": False}, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

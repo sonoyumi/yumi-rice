@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# yumi-awww-post — ExecStartPost демона обоев awww (yumi-awww.service.d/yumi-boot.conf, 16.10).
+# Обычно: дождаться демона и поставить текущие обои без перехода (как было в юните).
+# При загрузке (первые 60 с, экран ещё не заблокирован): на встроенном экране — финальный кадр загрузки
+# (~/.local/share/yumi/boot/frame-WxH.png, тот же, что у Plymouth и входа Quickshell), настоящие обои —
+# в фоне, когда появится экран блокировки (yumi-boot-wait-lock, не дольше 20 с).
+for _ in $(seq 50); do awww query >/dev/null 2>&1 && break; sleep 0.1; done
+wall=$(readlink -f "$HOME/.cache/yumi/theme/wall.set")
+up=$(cut -d. -f1 /proc/uptime)
+# встроенный экран — первый выход, чьё имя начинается с eDP (eDP-1, eDP-2…): «имя ширинаxвысота масштаб»;
+# его нет (настольный ПК) — кадр загрузки не нужен, сразу обои
+edp_info=$(hyprctl monitors -j 2>/dev/null | python3 -c 'import json,sys
+for m in json.load(sys.stdin):
+    if m["name"].startswith("eDP"): print(m["name"], "%dx%d" % (m["width"], m["height"]), round(m["scale"], 2)); break' 2>/dev/null)
+read -r edp frame want <<< "$edp_info"
+if (( up < 60 )) && [[ -n $edp && ! -e ${XDG_RUNTIME_DIR:-/tmp}/yumi-locked ]]; then
+    f=$HOME/.local/share/yumi/boot/frame-${frame:-2560x1600}.png
+    # 16.10: в первые мгновения awww видит у встроенного экрана не окончательный масштаб (снимок при загрузке: кадр
+    # крупнее в 1,05 раза) — дождаться, пока его масштаб совпадёт с Hyprland (не дольше 1 с), и положить кадр ещё раз через 0,5 с
+    for _ in $(seq 20); do
+        awww query 2>/dev/null | grep -q "$edp: .*scale: ${want:-1.6}\b" && break; sleep 0.05
+    done
+    [[ -f $f ]] && awww img -o "$edp" "$f" --resize crop --transition-type none
+    ( sleep 0.5; [[ -e ${XDG_RUNTIME_DIR:-/tmp}/yumi-locked ]] || awww img -o "$edp" "$f" --resize crop --transition-type none ) >/dev/null 2>&1 &
+    # проверка 16.10: снимок встроенного экрана с курсором сразу после кадра загрузки (сравнить с frame-*.png)
+    ( sleep 0.8; grim -c -o "$edp" "${XDG_RUNTIME_DIR:-/tmp}/yumi-boot-awww.png"; date +%s.%N > "${XDG_RUNTIME_DIR:-/tmp}/yumi-boot-awww.t" ) >/dev/null 2>&1 &
+    ( "$HOME/.local/bin/yumi-boot-wait-lock"; sleep 0.3
+      [[ -f $wall ]] && awww img "$wall" --transition-type none ) >/dev/null 2>&1 &
+    exit 0
+fi
+[[ -f $wall ]] && awww img "$wall" --transition-type none
+exit 0

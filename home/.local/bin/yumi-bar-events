@@ -4,6 +4,7 @@
 #   NetworkManager (nmcli monitor)     → RTMIN+16 Wi-Fi, RTMIN+10 VPN
 #   BlueZ (org.bluez)                  → RTMIN+17 Bluetooth
 #   power-profiles-daemon              → RTMIN+8  профиль питания
+# Параллельно те же пилюли обновляются в Quickshell: qs -c yumi ipc call bar refresh <имя> (без Quickshell — тихо пропускается).
 # Пачку событий (их бывает десяток за секунду) склеивает: сигнал уходит через 0.4 с тишины.
 # Запуск: служба yumi-bar-events.service. Таймеры в yumi.jsonc остаются как страховка (раз в 1–2 мин).
 # Откат: systemctl --user disable --now yumi-bar-events.service и вернуть interval в yumi.jsonc.
@@ -17,12 +18,15 @@ trap 'kill 0 2>/dev/null; rm -f "$fifo"' EXIT INT TERM
 { gdbus monitor --system --dest net.hadess.PowerProfiles 2>/dev/null | while read -r _; do echo "8"; done; } >"$fifo" &
 
 declare -A pending=()
+declare -A qsname=([8]=ppd [9]=workflow [10]=vpn [12]=top [14]=cover [15]=caffeine [16]=wifi [17]=bt [20]=updates)   # номер сигнала → имя модуля Quickshell
 exec 3<"$fifo"
 while true; do
     if read -r -t 0.4 sigs <&3; then
         for s in $sigs; do pending[$s]=1; done
     elif [ ${#pending[@]} -gt 0 ]; then
-        for s in "${!pending[@]}"; do pkill -RTMIN+"$s" -x waybar 2>/dev/null; done
+        for s in "${!pending[@]}"; do
+            [ -n "${qsname[$s]:-}" ] && qs -c yumi ipc call bar refresh "${qsname[$s]}" >/dev/null 2>&1
+        done
         pending=()
     fi
 done
