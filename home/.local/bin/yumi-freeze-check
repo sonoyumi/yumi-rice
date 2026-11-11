@@ -9,7 +9,7 @@ set -uo pipefail
 
 PINS=(linux-asahi linux-asahi-headers mesa vulkan-asahi libdrm fprintd libfprint asahi-audio speakersafetyd)
 # патченый Hyprland (yumi-hypr-freeze, 30.10.2026): пины + версия + .so
-HYPR_VER=0.56.2-4.2
+HYPR_VER=0.56.2-4.3
 HYPR_PINS=(hyprland aquamarine hyprutils hyprlang hyprgraphics hyprcursor hyprwire hyprland-guiutils hyprland-protocols hyprwayland-scanner hyprtoolkit hyprpm hyprlock hypridle xdg-desktop-portal-hyprland)
 HYPR_BAK=~/.local/src/yumi-hypr-freeze/hyprland-$HYPR_VER-files.tar.xz
 

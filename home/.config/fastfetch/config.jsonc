@@ -28,7 +28,7 @@ $1 — валики и рамка (38;2;125;125;125), $2 — иероглифы 
     { "type": "custom", "key": " ", "format": "\u001b[38;2;125;125;125m┊" },
 
     { "type": "custom", "format": "\u001b[38;2;125;125;125m──── system ────────────────────" },
-    { "type": "wm", "key": "系", "format": "Arch ARM · Yumi-Rice 3.0 · {pretty-name} {version}" },
+    { "type": "wm", "key": "系", "format": "Arch ARM · Yumi-Rice 3.1 · {pretty-name} {version}" },
     { "type": "command", "key": "核", "text": "r=$(uname -r); if [ -d /sys/module/apple_sep ]; then printf '%s · 指 Touch ID' \"$r\"; else printf '%s · 指 Touch ID off' \"$r\"; fi" },
     { "type": "packages", "key": "包", "format": "{pacman} pacman · {flatpak-all} flatpak" },
     { "type": "custom", "key": " ", "format": "" },
